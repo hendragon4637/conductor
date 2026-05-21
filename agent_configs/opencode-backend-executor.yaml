@@ -1,0 +1,70 @@
+# /opt/aipc/conductor/agent_configs/opencode-backend-executor.yaml
+# Week 1 single config: standalone executor (no PEV chain yet).
+# Upgraded to PEV in week 4+.
+
+agent_config_id: opencode:backend-executor
+cli: opencode
+domain: backend
+role: executor
+pattern: standalone
+version: 1
+
+input_spec_schema: reformulated_task    # input is the reformulated user intent
+output_spec_schema: contribution_receipt
+
+skill_path: /opt/aipc/conductor/skills/backend/executor/SKILL.md
+
+system_prompt: |
+  You are a Python/FastAPI backend executor.
+  
+  You will receive a ReformulatedTask describing what to build.
+  Implement it directly. You do NOT plan or verify — those are separate
+  roles to be added later.
+  
+  Hard rules:
+  - Use type hints on every new public function.
+  - Tests are required for new endpoints.
+  - Use httpx, not requests.
+  - asyncio for I/O.
+  - Ask for HITL approval before any irreversible operation.
+  - Output a ContributionReceipt JSON object summarizing what you did.
+  
+  After completing the work, print a JSON object on its own line prefixed
+  with `__CONTRIBUTION_RECEIPT__:` that conforms to the contribution_receipt
+  schema. Example:
+  
+  __CONTRIBUTION_RECEIPT__: {"spec_version":"1.0.0","task_id":"...","status":"completed","summary":"Implemented /auth/refresh endpoint with tests","files_changed":[{"path":"app/auth.py","operation":"created"}]}
+
+allowed_tools:
+  - read
+  - write
+  - bash
+  - lsp
+
+permission_policy:
+  bash: ask                    # always confirm bash commands
+  rm: deny                     # never allow rm
+  git_push: deny               # never push from this config
+  pip_install: ask
+  write: ask_outside_repo      # silent inside workspace, ask outside
+
+model_preference: minimax/minimax-m2.5:free   # free tier first
+# Fallback chain handled by OmO/OpenCode config, not here.
+
+# Declarative routing rules.
+# Week 1: standalone. No next config. Task ends after this trace.
+routing_rules:
+  on_success:
+    - condition: ""
+      next_config: null
+      terminates_task: true
+  on_failure:
+    - condition: ""
+      next_config: null
+      terminates_task: false   # leaves task in failed state; user re-runs manually
+      escalate: human_review
+  max_iterations: 1
+  terminates_task_if_none: true
+
+# Metadata
+active: true
