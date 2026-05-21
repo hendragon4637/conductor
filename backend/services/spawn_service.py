@@ -5,7 +5,9 @@ system_prompt, skill, env, and working dir injected.
 from __future__ import annotations
 import os
 import shlex
+import sqlite3
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -17,6 +19,7 @@ from backend.graph.graph import prepare_graph
 
 WORKSPACE_ROOT = Path(os.environ["WORKSPACE_ROOT"])
 TERMINAL_CMD = os.environ.get("TERMINAL_CMD", "gnome-terminal")
+OPENCODE_DB_PATH = Path(os.environ.get("OPENCODE_DB_PATH", "~/.local/share/opencode/opencode.db")).expanduser()
 
 
 # ──────────────────────── AGENTS.md injection ────────────────────────
@@ -101,16 +104,45 @@ def ensure_branch(repo_path: Path, branch: str, base: str = "main") -> None:
 
 def build_opencode_command(
     *,
-    cli_session_id: str,
     model_preference: Optional[str],
 ) -> str:
     """Construct the opencode command string."""
     parts = ["opencode"]
-    parts.extend(["--session", cli_session_id])
     if model_preference:
         parts.extend(["--model", model_preference])
     cmd = " ".join(shlex.quote(p) for p in parts)
     return cmd
+
+
+def discover_session_id(
+    *,
+    spawned_after: float,
+    retries: int = 6,
+    delay: float = 1.0,
+) -> Optional[str]:
+    """
+    Poll OpenCode's SQLite DB for a session created after `spawned_after`.
+    OpenCode creates the session row on startup, so we poll briefly.
+    Returns the session.id (e.g. 'ses_1bc5cb...') or None.
+    """
+    if not OPENCODE_DB_PATH.is_file():
+        return None
+    for attempt in range(retries):
+        try:
+            conn = sqlite3.connect(str(OPENCODE_DB_PATH))
+            cur = conn.execute(
+                "SELECT id FROM session WHERE time_created > ? ORDER BY time_created DESC LIMIT 1",
+                (int(spawned_after * 1000),),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                return row[0]
+        except sqlite3.Error:
+            pass
+        if attempt < retries - 1:
+            time.sleep(delay)
+    return None
 
 
 def spawn_terminal(
@@ -173,10 +205,10 @@ def spawn_for_task(
       2. Ensure repo + branch
       3. Build input_spec (or use provided)
       4. Invoke prepare_graph to create trace row
-      5. Allocate cli_session_id
-      6. Write AGENTS.md
-      7. Spawn terminal
-      8. Update trace row with cli_session_id
+      5. Write AGENTS.md
+      6. Spawn terminal (OpenCode creates its own session naturally)
+      7. Poll OpenCode DB to discover the real session.id
+      8. Update trace row with discovered cli_session_id
     Returns dict with trace_id, cli_session_id, repo_path.
     """
     # 1. Lookup
@@ -230,10 +262,7 @@ def spawn_for_task(
     if errs:
         raise RuntimeError(f"prepare failed: {errs}")
 
-    # 5. Allocate cli_session_id
-    cli_session_id = uuid.uuid4().hex
-
-    # 6. Write AGENTS.md
+    # 5. Write AGENTS.md
     write_agents_md(
         repo_path,
         project_system_prompt=project.get("system_prompt"),
@@ -241,25 +270,28 @@ def spawn_for_task(
         skill_path=config.get("skill_path"),
     )
 
-    # 7. Spawn
+    # 6. Spawn — OpenCode creates its own session with a ses_xxx id
     command = build_opencode_command(
-        cli_session_id=cli_session_id,
         model_preference=config.get("model_preference"),
     )
 
-    env = {
+    spawned_at = time.time()
+    title = f"[{project_id}] {branch} — {config['role']}"
+    spawn_terminal(cwd=repo_path, command=command, env={
         "AIPC_TRACE_ID": str(trace_id),
         "AIPC_TASK_ID": str(task_id),
         "AIPC_SESSION_ID": branch,
         "AIPC_PROJECT_ID": project_id,
         "AIPC_AGENT_CONFIG_ID": agent_config_id,
-        "AIPC_CLI_SESSION_ID": cli_session_id,
-    }
+    }, title=title)
 
-    title = f"[{project_id}] {branch} — {config['role']}"
-    spawn_terminal(cwd=repo_path, command=command, env=env, title=title)
+    # 7. Discover the real session.id from OpenCode's SQLite DB
+    cli_session_id = discover_session_id(spawned_after=spawned_at)
+    if not cli_session_id:
+        # Fallback: generate a placeholder — adapter can still glob by recency
+        cli_session_id = f"ses_{uuid.uuid4().hex}"
 
-    # 8. Update trace row
+    # 8. Update trace row with the discovered session id
     queries.update_trace_status(
         trace_id,
         status="running",
