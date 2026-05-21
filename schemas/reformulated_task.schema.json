@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aipc.local/schemas/reformulated_task.json",
+  "title": "ReformulatedTask",
+  "description": "Output of the reformulator stage; input to a planner or executor.",
+  "type": "object",
+  "required": ["spec_version", "task_id", "user_intent", "domain", "intent_type"],
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "task_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "user_intent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Original user-typed intent, unmodified"
+    },
+    "reformulated_intent": {
+      "type": "string",
+      "description": "Cleaned/clarified intent. May equal user_intent if no reformulation needed."
+    },
+    "domain": {
+      "type": "string",
+      "enum": ["backend", "frontend", "data-prep", "infra", "ui-design", "data-viz", "research", "finance", "legal", "content", "ad-hoc"]
+    },
+    "intent_type": {
+      "type": "string",
+      "enum": ["implement", "refactor", "debug", "review", "design", "research", "analyze", "draft", "test"]
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["clause_id", "text"],
+        "properties": {
+          "clause_id": {"type": "string"},
+          "text": {"type": "string"},
+          "severity": {"type": "string", "enum": ["k1", "k2", "k3", "k4", "k5"]}
+        }
+      }
+    },
+    "context_files": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Relative paths from project repo root"
+    },
+    "estimated_complexity": {
+      "type": "string",
+      "enum": ["trivial", "small", "medium", "large", "epic"]
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aipc.local/schemas/routing_rules.json",
+  "title": "RoutingRules",
+  "description": "Declarative routing for an agent_config. Read by LangGraph at trace completion.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "on_success": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/Rule"}
+    },
+    "on_failure": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/Rule"}
+    },
+    "max_iterations": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Hard cap on self-loops (e.g. designer-critic revision loops)"
+    },
+    "terminates_task_if_none": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true and no rule matches, mark task done."
+    }
+  },
+  "$defs": {
+    "Rule": {
+      "type": "object",
+      "required": ["next_config"],
+      "properties": {
+        "condition": {
+          "type": "string",
+          "description": "JSONPath-like or Python expression evaluated against the output_spec. Empty = unconditional."
+        },
+        "next_config": {
+          "type": ["string", "null"],
+          "description": "agent_config_id of next CLI to spawn, or null to terminate task."
+        },
+        "pass": {
+          "type": "string",
+          "enum": ["output_spec", "input_spec", "merged"],
+          "default": "output_spec",
+          "description": "What becomes the next trace's input_spec"
+        },
+        "terminates_task": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Only for on_failure: retry the SAME config up to N times before next rule"
+        },
+        "escalate": {
+          "type": "string",
+          "enum": ["human_review", "abandon", "escalate_severity"],
+          "description": "Special non-CLI next-step"
+        }
+      }
+    }
+  }
+}

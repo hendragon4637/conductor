@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aipc.local/schemas/contribution_receipt.json",
+  "title": "ContributionReceipt",
+  "description": "Output of the executor stage; final or input to a verifier.",
+  "type": "object",
+  "required": ["spec_version", "task_id", "status", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": {"type": "string", "const": "1.0.0"},
+    "task_id": {"type": "string", "format": "uuid"},
+    "based_on_spec_ref": {
+      "type": "string",
+      "description": "trace_id of the Plan or ReformulatedTask this derives from"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["completed", "partial", "failed", "blocked"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "operation"],
+        "properties": {
+          "path": {"type": "string"},
+          "operation": {"type": "string", "enum": ["created", "modified", "deleted"]},
+          "lines_added": {"type": "integer"},
+          "lines_removed": {"type": "integer"}
+        }
+      }
+    },
+    "commands_run": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "exit_code"],
+        "properties": {
+          "command": {"type": "string"},
+          "exit_code": {"type": "integer"},
+          "stdout_summary": {"type": "string"},
+          "stderr_summary": {"type": "string"}
+        }
+      }
+    },
+    "test_results": {
+      "type": "object",
+      "properties": {
+        "framework": {"type": "string"},
+        "passed": {"type": "integer"},
+        "failed": {"type": "integer"},
+        "skipped": {"type": "integer"},
+        "raw_output": {"type": "string"}
+      }
+    },
+    "clauses_addressed": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "clauses_skipped": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["clause_id", "reason"],
+        "properties": {
+          "clause_id": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "tokens_used": {"type": "integer"},
+    "cost_usd": {"type": "number"},
+    "blockers": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

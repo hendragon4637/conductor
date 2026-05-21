@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aipc.local/schemas/review_verdict.json",
+  "title": "ReviewVerdict",
+  "description": "Output of the verifier stage. Gate to mark task done.",
+  "type": "object",
+  "required": ["spec_version", "task_id", "verdict"],
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": {"type": "string", "const": "1.0.0"},
+    "task_id": {"type": "string", "format": "uuid"},
+    "based_on_spec_ref": {"type": "string"},
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail", "partial"]
+    },
+    "blocking_severity": {
+      "type": "string",
+      "enum": ["k1", "k2", "k3", "k4", "k5"]
+    },
+    "clauses_violated": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "clauses_unverifiable": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "actionable_feedback": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "checks_performed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "passed"],
+        "properties": {
+          "check": {"type": "string"},
+          "passed": {"type": "boolean"},
+          "detail": {"type": "string"}
+        }
+      }
+    }
+  }
+}

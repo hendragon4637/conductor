@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aipc.local/schemas/plan.json",
+  "title": "Plan",
+  "description": "Output of the planner stage; input to an executor.",
+  "type": "object",
+  "required": ["spec_version", "task_id", "domain", "steps", "success_criteria"],
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": {"type": "string", "const": "1.0.0"},
+    "task_id": {"type": "string", "format": "uuid"},
+    "based_on_spec_ref": {
+      "type": "string",
+      "description": "trace_id of the ReformulatedTask this plan derives from"
+    },
+    "domain": {"type": "string"},
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/PlanStep"
+      }
+    },
+    "success_criteria": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1
+    },
+    "constraints": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "estimated_tokens": {"type": "integer", "minimum": 0},
+    "estimated_cost_usd": {"type": "number", "minimum": 0}
+  },
+  "$defs": {
+    "PlanStep": {
+      "type": "object",
+      "required": ["step_id", "description"],
+      "properties": {
+        "step_id": {"type": "string"},
+        "description": {"type": "string"},
+        "tools_required": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "expected_output": {
+          "type": "object",
+          "description": "Schema or description of the artifact this step produces"
+        },
+        "rollback_on_failure": {"type": "string"},
+        "depends_on": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "step_ids this depends on"
+        }
+      }
+    }
+  }
+}
