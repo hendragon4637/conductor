@@ -42,6 +42,8 @@ def build_terminal_title(
 
 # ──────────────────────── AGENTS.md injection ────────────────────────
 
+# TODO (week 4): also inject memory_service.assemble_for_spawn(...) here.
+
 def write_agents_md(
     repo_path: Path,
     *,
