@@ -369,6 +369,13 @@ def spawn_for_task(
         cli_session_id=cli_session_id,
     )
 
+    # Lifecycle event: trace was spawned
+    try:
+        from backend.services.hook_dispatcher import dispatch
+        dispatch("trace.spawned", trace_id)
+    except Exception:
+        pass
+
     with queries.conn() as c, c.cursor() as cur:
         cur.execute(
             "UPDATE tasks SET status = 'in_progress' WHERE task_id = %s AND status = 'open'",

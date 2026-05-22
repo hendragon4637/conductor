@@ -54,6 +54,13 @@ def run_for_trace(trace_id: UUID) -> dict:
     except Exception as e:
         summary["errors"].append(f"judge failed: {e}")
 
+    # Lifecycle event: trace was scored
+    try:
+        from backend.services.hook_dispatcher import dispatch
+        dispatch("trace.scored", trace_id)
+    except Exception:
+        pass
+
     return summary
 
 

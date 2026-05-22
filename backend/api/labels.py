@@ -28,4 +28,12 @@ async def label_trace(trace_id: UUID, req: LabelRequest):
         if not row:
             raise HTTPException(status_code=404)
         c.commit()
-        return row
+
+    # Lifecycle event: trace was labeled
+    try:
+        from backend.services.hook_dispatcher import dispatch
+        dispatch("trace.labeled", trace_id)
+    except Exception:
+        pass
+
+    return row

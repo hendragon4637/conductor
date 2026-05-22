@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '../api';
 import type { Task, TraceSummary, AgentConfig } from '../api';
 import { navigate } from '../App';
@@ -13,6 +13,48 @@ export function TasksView({ project_id, session_id }: Props) {
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [harnessFilter, setHarnessFilter] = useState<string>('all');
+  const [allTraces, setAllTraces] = useState<TraceSummary[]>([]);
+
+  const reloadAllTraces = useCallback(() => {
+    if (!tasks) return;
+    Promise.all(tasks.map((t) => api.listTraces(t.task_id)))
+      .then((arr) => setAllTraces(arr.flat()))
+      .catch(() => setAllTraces([]));
+  }, [tasks]);
+
+  useEffect(reloadAllTraces, [reloadAllTraces]);
+  useEffect(() => {
+    const id = setInterval(reloadAllTraces, 10_000);
+    return () => clearInterval(id);
+  }, [reloadAllTraces]);
+
+  const harnessStats = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const tr of allTraces) {
+      m.set(tr.harness, (m.get(tr.harness) || 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  }, [allTraces]);
+
+  const taskHarnesses = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const tr of allTraces) {
+      if (!m.has(tr.task_id)) m.set(tr.task_id, new Set());
+      m.get(tr.task_id)!.add(tr.harness);
+    }
+    return m;
+  }, [allTraces]);
+
+  const filteredTasks = useMemo(() => {
+    if (!tasks) return null;
+    if (harnessFilter === 'all') return tasks;
+    return tasks.filter((t) => {
+      const set = taskHarnesses.get(t.task_id);
+      if (!set) return false;
+      return set.has(harnessFilter);
+    });
+  }, [tasks, harnessFilter, taskHarnesses]);
 
   const reload = useCallback(() => {
     api.listTasks(project_id, session_id).then(setTasks).catch((e) => setErr(String(e)));
@@ -57,19 +99,61 @@ export function TasksView({ project_id, session_id }: Props) {
         />
       )}
 
+      {allTraces.length > 0 && (
+        <div className="filter-strip">
+          <span className="filter-strip-label">Harness</span>
+          <select
+            className="select"
+            value={harnessFilter}
+            onChange={(e) => setHarnessFilter(e.target.value)}
+          >
+            <option value="all">all</option>
+            {harnessStats.map(([h]) => (
+              <option key={h} value={h}>{h}</option>
+            ))}
+          </select>
+          <span className="filter-strip-count">
+            showing {filteredTasks?.length ?? 0} of {tasks?.length ?? 0} tasks
+          </span>
+          <div className="filter-strip-stats">
+            <span className="filter-strip-label">stats</span>
+            {harnessStats.map(([h, n]) => (
+              <span
+                key={h}
+                className={`harness-pill ${harnessFilter === h ? 'active' : ''}`}
+                onClick={() => setHarnessFilter(h)}
+                style={{ cursor: 'pointer' }}
+              >
+                {h} <span className="count">{n}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {tasks === null ? (
         <p className="text-muted">Loading…</p>
-      ) : tasks.length === 0 && !showForm ? (
+      ) : (filteredTasks?.length ?? 0) === 0 && !showForm ? (
         <div className="empty-state">
-          <h3>No tasks yet</h3>
-          <p>Create your first task to start the executor.</p>
-          <button className="btn btn-primary" onClick={() => setShowForm(true)}>
-            + New task
-          </button>
+          <h3>
+            {harnessFilter === 'all'
+              ? 'No tasks yet'
+              : `No tasks for harness "${harnessFilter}"`}
+          </h3>
+          <p>
+            {harnessFilter === 'all'
+              ? 'Create your first task to start the executor.'
+              : 'Try a different harness or "all".'}
+          </p>
+          {harnessFilter === 'all' && (
+            <button className="btn btn-primary" onClick={() => setShowForm(true)}>
+              + New task
+            </button>
+          )}
         </div>
       ) : (
         <div className="task-list">
-          {tasks?.map((t) => (
+          {filteredTasks?.map((t) => (
             <TaskCard
               key={t.task_id}
               task={t}
@@ -210,6 +294,7 @@ function TaskCard({
               key={tr.trace_id}
               href={`#/p/${project_id}/s/${encodeURIComponent(session_id)}/t/${tr.trace_id}`}
               className={`chip ${traceChipClass(tr)}`}
+              title={`harness: ${tr.harness}\nstatus: ${tr.status}`}
             >
               <span>{tr.role}</span>
               <span>{traceStatusGlyph(tr)}</span>

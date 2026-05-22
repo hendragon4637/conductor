@@ -24,6 +24,8 @@ def sweep() -> dict:
     summary = {"abandoned": 0, "failed_no_receipt": 0, "failed_no_session": 0}
 
     with queries.conn() as c, c.cursor() as cur:
+        from backend.services.hook_dispatcher import dispatch
+
         # 1. No observations, very old -> abandoned
         cur.execute(
             f"""UPDATE traces
@@ -35,7 +37,13 @@ def sweep() -> dict:
                    AND started_at < now() - INTERVAL '{THRESHOLDS['no_obs_timeout_hours']} hours'
                  RETURNING trace_id""",
         )
-        summary["abandoned"] = len(cur.fetchall())
+        abandoned_ids = [r["trace_id"] for r in cur.fetchall()]
+        summary["abandoned"] = len(abandoned_ids)
+        for tid in abandoned_ids:
+            try:
+                dispatch("trace.abandoned", tid)
+            except Exception:
+                pass
 
         # 2. Has observations, old, no output_spec -> cli_closed (failed)
         cur.execute(
@@ -49,7 +57,13 @@ def sweep() -> dict:
                    AND started_at < now() - INTERVAL '{THRESHOLDS['with_obs_timeout_hours']} hours'
                  RETURNING trace_id""",
         )
-        summary["failed_no_receipt"] = len(cur.fetchall())
+        failed_ids = [r["trace_id"] for r in cur.fetchall()]
+        summary["failed_no_receipt"] = len(failed_ids)
+        for tid in failed_ids:
+            try:
+                dispatch("trace.failed", tid)
+            except Exception:
+                pass
 
         # 3. No session id even after a while -> spawn problem
         cur.execute(
@@ -62,7 +76,13 @@ def sweep() -> dict:
                    AND started_at < now() - INTERVAL '{THRESHOLDS['no_session_id_timeout_minutes']} minutes'
                  RETURNING trace_id""",
         )
-        summary["failed_no_session"] = len(cur.fetchall())
+        no_session_ids = [r["trace_id"] for r in cur.fetchall()]
+        summary["failed_no_session"] = len(no_session_ids)
+        for tid in no_session_ids:
+            try:
+                dispatch("trace.failed", tid)
+            except Exception:
+                pass
 
         c.commit()
 

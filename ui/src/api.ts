@@ -46,6 +46,7 @@ export interface TraceSummary {
   session_id: string;
   project_id: string;
   agent_config_id: string;
+  harness: string;
   role: string;
   status: string;
   manual_label: string | null;
@@ -101,6 +102,7 @@ export interface Score {
 export interface AgentConfig {
   agent_config_id: string;
   cli: string;
+  harness: string;
   domain: string;
   role: string;
   pattern: string;

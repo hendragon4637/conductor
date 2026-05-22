@@ -87,6 +87,15 @@ def record_completion(state: ConductorState) -> ConductorState:
         ended_reason=state.ended_reason or ("completed" if final_status == "complete" else "spec_invalid"),
     )
     state.status = final_status
+
+    # Lifecycle event: completion (success or failure)
+    try:
+        from backend.services.hook_dispatcher import dispatch
+        event_name = "trace.completed" if final_status == "complete" else "trace.failed"
+        dispatch(event_name, state.trace_id)
+    except Exception:
+        pass
+
     return state
 
 
