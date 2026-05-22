@@ -16,6 +16,7 @@ class SpawnRequest(BaseModel):
     agent_config_id: str
     input_spec: Optional[dict] = None
     preceding_trace_id: Optional[UUID] = None
+    initial_input: Optional[str] = None
 
 
 class SpawnResponse(BaseModel):
@@ -33,6 +34,7 @@ async def spawn(req: SpawnRequest):
             agent_config_id=req.agent_config_id,
             input_spec=req.input_spec,
             preceding_trace_id=req.preceding_trace_id,
+            initial_input=req.initial_input,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

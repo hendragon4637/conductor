@@ -1,30 +1,43 @@
 import { useEffect, useState } from 'react';
-import { ProjectsList } from './views/ProjectsList';
-import { SessionsList } from './views/SessionsList';
-import { TasksList } from './views/TasksList';
-import { TraceDetail } from './views/TraceDetail';
+import { Header } from './components/Header';
+import { Sidebar } from './components/Sidebar';
+import { TasksView } from './views/TasksView';
+import { WelcomeView } from './views/WelcomeView';
 import { AgentConfigsList } from './views/AgentConfigsList';
+import { TraceDrawer } from './views/TraceDrawer';
 
-type Route =
-  | { name: 'projects' }
-  | { name: 'sessions'; project_id: string }
-  | { name: 'tasks'; project_id: string; session_id: string }
-  | { name: 'trace'; trace_id: string }
+// ───────────────────────────────── routing ─────────────────────────────────
+
+export type Route =
+  | { name: 'welcome'; project_id?: string }
+  | { name: 'tasks'; project_id: string; session_id: string; trace_id?: string }
   | { name: 'configs' };
 
 function parseHash(): Route {
   const h = window.location.hash.replace(/^#\/?/, '');
-  if (!h) return { name: 'projects' };
+  if (!h) return { name: 'welcome' };
   if (h === 'configs') return { name: 'configs' };
-  if (h.startsWith('trace/')) return { name: 'trace', trace_id: h.slice('trace/'.length) };
   const parts = h.split('/');
-  if (parts[0] === 'p' && parts[1] && !parts[2]) return { name: 'sessions', project_id: parts[1] };
+  if (parts[0] === 'p' && parts[1] && !parts[2]) return { name: 'welcome', project_id: parts[1] };
   if (parts[0] === 'p' && parts[1] && parts[2] === 's' && parts[3]) {
-    const session_id = decodeURIComponent(parts.slice(3).join('/'));
-    return { name: 'tasks', project_id: parts[1], session_id };
+    const tail = parts.slice(3).join('/');
+    const tIdx = tail.indexOf('/t/');
+    let session_id = tail, trace_id: string | undefined;
+    if (tIdx !== -1) {
+      session_id = tail.slice(0, tIdx);
+      trace_id = tail.slice(tIdx + 3);
+    }
+    session_id = decodeURIComponent(session_id);
+    return { name: 'tasks', project_id: parts[1], session_id, trace_id };
   }
-  return { name: 'projects' };
+  return { name: 'welcome' };
 }
+
+export function navigate(hash: string) {
+  if (window.location.hash !== hash) window.location.hash = hash;
+}
+
+// ───────────────────────────────── App ─────────────────────────────────
 
 export default function App() {
   const [route, setRoute] = useState<Route>(parseHash());
@@ -35,40 +48,40 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  return (
-    <div style={{ fontFamily: 'ui-monospace, monospace', maxWidth: 1100, margin: '0 auto', padding: '16px' }}>
-      <Header route={route} />
-      <hr />
-      <main>
-        {route.name === 'projects' && <ProjectsList />}
-        {route.name === 'sessions' && <SessionsList project_id={route.project_id} />}
-        {route.name === 'tasks' && <TasksList project_id={route.project_id} session_id={route.session_id} />}
-        {route.name === 'trace' && <TraceDetail trace_id={route.trace_id} />}
-        {route.name === 'configs' && <AgentConfigsList />}
-      </main>
-    </div>
-  );
-}
+  const activeProject =
+    route.name === 'welcome' ? route.project_id :
+    route.name === 'tasks' ? route.project_id :
+    undefined;
+  const activeSession = route.name === 'tasks' ? route.session_id : undefined;
+  const activeTrace = route.name === 'tasks' ? route.trace_id : undefined;
 
-function Header({ route }: { route: Route }) {
+  const drawerOpen = Boolean(activeTrace);
+
   return (
-    <header>
-      <h1 style={{ margin: 0 }}>AIPC Conductor</h1>
-      <nav style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-        <a href="#/">projects</a>
-        {' › '}
-        {route.name === 'sessions' && <span>{route.project_id}</span>}
-        {route.name === 'tasks' && (
-          <>
-            <a href={`#/p/${route.project_id}`}>{route.project_id}</a> {' › '}
-            <span>{route.session_id}</span>
-          </>
+    <div className="app">
+      <Header route={route} />
+      <div className="shell">
+        <Sidebar
+          activeProject={activeProject}
+          activeSession={activeSession}
+        />
+        <main className={`main-pane${drawerOpen ? ' with-drawer' : ''}`}>
+          {route.name === 'welcome' && <WelcomeView project_id={route.project_id} />}
+          {route.name === 'tasks' && (
+            <TasksView
+              project_id={route.project_id}
+              session_id={route.session_id}
+            />
+          )}
+          {route.name === 'configs' && <AgentConfigsList />}
+        </main>
+        {drawerOpen && route.name === 'tasks' && (
+          <TraceDrawer
+            trace_id={activeTrace!}
+            onClose={() => navigate(`#/p/${route.project_id}/s/${encodeURIComponent(route.session_id)}`)}
+          />
         )}
-        {route.name === 'trace' && <span>trace {route.trace_id.slice(0, 8)}…</span>}
-        <span style={{ float: 'right' }}>
-          <a href="#/configs">agent configs</a>
-        </span>
-      </nav>
-    </header>
+      </div>
+    </div>
   );
 }

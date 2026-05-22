@@ -128,7 +128,7 @@ export const api = {
 
   listConfigs: () => http<AgentConfig[]>('/agent_configs'),
 
-  spawn: (p: { task_id: string; agent_config_id: string; preceding_trace_id?: string }) =>
+  spawn: (p: { task_id: string; agent_config_id: string; preceding_trace_id?: string; initial_input?: string }) =>
     http<{ trace_id: string; cli_session_id: string; repo_path: string; branch: string }>(
       '/spawn', { method: 'POST', body: JSON.stringify(p) }
     ),

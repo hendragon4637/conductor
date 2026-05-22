@@ -22,6 +22,24 @@ TERMINAL_CMD = os.environ.get("TERMINAL_CMD", "gnome-terminal")
 OPENCODE_DB_PATH = Path(os.environ.get("OPENCODE_DB_PATH", "~/.local/share/opencode/opencode.db")).expanduser()
 
 
+# ──────────────────────── title helpers ────────────────────────
+
+def build_terminal_title(
+    *,
+    project_id: str,
+    branch: str,
+    role: str,
+    trace_id: str,
+) -> str:
+    """Produce a clear identifier shown in the terminal window/tab title bar.
+
+    Format: [AIPC] <project>/<branch_sanitized> :: <role> #<short_trace>
+    """
+    safe_branch = branch.replace("/", "~")
+    short = (trace_id or "")[:8]
+    return f"[AIPC] {project_id}/{safe_branch} :: {role} #{short}"
+
+
 # ──────────────────────── AGENTS.md injection ────────────────────────
 
 def write_agents_md(
@@ -105,11 +123,19 @@ def ensure_branch(repo_path: Path, branch: str, base: str = "main") -> None:
 def build_opencode_command(
     *,
     model_preference: Optional[str],
+    initial_input: Optional[str] = None,
 ) -> str:
-    """Construct the opencode command string."""
+    """Construct the opencode command string.
+
+    If *initial_input* is provided, pass it as ``--prompt`` so OpenCode
+    begins with that prompt already entered — the user can still edit it
+    before sending.
+    """
     parts = ["opencode"]
     if model_preference:
         parts.extend(["--model", model_preference])
+    if initial_input:
+        parts.extend(["--prompt", initial_input])
     cmd = " ".join(shlex.quote(p) for p in parts)
     return cmd
 
@@ -154,12 +180,32 @@ def spawn_terminal(
 ) -> subprocess.Popen:
     """
     Open a native terminal window running `command` in `cwd` with `env`.
-    Backgrounded — does NOT wait.
+    Sets the title both via the `--title` flag AND via ANSI escape sequences
+    so dynamic-title PS1 doesn't overwrite it.
     """
+
+    title_escape_safe = title.replace("\\", "\\\\").replace("'", "'\\''")
+
+    init_block = (
+        f"printf '\\033]0;%s\\007' '{title_escape_safe}'; "
+        f"printf '\\033]2;%s\\007' '{title_escape_safe}'; "
+        f"export PROMPT_COMMAND=\"printf '\\033]0;%s\\007' '{title_escape_safe}'; "
+        f"printf '\\033]2;%s\\007' '{title_escape_safe}'\"; "
+    )
+
+    end_marker_title = f"[AIPC ENDED] {title_escape_safe}"
+    end_block = (
+        f"printf '\\033]0;%s\\007' '{end_marker_title}'; "
+        f"printf '\\033]2;%s\\007' '{end_marker_title}'; "
+    )
+
     shell_script = (
         f"cd {shlex.quote(str(cwd))} && "
+        f"{init_block}"
         f"{command}; "
-        "echo; echo '--- session ended ---'; exec bash"
+        f"echo; echo '--- session ended ---'; "
+        f"{end_block}"
+        "exec bash"
     )
 
     full_env = os.environ.copy()
@@ -198,17 +244,18 @@ def spawn_for_task(
     agent_config_id: str,
     input_spec: Optional[dict] = None,
     preceding_trace_id: Optional[UUID] = None,
+    initial_input: Optional[str] = None,
 ) -> dict:
     """
     Full spawn flow:
-      1. Lookup task, project, session, agent_config
-      2. Ensure repo + branch
-      3. Build input_spec (or use provided)
-      4. Invoke prepare_graph to create trace row
-      5. Write AGENTS.md
-      6. Spawn terminal (OpenCode creates its own session naturally)
-      7. Poll OpenCode DB to discover the real session.id
-      8. Update trace row with discovered cli_session_id
+       1. Lookup task, project, session, agent_config
+       2. Ensure repo + branch
+       3. Build input_spec (or use provided)
+       4. Invoke prepare_graph to create trace row
+       5. Write AGENTS.md
+       6. Spawn terminal — optionally with --prompt initial_input
+       7. Poll OpenCode DB to discover the real session.id
+       8. Update trace row with discovered cli_session_id
     Returns dict with trace_id, cli_session_id, repo_path.
     """
     # 1. Lookup
@@ -273,10 +320,16 @@ def spawn_for_task(
     # 6. Spawn — OpenCode creates its own session with a ses_xxx id
     command = build_opencode_command(
         model_preference=config.get("model_preference"),
+        initial_input=initial_input,
     )
 
     spawned_at = time.time()
-    title = f"[{project_id}] {branch} — {config['role']}"
+    title = build_terminal_title(
+        project_id=project_id,
+        branch=branch,
+        role=config["role"],
+        trace_id=str(trace_id),
+    )
     spawn_terminal(cwd=repo_path, command=command, env={
         "AIPC_TRACE_ID": str(trace_id),
         "AIPC_TASK_ID": str(task_id),
