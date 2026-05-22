@@ -1,0 +1,23 @@
+# Pipeline pattern — strict linear chain.
+# Example: PEV (Planner -> Executor -> Verifier).
+# This file shows the PLANNER config; the executor and verifier each have their own.
+
+agent_config_id: example:backend-planner
+harness: example
+domain: backend
+role: planner
+pattern: pipeline
+
+routing_rules:
+  pattern_hint: pipeline
+  on_success:
+    - next_config: example:backend-executor
+      pass: output_spec
+  on_failure:
+    - next_config: example:backend-planner
+      max_retries: 1
+    - next_config: null
+      escalate: human_review
+
+# The executor would similarly route to example:backend-verifier on success.
+# The verifier routes to null (terminates_task: true) on success.

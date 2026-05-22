@@ -1,0 +1,17 @@
+# Standalone pattern — one CLI invocation terminates the task.
+# Example: a one-shot executor with no plan / verify stages.
+
+agent_config_id: example:domain-executor
+harness: example
+domain: example
+role: executor
+pattern: standalone
+
+routing_rules:
+  pattern_hint: standalone
+  on_success:
+    - next_config: null
+      terminates_task: true
+  on_failure:
+    - next_config: null
+      escalate: human_review

@@ -6,6 +6,11 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "pattern_hint": {
+      "type": "string",
+      "description": "Optional: documents the canonical pattern this rule implements. Informational only.",
+      "enum": ["standalone", "pipeline", "supervisor-worker", "fan-out-fan-in", "critic-verifier", "reflection", "custom"]
+    },
     "on_success": {
       "type": "array",
       "items": {"$ref": "#/$defs/Rule"}

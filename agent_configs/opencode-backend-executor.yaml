@@ -66,6 +66,7 @@ model_preference: minimax/minimax-m2.5:free   # free tier first
 # Declarative routing rules.
 # Week 1: standalone. No next config. Task ends after this trace.
 routing_rules:
+  pattern_hint: standalone
   on_success:
     - condition: ""
       next_config: null

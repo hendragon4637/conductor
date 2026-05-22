@@ -1,0 +1,23 @@
+# Critic-Verifier — producer drafts; critic reviews; loop until approved.
+
+agent_config_id: example:ui-designer
+harness: example
+domain: ui-design
+role: designer
+pattern: critic-verifier
+
+routing_rules:
+  pattern_hint: critic-verifier
+  max_iterations: 3
+  on_success:
+    - next_config: example:ui-critic
+      pass: output_spec
+
+# And the critic routes back to designer on rejection:
+#   on_success:
+#     - condition: "output_spec.verdict == 'approved'"
+#       next_config: null
+#       terminates_task: true
+#     - condition: "output_spec.verdict == 'rejected'"
+#       next_config: example:ui-designer
+#       pass: output_spec

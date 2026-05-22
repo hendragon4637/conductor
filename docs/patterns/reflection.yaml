@@ -1,0 +1,17 @@
+# Reflection — single agent re-runs itself with its own critique.
+
+agent_config_id: example:reflexive-coder
+harness: example
+domain: backend
+role: actor
+pattern: reflection
+
+routing_rules:
+  pattern_hint: reflection
+  max_iterations: 5
+  on_failure:
+    - next_config: example:reflexive-coder    # self-loop
+      pass: output_spec                       # uses its own previous output as new input
+      max_retries: 4
+    - next_config: null
+      escalate: human_review

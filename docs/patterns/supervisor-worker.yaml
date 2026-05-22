@@ -1,0 +1,25 @@
+# Supervisor-Worker pattern — supervisor decomposes a task, fans out to workers,
+# aggregates results when all workers report back.
+# In Conductor terms: the supervisor trace creates child task_labels for each
+# subtask and waits for them all to terminate before its own completion.
+#
+# NOTE: True parallel fan-out requires task_group coordination -- not implemented
+# in week 3. This YAML is reference for week 5+.
+
+agent_config_id: example:research-supervisor
+harness: example
+domain: research
+role: supervisor
+pattern: supervisor-worker
+
+routing_rules:
+  pattern_hint: supervisor-worker
+  on_success:
+    # On supervisor success, it has emitted N child task specs.
+    # The orchestrator (week 5+) will spawn N worker traces.
+    # For now this is a documentation example.
+    - next_config: example:research-aggregator
+      pass: output_spec
+  on_failure:
+    - next_config: null
+      escalate: human_review

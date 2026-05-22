@@ -1,0 +1,16 @@
+# Fan-out-Fan-in — same task done by N workers in parallel; aggregator merges.
+# Useful for consensus / model comparison.
+
+agent_config_id: example:dispatcher
+harness: example
+domain: any
+role: dispatcher
+pattern: fan-out-fan-in
+
+routing_rules:
+  pattern_hint: fan-out-fan-in
+  on_success:
+    # Dispatcher emits N copies of the same spec; orchestrator (week 5+) fans them out.
+    - next_config: example:aggregator
+      pass: merged   # waits for all parallel children, merges into one input
+  max_iterations: 1
