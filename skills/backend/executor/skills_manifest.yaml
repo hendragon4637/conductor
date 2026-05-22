@@ -1,0 +1,30 @@
+skill_id: backend.executor
+version: 0.0.1
+title: Backend Executor
+description: Python/FastAPI backend executor -- week-1 stub, to be ratcheted.
+content_path: SKILL.md
+compatible_harnesses:
+- opencode
+compatible_domains:
+- backend
+compatible_roles:
+- executor
+content_hash: 1b4d1ec81426cecca629bd42ba4fbb82a4efc71dae87251553a7037af90d4afd
+authored_by: human
+based_on: null
+golden_set_path: golden/
+validated_at: null
+validated_with:
+  harness: opencode
+  model: deepseek/deepseek-v4-flash:free
+  pass_rate: null
+status: draft
+notes: 'Week-1 stub authored manually. To be ratcheted from failure modes in the
+
+  30-task golden set. Receipt marker convention assumes OpenCode adapter
+
+  semantics (extract_receipt parses `__CONTRIBUTION_RECEIPT__:` markers).
+
+  '
+created_at: '2026-05-21T00:00:00Z'
+updated_at: '2026-05-21T00:00:00Z'

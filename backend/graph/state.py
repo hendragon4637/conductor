@@ -26,6 +26,8 @@ class ConductorState(BaseModel):
     status: str = "pending"      # pending|spawned|complete|failed
     skill_snapshot_hash: Optional[str] = None
     skill_path: Optional[str] = None
+    skill_id: Optional[str] = None
+    skill_version: Optional[str] = None
     ended_reason: Optional[str] = None
 
     # routing decision (set by route_next node)

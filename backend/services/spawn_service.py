@@ -282,6 +282,20 @@ def spawn_for_task(
     repo_path = ensure_repo(project_id)
     ensure_branch(repo_path, branch)
 
+    # Look up the skill manifest for additional metadata
+    from backend.services import skills_service
+    skill_meta = None
+    skill_path = config.get("skill_path")
+    if skill_path:
+        manifest_p = Path(skill_path).parent / "skills_manifest.yaml"
+        if manifest_p.is_file():
+            for s in skills_service.discover_skills():
+                if Path(s["manifest_path"]) == manifest_p:
+                    skill_meta = s
+                    break
+    skill_id = skill_meta.get("skill_id") if skill_meta else None
+    skill_version = skill_meta.get("version") if skill_meta else None
+
     # 3. Build input_spec if not provided
     if input_spec is None:
         input_spec = {
@@ -300,6 +314,8 @@ def spawn_for_task(
         agent_config_id=agent_config_id,
         input_spec=input_spec,
         preceding_trace_id=preceding_trace_id,
+        skill_id=skill_id,
+        skill_version=skill_version,
     )
     result = prepare_graph.invoke(state)
     if isinstance(result, dict):

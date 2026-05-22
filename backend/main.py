@@ -14,6 +14,7 @@ from backend.api import (
     spawn as spawn_api,
     labels as labels_api,
     memory as memory_api,
+    skills as skills_api,
 )
 
 app = FastAPI(title="AIPC Conductor", version="0.0.1")
@@ -40,3 +41,4 @@ app.include_router(configs_api.router)
 app.include_router(spawn_api.router)
 app.include_router(labels_api.router)
 app.include_router(memory_api.router)
+app.include_router(skills_api.router)

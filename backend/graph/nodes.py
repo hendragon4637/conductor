@@ -42,6 +42,8 @@ def prepare_trace(state: ConductorState) -> ConductorState:
         input_spec=state.input_spec,
         skill_path=skill_path,
         skill_snapshot_hash=skill_hash,
+        skill_id=state.skill_id,
+        skill_version=state.skill_version,
         preceding_trace_id=state.preceding_trace_id,
     )
 

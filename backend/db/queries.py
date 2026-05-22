@@ -54,15 +54,19 @@ def insert_trace(
     input_spec: dict[str, Any],
     skill_path: Optional[str],
     skill_snapshot_hash: Optional[str],
+    skill_id: Optional[str] = None,
+    skill_version: Optional[str] = None,
     preceding_trace_id: Optional[UUID] = None,
 ) -> UUID:
     sql = """
     INSERT INTO traces (
       task_id, agent_config_id, role, cli, harness, input_spec,
-      skill_path, skill_snapshot_hash, preceding_trace_id, status
+      skill_path, skill_snapshot_hash, skill_id, skill_version,
+      preceding_trace_id, status
     ) VALUES (
       %s, %s, %s, %s, %s, %s::jsonb,
-      %s, %s, %s, 'pending'
+      %s, %s, %s, %s,
+      %s, 'pending'
     )
     RETURNING trace_id;
     """
@@ -79,6 +83,8 @@ def insert_trace(
                 json.dumps(input_spec),
                 skill_path,
                 skill_snapshot_hash,
+                skill_id,
+                skill_version,
                 str(preceding_trace_id) if preceding_trace_id else None,
             ),
         )

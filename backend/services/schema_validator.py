@@ -15,6 +15,7 @@ SCHEMA_FILES = {
     "contribution_receipt":"contribution_receipt.schema.json",
     "review_verdict":      "review_verdict.schema.json",
     "routing_rules":       "routing_rules.schema.json",
+    "skills_manifest":     "skills_manifest.schema.json",
 }
 
 

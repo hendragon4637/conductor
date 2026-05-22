@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aipc.local/schemas/skills_manifest.json",
+  "title": "SkillsManifest",
+  "type": "object",
+  "required": ["skill_id", "version", "title", "content_path", "compatible_harnesses"],
+  "additionalProperties": false,
+  "properties": {
+    "skill_id":            {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*[a-z0-9]$"},
+    "version":             {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+    "title":               {"type": "string"},
+    "description":         {"type": "string"},
+    "content_path":        {"type": "string"},
+    "compatible_harnesses":{"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "compatible_domains":  {"type": "array", "items": {"type": "string"}},
+    "compatible_roles":    {"type": "array", "items": {"type": "string"}},
+    "content_hash":        {"type": ["string", "null"]},
+    "authored_by":         {"type": "string", "enum": ["human", "hermes_cko", "ratchet", "imported"]},
+    "based_on":            {"type": ["string", "null"]},
+    "golden_set_path":     {"type": ["string", "null"]},
+    "validated_at":        {"type": ["string", "null"]},
+    "validated_with": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {"type": ["string", "null"]},
+        "model":   {"type": ["string", "null"]},
+        "pass_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    },
+    "status":              {"type": "string", "enum": ["draft", "active", "deprecated"]},
+    "notes":               {"type": "string"},
+    "created_at":          {"type": "string"},
+    "updated_at":          {"type": "string"}
+  }
+}
