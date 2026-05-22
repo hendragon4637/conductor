@@ -41,14 +41,16 @@ def upsert_config(conn: psycopg.Connection, cfg: dict) -> None:
 
     sql = """
     INSERT INTO agent_configs (
-      agent_config_id, cli, domain, role, pattern,
+      agent_config_id, cli, harness, harness_capabilities,
+      domain, role, pattern,
       input_spec_schema, output_spec_schema,
       routing_rules,
       skill_path, system_prompt, allowed_tools, permission_policy,
       model_preference, active, version
     )
     VALUES (
-      %(agent_config_id)s, %(cli)s, %(domain)s, %(role)s, %(pattern)s,
+      %(agent_config_id)s, %(cli)s, %(harness)s, %(harness_capabilities)s::jsonb,
+      %(domain)s, %(role)s, %(pattern)s,
       %(input_spec_schema)s, %(output_spec_schema)s,
       %(routing_rules)s::jsonb,
       %(skill_path)s, %(system_prompt)s, %(allowed_tools)s, %(permission_policy)s::jsonb,
@@ -56,6 +58,8 @@ def upsert_config(conn: psycopg.Connection, cfg: dict) -> None:
     )
     ON CONFLICT (agent_config_id) DO UPDATE SET
       cli = EXCLUDED.cli,
+      harness = EXCLUDED.harness,
+      harness_capabilities = EXCLUDED.harness_capabilities,
       domain = EXCLUDED.domain,
       role = EXCLUDED.role,
       pattern = EXCLUDED.pattern,
@@ -75,6 +79,8 @@ def upsert_config(conn: psycopg.Connection, cfg: dict) -> None:
     params = {
         "agent_config_id": cfg["agent_config_id"],
         "cli": cfg["cli"],
+        "harness": cfg.get("harness") or cfg["cli"],
+        "harness_capabilities": json.dumps(cfg.get("harness_capabilities") or {}),
         "domain": cfg["domain"],
         "role": cfg["role"],
         "pattern": cfg["pattern"],

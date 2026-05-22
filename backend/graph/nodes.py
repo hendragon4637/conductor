@@ -32,11 +32,13 @@ def prepare_trace(state: ConductorState) -> ConductorState:
     skill_path = cfg.get("skill_path")
     skill_hash = queries.hash_file(skill_path) if skill_path else None
 
+    harness = cfg.get("harness") or cfg["cli"]
     trace_id = queries.insert_trace(
         task_id=state.task_id,
         agent_config_id=state.agent_config_id,
         role=cfg["role"],
-        cli=cfg["cli"],
+        cli=harness,
+        harness=harness,
         input_spec=state.input_spec,
         skill_path=skill_path,
         skill_snapshot_hash=skill_hash,

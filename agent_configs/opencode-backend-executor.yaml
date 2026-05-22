@@ -4,6 +4,18 @@
 
 agent_config_id: opencode:backend-executor
 cli: opencode
+harness: opencode
+harness_capabilities:
+  interactive: true
+  headless: true
+  session_persistence: true
+  sub_agents: true
+  tool_calling: native
+  session_id_injectable: true
+  data_format: sqlite
+  data_path_template: ~/.local/share/opencode/opencode.db
+  supports_resume: true
+  supports_prompt_flag: true
 domain: backend
 role: executor
 pattern: standalone
