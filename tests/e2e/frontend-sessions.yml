@@ -1,0 +1,160 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: no project selected
+    - navigation [ref=e10]:
+      - link "agent configs" [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368880"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario C [e2e-C]" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/e2e-c-1780368880"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: E2E Scenario C [e2e-C]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780368880"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780368880"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e69] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368751"
+          - generic [ref=e70]: ▸
+          - generic [ref=e71]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e72] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368600"
+          - generic [ref=e73]: ▸
+          - generic [ref=e74]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e75] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368471"
+          - generic [ref=e76]: ▸
+          - generic [ref=e77]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e78] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368337"
+          - generic [ref=e79]: ▸
+          - generic [ref=e80]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e81] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367761"
+          - generic [ref=e82]: ▸
+          - generic [ref=e83]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e84] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367400"
+          - generic [ref=e85]: ▸
+          - generic [ref=e86]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e87] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367156"
+          - generic [ref=e88]: ▸
+          - generic [ref=e89]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e90] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367013"
+          - generic [ref=e91]: ▸
+          - generic [ref=e92]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario C [e2e-C]" [ref=e93] [cursor=pointer]:
+          - /url: "#/p/e2e-c-1780366935"
+          - generic [ref=e94]: ▸
+          - generic [ref=e95]: E2E Scenario C [e2e-C]
+        - link "▸ E2E Scenario C [e2e-C]" [ref=e96] [cursor=pointer]:
+          - /url: "#/p/e2e-c-1780366854"
+          - generic [ref=e97]: ▸
+          - generic [ref=e98]: E2E Scenario C [e2e-C]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e99] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780328409"
+          - generic [ref=e100]: ▸
+          - generic [ref=e101]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e102] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780328128"
+          - generic [ref=e103]: ▸
+          - generic [ref=e104]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e105] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780327993"
+          - generic [ref=e106]: ▸
+          - generic [ref=e107]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e108] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327839"
+          - generic [ref=e109]: ▸
+          - generic [ref=e110]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e111] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327763"
+          - generic [ref=e112]: ▸
+          - generic [ref=e113]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e114] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327155"
+          - generic [ref=e115]: ▸
+          - generic [ref=e116]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e117] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327075"
+          - generic [ref=e118]: ▸
+          - generic [ref=e119]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e120] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780326881"
+          - generic [ref=e121]: ▸
+          - generic [ref=e122]: E2E Scenario A [e2e-A]
+        - link "▸ AIPC Golden Engineering" [ref=e123] [cursor=pointer]:
+          - /url: "#/p/aipc-golden-eng"
+          - generic [ref=e124]: ▸
+          - generic [ref=e125]: AIPC Golden Engineering
+        - link "▸ E2E Input Test" [ref=e126] [cursor=pointer]:
+          - /url: "#/p/e2e-input-test"
+          - generic [ref=e127]: ▸
+          - generic [ref=e128]: E2E Input Test
+        - link "▸ adapter-test-3f39e7" [ref=e129] [cursor=pointer]:
+          - /url: "#/p/adapter-test-3f39e7"
+          - generic [ref=e130]: ▸
+          - generic [ref=e131]: adapter-test-3f39e7
+        - button "+ New project" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [active] [ref=e27] [cursor=pointer]:
+          - /url: "#/tasks"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e140]:
+        - heading "Welcome to AIPC Conductor" [level=3] [ref=e141]
+        - paragraph [ref=e142]: Select a project from the sidebar to get started, or create a new one.

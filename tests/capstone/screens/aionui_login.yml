@@ -1,0 +1,37 @@
+- generic [ref=e4]:
+  - combobox [ref=e6] [cursor=pointer]:
+    - option "简体中文"
+    - option "繁體中文"
+    - option "日本語"
+    - option "한국어"
+    - option "Türkçe"
+    - option "Українська"
+    - option "English" [selected]
+  - generic [ref=e7]:
+    - img "AionUi" [ref=e9]
+    - heading "AionUi" [level=1] [ref=e10]
+    - paragraph [ref=e11]: Welcome back, please sign in to your account
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: Username
+      - generic [ref=e15]:
+        - img
+        - textbox "Username" [active] [ref=e16]:
+          - /placeholder: Enter your username
+    - generic [ref=e17]:
+      - generic [ref=e18]: Password
+      - generic [ref=e19]:
+        - img
+        - textbox "Password" [ref=e20]:
+          - /placeholder: Enter your password
+        - button "Show password" [ref=e21] [cursor=pointer]:
+          - img [ref=e22]
+    - generic [ref=e25]:
+      - checkbox "Remember me" [ref=e26] [cursor=pointer]
+      - generic [ref=e27] [cursor=pointer]: Remember me
+    - button "Sign In" [ref=e28] [cursor=pointer]:
+      - generic [ref=e29]: Sign In
+  - generic [ref=e31]:
+    - generic [ref=e32]: Transform your command-line AI
+    - generic [ref=e33]: •
+    - generic [ref=e34]: Modern & Efficient

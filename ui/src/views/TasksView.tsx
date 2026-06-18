@@ -1,6 +1,9 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '../api';
 import type { Task, TraceSummary, AgentConfig } from '../api';
+import { isTauri } from '../lib/runtime';
+import { pendingSpawns } from '../lib/ptyRegistry';
+import type { SpawnResponse } from '../lib/types';
 import { navigate } from '../App';
 
 interface Props {
@@ -243,6 +246,9 @@ function TaskCard({
   const [pickedConfig, setPickedConfig] = useState<string>('');
   const [spawning, setSpawning] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [showInitialInput, setShowInitialInput] = useState(false);
+  const [initialInput, setInitialInput] = useState('');
+  const [detachMode, setDetachMode] = useState(false);
 
   const reloadTraces = useCallback(() => {
     api.listTraces(task.task_id).then(setTraces).catch(() => setTraces([]));
@@ -263,9 +269,25 @@ function TaskCard({
     setSpawning(true);
     setErr(null);
     try {
-      await api.spawn({ task_id: task.task_id, agent_config_id: pickedConfig });
+      const spawnMode = detachMode ? "detached" : (isTauri() ? "embedded" : "detached");
+      const params: { task_id: string; agent_config_id: string; initial_input?: string; spawn_mode?: string } = {
+        task_id: task.task_id,
+        agent_config_id: pickedConfig,
+        spawn_mode: spawnMode,
+      };
+      if (initialInput.trim()) {
+        params.initial_input = initialInput.trim();
+      }
+      const data = await api.spawn(params) as any as SpawnResponse;
       onChange();
       reloadTraces();
+      setInitialInput('');
+      setShowInitialInput(false);
+
+      if (data.spawn_mode === "embedded" && data.pty_spec) {
+        pendingSpawns.set(data.trace_id, data.pty_spec);
+        navigate(`#/p/${task.project_id}/s/${encodeURIComponent(task.session_id)}/t/${data.trace_id}`);
+      }
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -304,6 +326,18 @@ function TaskCard({
         </div>
       )}
 
+      {showInitialInput && (
+        <div className="field" style={{ margin: '8px 0' }}>
+          <label style={{ fontSize: '0.85em' }}>initial prompt (sent to agent on spawn)</label>
+          <textarea
+            className="textarea"
+            rows={2}
+            value={initialInput}
+            onChange={(e) => setInitialInput(e.target.value)}
+            placeholder="e.g. Read the task and implement the solution..."
+          />
+        </div>
+      )}
       <footer className="task-card-footer">
         <select
           className="select config-select"
@@ -318,13 +352,37 @@ function TaskCard({
             </option>
           ))}
         </select>
-        <button
-          className="btn btn-primary btn-sm"
-          onClick={doSpawn}
-          disabled={spawning || !pickedConfig}
-        >
-          {spawning ? 'Spawning…' : '▶ Spawn'}
-        </button>
+        <div className="row" style={{ gap: 6 }}>
+          {isTauri() && (
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setDetachMode((v) => !v)}
+              disabled={spawning}
+              title={detachMode ? "Spawning external gnome-terminal" : "Spawning embedded terminal tab"}
+              style={{
+                color: detachMode ? "var(--text-muted)" : "var(--accent)",
+                opacity: detachMode ? 0.6 : 1,
+              }}
+            >
+              {detachMode ? 'External' : 'Embedded'}
+            </button>
+          )}
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setShowInitialInput((v) => !v)}
+            disabled={spawning}
+            title="Add an initial prompt for the agent"
+          >
+            {showInitialInput ? '− prompt' : '+ prompt'}
+          </button>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={doSpawn}
+            disabled={spawning || !pickedConfig}
+          >
+            {spawning ? 'Spawning…' : '▶ Spawn'}
+          </button>
+        </div>
       </footer>
 
       {err && <pre className="error" style={{ marginTop: 12 }}>{err}</pre>}

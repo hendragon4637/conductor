@@ -1,0 +1,89 @@
+# L4 Persona: Casual User
+# Goal-oriented behaviors for a user who wants to track daily expenses
+# without reading documentation. Tests discoverability, error feedback,
+# and overall friction of the product.
+name: casual_user
+goal: "track a few daily expenses without reading docs"
+behaviors:
+  - id: add_valid_expense
+    description: "Add a new expense with valid data"
+    steps:
+      - action: request
+        method: POST
+        path: "/api/transactions"
+        json:
+          amount: 15000
+          description: "lunch at cafe"
+          date: "2026-06-12"
+      - action: expect
+        status_in: [200, 201]
+        body_contains: "id"
+
+  - id: list_expenses
+    description: "View all recorded expenses"
+    steps:
+      - action: request
+        method: GET
+        path: "/api/transactions"
+      - action: expect
+        status_in: [200]
+        body_is_array: true
+
+  - id: add_invalid_expense
+    description: "Try adding an expense with obviously wrong data"
+    steps:
+      - action: request
+        method: POST
+        path: "/api/transactions"
+        json:
+          amount: -500
+          description: ""
+      - action: expect
+        status_in: [400, 422]
+        body_not_empty: true
+    friction_severity: medium        # validation errors are expected UX
+
+  - id: get_single_expense
+    description: "Fetch a single expense by ID"
+    depends_on: add_valid_expense    # use the ID from the previous behavior
+    steps:
+      - action: request
+        method: GET
+        path: "/api/transactions/{ref_id}"
+      - action: expect
+        status_in: [200]
+
+  - id: delete_expense
+    description: "Delete an expense and observe the response"
+    depends_on: add_valid_expense
+    steps:
+      - action: request
+        method: DELETE
+        path: "/api/transactions/{ref_id}"
+      - action: expect
+        status_in: [200, 204]
+
+  - id: get_deleted_expense
+    description: "Try fetching a deleted expense — expect 404"
+    depends_on: delete_expense
+    steps:
+      - action: request
+        method: GET
+        path: "/api/transactions/{ref_id}"
+      - action: expect
+        status_in: [404]
+
+  - id: nonexistent_endpoint
+    description: "Try hitting a non-existent endpoint"
+    steps:
+      - action: request
+        method: GET
+        path: "/api/nonexistent"
+      - action: expect
+        status_in: [404]
+    friction_severity: low
+
+report_dimensions:
+  - discoverability    # can user figure out the API without docs
+  - error_feedback     # quality of error messages on bad input
+  - friction           # overall friction (success rate, clarity)

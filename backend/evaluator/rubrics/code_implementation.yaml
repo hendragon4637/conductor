@@ -1,0 +1,18 @@
+name: code_implementation
+applies_to: ["build", "executor", "backend", "cli", "api"]
+items:
+  - id: correctness
+    rubric_item: "Does the code implement ALL required features from the task, with no missing commands/endpoints?"
+    weight: 2.0
+  - id: error_handling
+    rubric_item: "Does it handle invalid input, missing data, and edge cases gracefully (not crash)?"
+    weight: 1.5
+  - id: persistence_state
+    rubric_item: "If state must persist (files/DB), does it actually persist correctly across runs?"
+    weight: 1.5
+  - id: structure
+    rubric_item: "Is the code reasonably structured (separation of concerns, no dead code, readable)?"
+    weight: 1.0
+  - id: matches_spec
+    rubric_item: "Does the implementation match the stated spec/conventions (naming, data types, libraries)?"
+    weight: 1.5

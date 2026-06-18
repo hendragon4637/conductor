@@ -6,9 +6,23 @@ import { navigate } from '../App';
 interface Props {
   activeProject?: string;
   activeSession?: string;
+  activeTab?: string;
 }
 
-export function Sidebar({ activeProject, activeSession }: Props) {
+const TABS = [
+  { key: 'chat', label: 'Chat' },
+  { key: 'plan', label: 'Plan' },
+  { key: 'sessions', label: 'Sessions' },
+  { key: 'scores', label: 'Scores' },
+  { key: 'ratchet', label: 'Ratchet' },
+  { key: 'triggers', label: 'Triggers' },
+  { key: 'worktrees', label: 'Worktrees' },
+  { key: 'configs', label: 'Agents' },
+  { key: 'memory', label: 'Memory' },
+  { key: 'settings', label: 'Settings' },
+] as const;
+
+export function Sidebar({ activeProject, activeSession, activeTab }: Props) {
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showProjectForm, setShowProjectForm] = useState(false);
@@ -22,8 +36,17 @@ export function Sidebar({ activeProject, activeSession }: Props) {
 
   const [manuallyCollapsed, setManuallyCollapsed] = useState<string | null>(null);
 
+  const isTabActive = (key: string) => {
+    if (activeTab === key) return true;
+    // Fallback for legacy routing
+    if (key === 'configs' && window.location.hash === '#/configs') return true;
+    if (key === 'sessions' && window.location.hash.includes('/p/')) return true;
+    return false;
+  };
+
   return (
     <aside className="sidebar">
+      {/* ── Project navigation ── */}
       <div className="sidebar-section">
         <div className="sidebar-section-title">Projects</div>
 
@@ -76,14 +99,22 @@ export function Sidebar({ activeProject, activeSession }: Props) {
 
       <div className="sidebar-spacer" />
 
+      {/* ── Tab navigation ── */}
       <div className="sidebar-section">
-        <a
-          className={`nav-item ${window.location.hash === '#/configs' ? 'active' : ''}`}
-          href="#/configs"
-        >
-          <span className="chevron">·</span>
-          <span className="nav-label">Agent configs</span>
-        </a>
+        <div className="sidebar-section-title">Tabs</div>
+        {TABS.map(tab => (
+          <a
+            key={tab.key}
+            className={`nav-item ${isTabActive(tab.key) ? 'active' : ''}`}
+            href={`#/${tab.key}`}
+            onClick={(e) => {
+              if (isTabActive(tab.key)) e.preventDefault();
+            }}
+          >
+            <span className="chevron">·</span>
+            <span className="nav-label">{tab.label}</span>
+          </a>
+        ))}
       </div>
     </aside>
   );

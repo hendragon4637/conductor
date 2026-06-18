@@ -1,0 +1,228 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: Agent configs
+    - navigation [ref=e10]:
+      - link "agent configs" [active] [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ Finance Tracker" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/finance-tracker"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: Finance Tracker
+        - link "▸ simple-calculator" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/simple-calculator"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: simple-calculator
+        - link "▸ other-proj" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/other-proj"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: other-proj
+        - link "▸ smoke-proj" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/smoke-proj"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: smoke-proj
+        - button "+ New project" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [ref=e27] [cursor=pointer]:
+          - /url: "#/sessions"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e211]:
+        - generic [ref=e213]:
+          - heading "Agents" [level=2] [ref=e214]
+          - generic [ref=e215]: agent_config templates — engine-agnostic. Deterministic (permissions) vs probabilistic (context/skills) shown distinctly.
+        - generic [ref=e216]:
+          - generic [ref=e217]: 7 configs
+          - button "+ New agent_config" [ref=e218] [cursor=pointer]
+        - generic [ref=e219]:
+          - generic [ref=e220]:
+            - generic [ref=e221]:
+              - generic [ref=e222]: finance-fullstack-executor
+              - generic [ref=e223]: opencode
+            - generic [ref=e224]:
+              - generic [ref=e225]:
+                - generic [ref=e226]: model
+                - text: opencode
+              - generic [ref=e227]:
+                - generic [ref=e228]: role
+                - text: executor
+              - generic [ref=e230]:
+                - generic [ref=e231]: permission
+                - text: edit:allow · bash:allow deterministic
+              - generic [ref=e232]:
+                - generic [ref=e233]: context
+                - text: finance probabilistic
+              - generic [ref=e234]:
+                - generic [ref=e235]: skills
+                - text: standalone probabilistic
+            - button "Edit" [ref=e236] [cursor=pointer]
+          - generic [ref=e237]:
+            - generic [ref=e238]:
+              - generic [ref=e239]: finance-planner
+              - generic [ref=e240]: opencode
+            - generic [ref=e241]:
+              - generic [ref=e242]:
+                - generic [ref=e243]: model
+                - text: opencode
+              - generic [ref=e244]:
+                - generic [ref=e245]: role
+                - text: planner
+              - generic [ref=e247]:
+                - generic [ref=e248]: permission
+                - text: edit:allow · bash:allow deterministic
+              - generic [ref=e249]:
+                - generic [ref=e250]: context
+                - text: finance probabilistic
+              - generic [ref=e251]:
+                - generic [ref=e252]: skills
+                - text: standalone probabilistic
+            - button "Edit" [ref=e253] [cursor=pointer]
+          - generic [ref=e254]:
+            - generic [ref=e255]:
+              - generic [ref=e256]: finance-reviewer
+              - generic [ref=e257]: opencode
+            - generic [ref=e258]:
+              - generic [ref=e259]:
+                - generic [ref=e260]: model
+                - text: opencode
+              - generic [ref=e261]:
+                - generic [ref=e262]: role
+                - text: reviewer
+              - generic [ref=e264]:
+                - generic [ref=e265]: permission
+                - text: edit:deny · bash:allow deterministic
+              - generic [ref=e266]:
+                - generic [ref=e267]: context
+                - text: finance probabilistic
+              - generic [ref=e268]:
+                - generic [ref=e269]: skills
+                - text: standalone probabilistic
+            - button "Edit" [ref=e270] [cursor=pointer]
+          - generic [ref=e271]:
+            - generic [ref=e272]:
+              - generic [ref=e273]: opencode:backend-executor
+              - generic [ref=e274]: opencode
+            - generic [ref=e275]:
+              - generic [ref=e276]:
+                - generic [ref=e277]: model
+                - text: opencode
+              - generic [ref=e278]:
+                - generic [ref=e279]: role
+                - text: executor
+              - generic [ref=e281]:
+                - generic [ref=e282]: permission
+                - text: edit:allow · bash:allow deterministic
+              - generic [ref=e283]:
+                - generic [ref=e284]: context
+                - text: backend probabilistic
+              - generic [ref=e285]:
+                - generic [ref=e286]: skills
+                - text: standalone probabilistic
+            - button "Edit" [ref=e287] [cursor=pointer]
+          - generic [ref=e288]:
+            - generic [ref=e289]:
+              - generic [ref=e290]: opencode:backend-planner
+              - generic [ref=e291]: opencode
+            - generic [ref=e292]:
+              - generic [ref=e293]:
+                - generic [ref=e294]: model
+                - text: opencode
+              - generic [ref=e295]:
+                - generic [ref=e296]: role
+                - text: planner
+              - generic [ref=e298]:
+                - generic [ref=e299]: permission
+                - text: edit:allow · bash:allow deterministic
+              - generic [ref=e300]:
+                - generic [ref=e301]: context
+                - text: backend probabilistic
+              - generic [ref=e302]:
+                - generic [ref=e303]: skills
+                - text: standalone probabilistic
+            - button "Edit" [ref=e304] [cursor=pointer]
+          - generic [ref=e305]:
+            - generic [ref=e306]:
+              - generic [ref=e307]: opencode:backend-reviewer
+              - generic [ref=e308]: opencode
+            - generic [ref=e309]:
+              - generic [ref=e310]:
+                - generic [ref=e311]: model
+                - text: opencode
+              - generic [ref=e312]:
+                - generic [ref=e313]: role
+                - text: reviewer
+              - generic [ref=e315]:
+                - generic [ref=e316]: permission
+                - text: edit:deny · bash:allow deterministic
+              - generic [ref=e317]:
+                - generic [ref=e318]: context
+                - text: backend probabilistic
+              - generic [ref=e319]:
+                - generic [ref=e320]: skills
+                - text: standalone probabilistic
+            - button "Edit" [ref=e321] [cursor=pointer]
+          - generic [ref=e322]:
+            - generic [ref=e323]:
+              - generic [ref=e324]: orchestrator
+              - generic [ref=e325]: opencode
+            - generic [ref=e326]:
+              - generic [ref=e327]:
+                - generic [ref=e328]: model
+                - text: opencode
+              - generic [ref=e329]:
+                - generic [ref=e330]: role
+                - text: orchestrator
+              - generic [ref=e332]:
+                - generic [ref=e333]: permission
+                - text: edit:allow · bash:allow deterministic
+              - generic [ref=e334]:
+                - generic [ref=e335]: context
+                - text: general probabilistic
+              - generic [ref=e336]:
+                - generic [ref=e337]: skills
+                - text: standalone probabilistic
+            - button "Edit" [ref=e338] [cursor=pointer]

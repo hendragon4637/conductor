@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '../api';
+import { pendingSpawns } from '../lib/ptyRegistry';
 import type { TraceDetail as TraceDetailT } from '../api';
 
 interface Props {
@@ -58,6 +59,11 @@ export function TraceDrawer({ trace_id, onClose }: Props) {
         onClose={onClose}
       />
       <div className="drawer-body">
+
+        <section className="drawer-section">
+          <ContinueSection trace_id={trace_id} />
+        </section>
+
         <section className="drawer-section">
           <h4>Metadata</h4>
           <Metadata t={t} />
@@ -67,7 +73,7 @@ export function TraceDrawer({ trace_id, onClose }: Props) {
           <h4>Input spec</h4>
           <details className="collapsible">
             <summary>{t.input_spec ? 'Show JSON' : '(no input spec)'}</summary>
-            {t.input_spec && (
+            {!!t.input_spec && (
               <div className="collapsible-content">
                 <pre className="json-block">{JSON.stringify(t.input_spec, null, 2)}</pre>
               </div>
@@ -171,6 +177,53 @@ function Metadata({ t }: { t: TraceDetailT }) {
       <dt>ended</dt>       <dd>{t.ended_at ? formatTs(t.ended_at) : '—'}</dd>
       <dt>duration</dt>    <dd>{t.duration_s != null ? `${t.duration_s.toFixed(1)}s` : '—'}</dd>
     </dl>
+  );
+}
+
+// ───────────────────────────────── ContinueSection ─────────────────────────────────
+
+function ContinueSection({ trace_id }: { trace_id: string }) {
+  const [prompt, setPrompt] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [doneErr, setDoneErr] = useState<string | null>(null);
+
+  const doContinue = async () => {
+    setBusy(true);
+    setDoneErr(null);
+    try {
+      const res = await api.resumeSession(trace_id, {
+        initial_input: prompt.trim() || undefined,
+      });
+      if (res?.pty_spec) {
+        pendingSpawns.set(`${trace_id}::resume`, {
+          ...res.pty_spec,
+          isShell: false,
+        });
+        setPrompt('');
+      }
+    } catch (e) {
+      setDoneErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="field" style={{ marginBottom: 8 }}>
+        <textarea
+          className="textarea"
+          rows={2}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Prompt to send on resume (optional)"
+        />
+      </div>
+      {doneErr && <pre className="error" style={{ marginBottom: 8 }}>{doneErr}</pre>}
+      <button className="btn btn-primary btn-sm" onClick={doContinue} disabled={busy}>
+        {busy ? 'Resuming…' : 'Continue'}
+      </button>
+    </div>
   );
 }
 

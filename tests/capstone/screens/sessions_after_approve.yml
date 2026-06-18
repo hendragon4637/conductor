@@ -1,0 +1,122 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: no project selected
+    - navigation [ref=e10]:
+      - link "agent configs" [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ Finance Tracker" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/finance-tracker"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: Finance Tracker
+        - link "▸ simple-calculator" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/simple-calculator"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: simple-calculator
+        - link "▸ other-proj" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/other-proj"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: other-proj
+        - link "▸ smoke-proj" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/smoke-proj"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: smoke-proj
+        - button "+ New project" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [ref=e27] [cursor=pointer]:
+          - /url: "#/sessions"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e482]:
+        - generic [ref=e484]:
+          - heading "Sessions" [level=2] [ref=e485]
+          - generic [ref=e486]: Conductor's out-of-band watcher tracks each session from ground-truth signals (token-rate, last-activity, fs/git, pid) \u2014 not AionUi self-report. Verdict drives pause / resume / cancel; resume re-enters at the last incomplete node in the same worktree.
+        - generic [ref=e487]: "\\uD83E\\uDE7A Watcher: 1 deterministic supervisor loop \\u00b7 poll 45s \\u00b7 verdicts: running / stalled / quota / crashed / done"
+        - generic [ref=e488]:
+          - table [ref=e489]:
+            - rowgroup [ref=e490]:
+              - row "Session (worktree) Plan \\u00b7 node Watcher verdict Health (last act \\u00b7 tok/s) Controls" [ref=e491]:
+                - columnheader "Session (worktree)" [ref=e492]
+                - columnheader "Plan \\u00b7 node" [ref=e493]
+                - columnheader "Watcher verdict" [ref=e494]
+                - columnheader "Health (last act \\u00b7 tok/s)" [ref=e495]
+                - columnheader "Controls" [ref=e496]
+            - rowgroup [ref=e497]:
+              - row "finance-tracker.main — unknown — · — AionUi \\u2197 http://localhost:8377/#/team/019ea528-dbfb-7b40-992c-ebf02bafe97e" [ref=e498]:
+                - cell "finance-tracker.main" [ref=e499]:
+                  - generic [ref=e500]: finance-tracker.main
+                - cell "—" [ref=e501]
+                - cell "unknown" [ref=e502]:
+                  - generic [ref=e503]: unknown
+                - cell "— · —" [ref=e504]
+                - cell "AionUi \\u2197 http://localhost:8377/#/team/019ea528-dbfb-7b40-992c-ebf02bafe97e" [ref=e505]:
+                  - generic [ref=e507]:
+                    - link "AionUi \\u2197" [ref=e508] [cursor=pointer]:
+                      - /url: http://localhost:8377/#/team/019ea528-dbfb-7b40-992c-ebf02bafe97e
+                    - generic: http://localhost:8377/#/team/019ea528-dbfb-7b40-992c-ebf02bafe97e
+              - row "smoke-proj.main — unknown — · — AionUi \\u2197 http://localhost:8377/#/team/019e96b2-42d7-7021-a419-88215893b6fe" [ref=e509]:
+                - cell "smoke-proj.main" [ref=e510]:
+                  - generic [ref=e511]: smoke-proj.main
+                - cell "—" [ref=e512]
+                - cell "unknown" [ref=e513]:
+                  - generic [ref=e514]: unknown
+                - cell "— · —" [ref=e515]
+                - cell "AionUi \\u2197 http://localhost:8377/#/team/019e96b2-42d7-7021-a419-88215893b6fe" [ref=e516]:
+                  - generic [ref=e518]:
+                    - link "AionUi \\u2197" [ref=e519] [cursor=pointer]:
+                      - /url: http://localhost:8377/#/team/019e96b2-42d7-7021-a419-88215893b6fe
+                    - generic: http://localhost:8377/#/team/019e96b2-42d7-7021-a419-88215893b6fe
+          - generic [ref=e520]:
+            - text: "Verdict legend:"
+            - generic [ref=e521]: running
+            - text: active \u00b7
+            - generic [ref=e522]: stalled
+            - text: no activity + 0 tok/s + no fs change \u00b7
+            - generic [ref=e523]: quota
+            - text: silent usage-limit \u00b7
+            - generic [ref=e524]: done
+            - text: terminal marker + regression gate passed

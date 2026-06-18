@@ -1,0 +1,218 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import psycopg
+from psycopg.rows import dict_row
+
+from backend.planning.schema import Plan
+
+
+def _get_db() -> str:
+    import os
+    return os.environ["DATABASE_URL"]
+
+
+# ── Plan persistence ──────────────────────────────────────────────
+
+def save_plan(plan: Plan, ratified: bool = False) -> None:
+    """Persist a plan to the database (insert or update).
+
+    v5.1: stores goal + success JSONB; no session_id.
+    Args:
+        plan: The plan object to persist.
+        ratified: Whether the plan's checks/spec have been ratified.
+    """
+    db_url = _get_db()
+    dag_json = json.dumps([n.model_dump() for n in plan.dag])
+    project_id = plan.project_id or (plan.dag[0].project_id if plan.dag else "default")
+    success_json = plan.success.model_dump() if hasattr(plan.success, 'model_dump') else {"text": str(plan.success)}
+
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO plans
+                   (plan_id, project_id, user_intent, goal, success, dag, ratified, version)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (plan_id) DO UPDATE SET
+                     project_id = EXCLUDED.project_id,
+                     user_intent = EXCLUDED.user_intent,
+                     goal = EXCLUDED.goal,
+                     success = EXCLUDED.success,
+                     dag = EXCLUDED.dag,
+                     ratified = EXCLUDED.ratified
+                """,
+                (
+                    plan.plan_id,
+                    project_id,
+                    plan.user_intent,
+                    plan.goal,
+                    json.dumps(success_json),
+                    dag_json,
+                    ratified,
+                    plan.version,
+                ),
+            )
+        c.commit()
+
+
+def set_ratified(plan_id: str) -> None:
+    """Mark a plan as ratified (checks/spec approved by human)."""
+    db_url = _get_db()
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE plans SET ratified = TRUE WHERE plan_id = %s",
+                (plan_id,),
+            )
+        c.commit()
+
+
+def get_plan(plan_id: str) -> dict[str, Any] | None:
+    """Load a plan dict from the database."""
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM plans WHERE plan_id = %s", (plan_id,),
+            )
+            row = cur.fetchone()
+    if row:
+        row["dag"] = json.loads(row["dag"]) if isinstance(row["dag"], str) else row["dag"]
+        if isinstance(row.get("multimodal_refs"), str):
+            row["multimodal_refs"] = json.loads(row["multimodal_refs"])
+    return row
+
+
+# ── Run persistence ───────────────────────────────────────────────
+
+def save_run(run: dict[str, Any]) -> None:
+    """Insert or update a run record."""
+    db_url = _get_db()
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO runs
+                   (id, plan_id, state, worktree_root, note, approved_at, finished_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (id) DO UPDATE SET
+                     state = EXCLUDED.state,
+                     worktree_root = COALESCE(EXCLUDED.worktree_root, runs.worktree_root),
+                     approved_at = COALESCE(EXCLUDED.approved_at, runs.approved_at),
+                     finished_at = COALESCE(EXCLUDED.finished_at, runs.finished_at),
+                     note = COALESCE(EXCLUDED.note, runs.note)
+                """,
+                (
+                    run.get("id"),
+                    run.get("plan_id"),
+                    run.get("state", "created"),
+                    run.get("worktree_root"),
+                    run.get("note"),
+                    run.get("approved_at"),
+                    run.get("finished_at"),
+                ),
+            )
+        c.commit()
+
+
+def get_run(run_id: str) -> dict[str, Any] | None:
+    """Load a run dict from the database."""
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT * FROM runs WHERE id = %s", (run_id,))
+            return cur.fetchone()
+
+
+def list_runs(plan_id: str | None = None) -> list[dict[str, Any]]:
+    """List runs, optionally filtered by plan_id."""
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            if plan_id:
+                cur.execute(
+                    "SELECT * FROM runs WHERE plan_id = %s ORDER BY created_at DESC",
+                    (plan_id,),
+                )
+            else:
+                cur.execute("SELECT * FROM runs ORDER BY created_at DESC")
+            return cur.fetchall()
+
+
+def update_run_state(run_id: str, state: str) -> None:
+    """Transition a run's state."""
+    db_url = _get_db()
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            finished_fields = ""
+            if state in ("done", "failed", "cancelled"):
+                finished_fields = ", finished_at = NOW()"
+            elif state == "approved":
+                finished_fields = ", approved_at = NOW()"
+            cur.execute(
+                f"UPDATE runs SET state = %s{finished_fields} WHERE id = %s",
+                (state, run_id),
+            )
+        c.commit()
+
+
+# ── NodeSession persistence ──────────────────────────────────────
+
+def save_node_session(ns: dict[str, Any]) -> None:
+    """Insert or update a node_session record (v5.1: includes members, gate_mode, aionui fields)."""
+    db_url = _get_db()
+    members_json = json.dumps(ns.get("members", [])) if ns.get("members") else None
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO node_sessions
+                   (id, run_id, node_id, backend, members, gate_mode,
+                    worktree, verdict, l1_pass, goal_review, commit_tag, attempt,
+                    aionui_team_id, aionui_conversation_id, langfuse_trace_id, finished_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (id) DO UPDATE SET
+                     verdict = COALESCE(EXCLUDED.verdict, node_sessions.verdict),
+                     l1_pass = COALESCE(EXCLUDED.l1_pass, node_sessions.l1_pass),
+                     goal_review = COALESCE(EXCLUDED.goal_review, node_sessions.goal_review),
+                     commit_tag = COALESCE(EXCLUDED.commit_tag, node_sessions.commit_tag),
+                     attempt = EXCLUDED.attempt,
+                     members = COALESCE(EXCLUDED.members, node_sessions.members),
+                     gate_mode = COALESCE(EXCLUDED.gate_mode, node_sessions.gate_mode),
+                     aionui_team_id = COALESCE(EXCLUDED.aionui_team_id, node_sessions.aionui_team_id),
+                     aionui_conversation_id = COALESCE(EXCLUDED.aionui_conversation_id, node_sessions.aionui_conversation_id),
+                     langfuse_trace_id = COALESCE(EXCLUDED.langfuse_trace_id, node_sessions.langfuse_trace_id),
+                     finished_at = COALESCE(EXCLUDED.finished_at, node_sessions.finished_at)
+                """,
+                (
+                    ns.get("id"),
+                    ns.get("run_id"),
+                    ns.get("node_id"),
+                    ns.get("backend"),
+                    members_json,
+                    ns.get("gate_mode", "l1_l2"),
+                    ns.get("worktree"),
+                    ns.get("verdict"),
+                    ns.get("l1_pass"),
+                    ns.get("goal_review"),
+                    ns.get("commit_tag"),
+                    ns.get("attempt", 1),
+                    ns.get("aionui_team_id"),
+                    ns.get("aionui_conversation_id"),
+                    ns.get("langfuse_trace_id"),
+                    ns.get("finished_at"),
+                ),
+            )
+        c.commit()
+
+
+def get_node_sessions(run_id: str) -> list[dict[str, Any]]:
+    """Get all node_sessions for a run."""
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM node_sessions WHERE run_id = %s ORDER BY created_at",
+                (run_id,),
+            )
+            return cur.fetchall()

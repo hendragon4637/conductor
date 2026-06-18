@@ -1,0 +1,215 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: no project selected
+    - navigation [ref=e10]:
+      - link "agent configs" [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368880"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario C [e2e-C]" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/e2e-c-1780368880"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: E2E Scenario C [e2e-C]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780368880"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780368880"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e69] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368751"
+          - generic [ref=e70]: ▸
+          - generic [ref=e71]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e72] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368600"
+          - generic [ref=e73]: ▸
+          - generic [ref=e74]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e75] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368471"
+          - generic [ref=e76]: ▸
+          - generic [ref=e77]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e78] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780368337"
+          - generic [ref=e79]: ▸
+          - generic [ref=e80]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e81] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367761"
+          - generic [ref=e82]: ▸
+          - generic [ref=e83]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e84] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367400"
+          - generic [ref=e85]: ▸
+          - generic [ref=e86]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e87] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367156"
+          - generic [ref=e88]: ▸
+          - generic [ref=e89]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario D [e2e-D]" [ref=e90] [cursor=pointer]:
+          - /url: "#/p/e2e-d-1780367013"
+          - generic [ref=e91]: ▸
+          - generic [ref=e92]: E2E Scenario D [e2e-D]
+        - link "▸ E2E Scenario C [e2e-C]" [ref=e93] [cursor=pointer]:
+          - /url: "#/p/e2e-c-1780366935"
+          - generic [ref=e94]: ▸
+          - generic [ref=e95]: E2E Scenario C [e2e-C]
+        - link "▸ E2E Scenario C [e2e-C]" [ref=e96] [cursor=pointer]:
+          - /url: "#/p/e2e-c-1780366854"
+          - generic [ref=e97]: ▸
+          - generic [ref=e98]: E2E Scenario C [e2e-C]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e99] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780328409"
+          - generic [ref=e100]: ▸
+          - generic [ref=e101]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e102] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780328128"
+          - generic [ref=e103]: ▸
+          - generic [ref=e104]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario B [e2e-B]" [ref=e105] [cursor=pointer]:
+          - /url: "#/p/e2e-b-1780327993"
+          - generic [ref=e106]: ▸
+          - generic [ref=e107]: E2E Scenario B [e2e-B]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e108] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327839"
+          - generic [ref=e109]: ▸
+          - generic [ref=e110]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e111] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327763"
+          - generic [ref=e112]: ▸
+          - generic [ref=e113]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e114] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327155"
+          - generic [ref=e115]: ▸
+          - generic [ref=e116]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e117] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780327075"
+          - generic [ref=e118]: ▸
+          - generic [ref=e119]: E2E Scenario A [e2e-A]
+        - link "▸ E2E Scenario A [e2e-A]" [ref=e120] [cursor=pointer]:
+          - /url: "#/p/e2e-a-1780326881"
+          - generic [ref=e121]: ▸
+          - generic [ref=e122]: E2E Scenario A [e2e-A]
+        - link "▸ AIPC Golden Engineering" [ref=e123] [cursor=pointer]:
+          - /url: "#/p/aipc-golden-eng"
+          - generic [ref=e124]: ▸
+          - generic [ref=e125]: AIPC Golden Engineering
+        - link "▸ E2E Input Test" [ref=e126] [cursor=pointer]:
+          - /url: "#/p/e2e-input-test"
+          - generic [ref=e127]: ▸
+          - generic [ref=e128]: E2E Input Test
+        - link "▸ adapter-test-3f39e7" [ref=e129] [cursor=pointer]:
+          - /url: "#/p/adapter-test-3f39e7"
+          - generic [ref=e130]: ▸
+          - generic [ref=e131]: adapter-test-3f39e7
+        - button "+ New project" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [ref=e27] [cursor=pointer]:
+          - /url: "#/tasks"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [active] [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e198]:
+        - generic [ref=e199]:
+          - generic [ref=e200]:
+            - heading "Ratchet" [level=2] [ref=e201]
+            - generic [ref=e202]: Experiments and pending approvals
+          - button "Run Sweep" [ref=e204] [cursor=pointer]
+        - generic [ref=e205]:
+          - generic [ref=e206]: View
+          - generic [ref=e207]:
+            - generic [ref=e208] [cursor=pointer]: Experiments
+            - generic [ref=e209] [cursor=pointer]: Approvals
+          - generic [ref=e210]:
+            - generic [ref=e211]: 5 experiments
+            - generic [ref=e212]: 0 pending
+        - table [ref=e213]:
+          - rowgroup [ref=e214]:
+            - row "Agent Baseline Candidate Delta Decision" [ref=e215]:
+              - columnheader "Agent" [ref=e216]
+              - columnheader "Baseline" [ref=e217]
+              - columnheader "Candidate" [ref=e218]
+              - columnheader "Delta" [ref=e219]
+              - columnheader "Decision" [ref=e220]
+          - rowgroup [ref=e221]:
+            - row "opencode:backend-executor 1.000 1.000 +0.000 reverted" [ref=e222]:
+              - cell "opencode:backend-executor" [ref=e223]
+              - cell "1.000" [ref=e224]
+              - cell "1.000" [ref=e225]
+              - cell "+0.000" [ref=e226]
+              - cell "reverted" [ref=e227]:
+                - generic [ref=e228]: reverted
+            - row "opencode:backend-executor 0.500 1.000 +0.500 kept" [ref=e229]:
+              - cell "opencode:backend-executor" [ref=e230]
+              - cell "0.500" [ref=e231]
+              - cell "1.000" [ref=e232]
+              - cell "+0.500" [ref=e233]
+              - cell "kept" [ref=e234]:
+                - generic [ref=e235]: kept
+            - row "opencode:backend-executor 0.750 1.000 +0.250 kept" [ref=e236]:
+              - cell "opencode:backend-executor" [ref=e237]
+              - cell "0.750" [ref=e238]
+              - cell "1.000" [ref=e239]
+              - cell "+0.250" [ref=e240]
+              - cell "kept" [ref=e241]:
+                - generic [ref=e242]: kept
+            - row "opencode:backend-executor 0.750 1.000 +0.250 kept" [ref=e243]:
+              - cell "opencode:backend-executor" [ref=e244]
+              - cell "0.750" [ref=e245]
+              - cell "1.000" [ref=e246]
+              - cell "+0.250" [ref=e247]
+              - cell "kept" [ref=e248]:
+                - generic [ref=e249]: kept
+            - row "opencode:backend-executor 0.750 1.000 +0.250 kept" [ref=e250]:
+              - cell "opencode:backend-executor" [ref=e251]
+              - cell "0.750" [ref=e252]
+              - cell "1.000" [ref=e253]
+              - cell "+0.250" [ref=e254]
+              - cell "kept" [ref=e255]:
+                - generic [ref=e256]: kept

@@ -1,0 +1,15 @@
+name: product_ui
+applies_to: ["frontend", "ui", "ux", "visual", "design"]
+items:
+  - id: visual_fidelity
+    rubric_item: "Does the UI match the intended design in layout, spacing, and color?"
+    weight: 1.0
+  - id: responsiveness
+    rubric_item: "Does the UI handle different screen sizes without breakage?"
+    weight: 1.0
+  - id: accessibility
+    rubric_item: "Is the UI usable with keyboard navigation and screen readers?"
+    weight: 1.0
+  - id: error_states
+    rubric_item: "Are loading, empty, error, and edge-case states handled gracefully?"
+    weight: 1.5

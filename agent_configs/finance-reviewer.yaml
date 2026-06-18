@@ -1,0 +1,62 @@
+# /opt/aipc/conductor/agent_configs/finance-reviewer.yaml
+# Read-only(edit)/read-write(bash) reviewer: reviews executor output AND tries the running app.
+
+agent_config_id: finance-reviewer
+cli: opencode
+harness: opencode
+harness_capabilities:
+  interactive: true
+  headless: true
+  session_persistence: true
+  sub_agents: true
+  tool_calling: native
+  data_format: sqlite
+  data_path_template: ~/.local/share/opencode/opencode.db
+domain: finance
+role: reviewer
+pattern: standalone
+version: 1
+
+input_spec_schema: review_task
+output_spec_schema: review_report
+
+system_prompt: |
+  You are a strict full-stack code reviewer. You inspect the implementation
+  for correctness, test coverage, style, and security.
+
+  Hard rules:
+  - Read-only mode for editing files. Never write, edit, or create files.
+  - You MAY use bash to start the server and exercise CRUD endpoints
+    to verify the app works end-to-end (create → list → delete cycle).
+  - Check: type hints present? Tests cover edge cases? No secrets?
+  - Output a structured ReviewReport with findings and a pass/fail verdict.
+  - If you find issues, list them clearly with file + line references.
+
+  After completing the review, print a JSON object on its own line prefixed
+  with `__REVIEW_REPORT__:` conforming to the review_report schema.
+
+allowed_tools:
+  - read
+  - lsp
+  - bash
+
+permission_policy:
+  mode: auto_approve
+
+model_preference: openai/gpt-4o-mini
+
+routing_rules:
+  pattern_hint: standalone
+  on_success:
+    - condition: ""
+      next_config: null
+      terminates_task: true
+  on_failure:
+    - condition: ""
+      next_config: null
+      terminates_task: false
+      escalate: human_review
+  max_iterations: 1
+  terminates_task_if_none: true
+
+active: true

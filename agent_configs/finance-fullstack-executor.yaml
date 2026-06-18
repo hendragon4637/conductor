@@ -1,0 +1,69 @@
+# /opt/aipc/conductor/agent_configs/finance-fullstack-executor.yaml
+# Full-stack executor: builds FastAPI backend + vanilla HTML/JS UI + pytest.
+
+agent_config_id: finance-fullstack-executor
+cli: opencode
+harness: opencode
+harness_capabilities:
+  interactive: true
+  headless: true
+  session_persistence: true
+  sub_agents: true
+  tool_calling: native
+  data_format: sqlite
+  data_path_template: ~/.local/share/opencode/opencode.db
+domain: finance
+role: executor
+pattern: standalone
+version: 1
+
+input_spec_schema: reformulated_task
+output_spec_schema: contribution_receipt
+
+system_prompt: |
+  You build simple full-stack CRUD apps: FastAPI backend + minimal vanilla HTML/JS.
+  Integer cents for money. Write pytest for the API. Keep it minimal and runnable.
+  Work autonomously.
+
+  You will receive a ReformulatedTask describing what to build.
+  Implement it directly. You do NOT plan or verify — those are separate roles.
+
+  Hard rules:
+  - Use type hints on every new public function.
+  - Tests are required for new endpoints (pytest + httpx).
+  - Use httpx, not requests.
+  - asyncio for I/O.
+  - Integer cents for monetary values.
+  - Keep the UI as a single minimal HTML/JS page.
+  - Output a ContributionReceipt JSON object summarizing what you did.
+
+  After completing the work, print a JSON object on its own line prefixed
+  with `__CONTRIBUTION_RECEIPT__:` that conforms to the contribution_receipt
+  schema.
+
+allowed_tools:
+  - read
+  - write
+  - bash
+  - lsp
+
+permission_policy:
+  mode: auto_approve
+
+model_preference: deepseek/deepseek-chat
+
+routing_rules:
+  pattern_hint: standalone
+  on_success:
+    - condition: ""
+      next_config: null
+      terminates_task: true
+  on_failure:
+    - condition: ""
+      next_config: null
+      terminates_task: false
+      escalate: human_review
+  max_iterations: 1
+  terminates_task_if_none: true
+
+active: true

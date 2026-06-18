@@ -3,6 +3,7 @@ Spawn a native desktop terminal running OpenCode with the agent_config's
 system_prompt, skill, env, and working dir injected.
 """
 from __future__ import annotations
+import json
 import os
 import shlex
 import sqlite3
@@ -240,25 +241,19 @@ def spawn_terminal(
 
 # ──────────────────────── orchestration ────────────────────────
 
-def spawn_for_task(
+def prepare_spawn(
     *,
     task_id: UUID,
     agent_config_id: str,
     input_spec: Optional[dict] = None,
     preceding_trace_id: Optional[UUID] = None,
     initial_input: Optional[str] = None,
-) -> dict:
+    spawn_mode: str = "detached",
+) -> tuple:
     """
-    Full spawn flow:
-       1. Lookup task, project, session, agent_config
-       2. Ensure repo + branch
-       3. Build input_spec (or use provided)
-       4. Invoke prepare_graph to create trace row
-       5. Write AGENTS.md
-       6. Spawn terminal — optionally with --prompt initial_input
-       7. Poll OpenCode DB to discover the real session.id
-       8. Update trace row with discovered cli_session_id
-    Returns dict with trace_id, cli_session_id, repo_path.
+    Prepare a spawn without executing it.
+    Returns (trace_id, task_id, project_id, branch, repo_path, config, pty_spec, title).
+    Does NOT open a terminal.
     """
     # 1. Lookup
     task = queries.get_task(task_id)
@@ -305,7 +300,6 @@ def spawn_for_task(
             "domain": config["domain"],
             "intent_type": "implement",
         }
-
     # 4. Prepare graph creates the trace row
     state = ConductorState(
         task_id=task_id,
@@ -327,6 +321,13 @@ def spawn_for_task(
     if errs:
         raise RuntimeError(f"prepare failed: {errs}")
 
+    # Persist spawn_mode in traces.metadata JSONB
+    with queries.conn() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE traces SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb WHERE trace_id = %s",
+            (json.dumps({"spawn_mode": spawn_mode}), str(trace_id)),
+        )
+
     # 5. Write AGENTS.md
     write_agents_md(
         repo_path,
@@ -335,41 +336,63 @@ def spawn_for_task(
         skill_path=config.get("skill_path"),
     )
 
-    # 6. Spawn — OpenCode creates its own session with a ses_xxx id
-    command = build_opencode_command(
+    # 6. Build pty_spec (shared between detached and embedded modes)
+    command_str = build_opencode_command(
         model_preference=config.get("model_preference"),
         initial_input=initial_input,
     )
-
-    spawned_at = time.time()
     title = build_terminal_title(
         project_id=project_id,
         branch=branch,
         role=config["role"],
         trace_id=str(trace_id),
     )
-    spawn_terminal(cwd=repo_path, command=command, env={
-        "AIPC_TRACE_ID": str(trace_id),
-        "AIPC_TASK_ID": str(task_id),
-        "AIPC_SESSION_ID": branch,
-        "AIPC_PROJECT_ID": project_id,
-        "AIPC_AGENT_CONFIG_ID": agent_config_id,
-    }, title=title)
 
-    # 7. Discover the real session.id from OpenCode's SQLite DB
+    import shlex
+    cmd_parts = shlex.split(command_str)
+
+    pty_spec = {
+        "command": cmd_parts[0],
+        "args": cmd_parts[1:],
+        "cwd": str(repo_path),
+        "env": {
+            "AIPC_TRACE_ID": str(trace_id),
+            "AIPC_TASK_ID": str(task_id),
+            "AIPC_SESSION_ID": branch,
+            "AIPC_PROJECT_ID": project_id,
+            "AIPC_AGENT_CONFIG_ID": agent_config_id,
+            "TERM": "xterm-256color",
+        },
+        "title": title,
+    }
+
+    return trace_id, task_id, project_id, branch, repo_path, config, pty_spec, title
+
+
+def execute_detached_spawn(pty_spec: dict, title: str) -> None:
+    """Existing gnome-terminal path. Used when spawn_mode == 'detached'."""
+    import shlex
+    command_str = " ".join(shlex.quote(p) for p in [pty_spec["command"]] + pty_spec["args"])
+    spawn_terminal(
+        cwd=Path(pty_spec["cwd"]),
+        command=command_str,
+        env=pty_spec["env"],
+        title=title,
+    )
+
+
+def discover_and_update_cli_session(trace_id, spawned_at, task_id):
+    """Poll OpenCode DB and update trace with discovered session id."""
     cli_session_id = discover_session_id(spawned_after=spawned_at)
     if not cli_session_id:
-        # Fallback: generate a placeholder — adapter can still glob by recency
         cli_session_id = f"ses_{uuid.uuid4().hex}"
 
-    # 8. Update trace row with the discovered session id
     queries.update_trace_status(
         trace_id,
         status="running",
         cli_session_id=cli_session_id,
     )
 
-    # Lifecycle event: trace was spawned
     try:
         from backend.services.hook_dispatcher import dispatch
         dispatch("trace.spawned", trace_id)
@@ -382,9 +405,45 @@ def spawn_for_task(
             (str(task_id),),
         )
 
+    return cli_session_id
+
+
+def spawn_for_task(
+    *,
+    task_id: UUID,
+    agent_config_id: str,
+    input_spec: Optional[dict] = None,
+    preceding_trace_id: Optional[UUID] = None,
+    initial_input: Optional[str] = None,
+    spawn_mode: str = "detached",
+) -> dict:
+    """
+    Full spawn flow:
+      1-5. prepare_spawn (lookup, repo, graph, AGENTS.md, pty_spec)
+      6.   Execute spawn (detached=gnome-terminal, embedded=return spec)
+      7-8. Discover session id and update trace
+    Returns dict with trace_id, cli_session_id, repo_path, branch, spawn_mode, pty_spec.
+    """
+    trace_id, task_id_val, project_id, branch, repo_path, config, pty_spec, title = prepare_spawn(
+        task_id=task_id,
+        agent_config_id=agent_config_id,
+        input_spec=input_spec,
+        preceding_trace_id=preceding_trace_id,
+        initial_input=initial_input,
+        spawn_mode=spawn_mode,
+    )
+
+    if spawn_mode == "detached":
+        execute_detached_spawn(pty_spec, title)
+
+    spawned_at = time.time()
+    cli_session_id = discover_and_update_cli_session(trace_id, spawned_at, task_id)
+
     return {
         "trace_id": str(trace_id),
         "cli_session_id": cli_session_id,
         "repo_path": str(repo_path),
         "branch": branch,
+        "spawn_mode": spawn_mode,
+        "pty_spec": pty_spec if spawn_mode == "embedded" else None,
     }

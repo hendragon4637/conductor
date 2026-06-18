@@ -1,0 +1,90 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: no project selected
+    - navigation [ref=e10]:
+      - link "agent configs" [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ Finance Tracker" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/finance-tracker"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: Finance Tracker
+        - link "▸ simple-calculator" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/simple-calculator"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: simple-calculator
+        - link "▸ other-proj" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/other-proj"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: other-proj
+        - link "▸ smoke-proj" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/smoke-proj"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: smoke-proj
+        - button "+ New project" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [ref=e27] [cursor=pointer]:
+          - /url: "#/sessions"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e152]:
+        - generic [ref=e154]:
+          - heading "Plan" [level=2] [ref=e155]
+          - generic [ref=e156]: "A complete plan: goal, worktree decision, agents (existing or new), DAG with dependencies, success criteria, then approve."
+        - generic [ref=e157]: "🧠 Brain decomposes (frontier model) at every create/change: ① promote-from-chat · ② new plan here · ③ refine-with-brain · ④ append / cross-project node · ⑤ trigger (cron run_task). Each re-decomposes the DAG."
+        - generic [ref=e158]:
+          - generic [ref=e159]:
+            - generic [ref=e160]:
+              - generic [ref=e161]: ▸ finance-tracker
+              - generic [ref=e162] [cursor=pointer]:
+                - generic [ref=e163]: Plan from thread-1
+                - generic [ref=e165]: from chat
+            - generic [ref=e166] [cursor=pointer]: ＋ new plan, same worktree
+            - generic [ref=e167] [cursor=pointer]: ＋ new worktree + plan
+          - generic [ref=e168]:
+            - heading "Select a plan" [level=3] [ref=e169]
+            - paragraph [ref=e170]: Choose a plan from the sidebar to view details.

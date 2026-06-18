@@ -1,0 +1,12 @@
+name: generic_quality
+applies_to: ["default"]
+items:
+  - id: meets_goal
+    rubric_item: "Does the deliverable achieve the node's stated success criterion?"
+    weight: 2.0
+  - id: complete
+    rubric_item: "Is the work complete (no TODOs, stubs, or half-done parts where finished work was required)?"
+    weight: 1.5
+  - id: quality
+    rubric_item: "Is the overall quality acceptable for the stated purpose?"
+    weight: 1.0

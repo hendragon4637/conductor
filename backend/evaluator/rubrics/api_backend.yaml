@@ -1,0 +1,15 @@
+name: api_backend
+applies_to: ["api", "backend", "fastapi", "rest"]
+items:
+  - id: rest_design
+    rubric_item: "Are endpoints RESTful with correct verbs and status codes (200/201/404/422)?"
+    weight: 1.5
+  - id: validation
+    rubric_item: "Does it validate inputs and reject malformed/negative/empty values with clear errors?"
+    weight: 1.5
+  - id: data_integrity
+    rubric_item: "Is data stored with correct types (e.g. money as integer cents, no float) and constraints?"
+    weight: 2.0
+  - id: tested
+    rubric_item: "Are the core endpoints covered by tests that actually assert behavior (not trivial)?"
+    weight: 1.5

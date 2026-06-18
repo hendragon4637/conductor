@@ -1,0 +1,103 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: no project selected
+    - navigation [ref=e10]:
+      - link "agent configs" [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ Finance Tracker" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/finance-tracker"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: Finance Tracker
+        - link "▸ simple-calculator" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/simple-calculator"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: simple-calculator
+        - link "▸ other-proj" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/other-proj"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: other-proj
+        - link "▸ smoke-proj" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/smoke-proj"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: smoke-proj
+        - button "+ New project" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [ref=e27] [cursor=pointer]:
+          - /url: "#/sessions"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e116]:
+        - generic [ref=e117]:
+          - generic [ref=e118]:
+            - generic [ref=e119]: Threads
+            - button "＋" [ref=e120] [cursor=pointer]
+          - generic [ref=e128] [cursor=pointer]: New Chat
+        - generic [ref=e123]:
+          - generic [ref=e124]:
+            - combobox [ref=e129]:
+              - option "local-test" [selected]
+              - option "deepseek-v4-flash-free"
+            - generic [ref=e130]: "projects:"
+            - generic [ref=e142] [cursor=pointer]:
+              - text: Finance Tracker
+              - generic [ref=e143]: ✕
+            - button "＋ project" [ref=e131] [cursor=pointer]
+            - generic [ref=e132]: think only
+          - generic [ref=e133]:
+            - generic [ref=e145]:
+              - generic [ref=e146]: user
+              - generic [ref=e147]: "I want to build a simple personal finance tracker: a FastAPI backend with CRUD for transactions (id, date, amount_cents, category, note) using SQLite for simplicity, and a minimal HTML page to add, list, and delete transactions. Help me outline the pieces. The final product must be runnable."
+            - generic [ref=e148]:
+              - generic [ref=e149]: assistant
+              - generic [ref=e150]: "<think> Okay, the user wants to build a personal finance tracker with FastAPI backend using SQLite and a minimal HTML frontend. Let me break down what needs to be done. First, the backend. They mentioned CRUD operations for transactions. So I need to set up a FastAPI app that connects to SQLite. I'll need to create a database with a transactions table. The columns are id, date, amount_cents, category, note. I should use SQLAlchemy for ORM, maybe with a SQLite database in memory or a file. Wait, the user said SQLite for simplicity. So maybe using a SQLite database file. I'll need to create a model for the Transaction. Then, the CRUD endpoints: create, read, update, delete. For the SQLite setup, I'll use the SQLAlchemy ORM with a SQLite database. The FastAPI app will have endpoints for /transactions, with methods like POST, GET, PUT, DELETE. Next, the frontend. They want a minimal HTML page. Since it's a single HTML file, maybe using basic HTML, CSS, and JavaScript (like Fetch API) to interact with the backend. The HTML should have forms to add transactions, a list to display them, and buttons to delete. The user wants it to be runnable, so maybe the HTML is served by the FastAPI app, or hosted separately. But since the user wants the final product to be runnable, maybe the HTML is served via the FastAPI app. But how to serve static files in FastAPI? Oh right, you can use the static directory, but for simplicity, maybe the HTML is part of the FastAPI app using a route that returns the HTML. Wait, the user said \"a minimal HTML page to add, list, and delete transactions.\" So the HTML needs to be a standalone file that can be opened in a browser, interacting with the FastAPI backend. So the HTML would make requests to the FastAPI endpoints. So the HTML page would be hosted separately, but for the purpose of this project, maybe the FastAPI app serves the HTML via a route like /. But how to handle that. Let me think. The FastAPI app can have a route that returns the HTML file. So, when someone visits the root URL, they see the HTML page. The HTML uses JavaScript to communicate with the FastAPI endpoints. So the steps would be: 1. Set up the FastAPI backend with SQLite database and CRUD endpoints. 2. Create a minimal HTML file that can add, list, and delete transactions using Fetch"
+          - generic [ref=e136]:
+            - button "📎" [ref=e137] [cursor=pointer]
+            - button "🖼️" [ref=e138] [cursor=pointer]
+            - textbox "ask anything…" [ref=e139]
+            - button "Send" [disabled] [ref=e151]
+            - button "Promote to plan →" [ref=e141] [cursor=pointer]

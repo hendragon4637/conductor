@@ -895,6 +895,90 @@ label {
 .radio-pill.selected.partial { background: rgba(243, 204, 78, 0.15); border-color: var(--status-running); color: var(--status-running); }
 
 /* ─────────────────────────────────────────────────────────────────
+   Mockup-compatible layout utilities
+   ───────────────────────────────────────────────────────────────── */
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+
+.panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.editor {
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 16px;
+  background: var(--bg-elevated);
+}
+
+.editor label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: block;
+  margin: 6px 0 2px;
+}
+.editor input,
+.editor select,
+.editor textarea { width: 100%; }
+
+.kv { font-size: var(--text-xs); line-height: 1.7; }
+.kv dt, .kv b:first-child {
+  display: inline-block;
+  min-width: 100px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.tag {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  padding: 2px 7px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 9px 0;
+}
+
+.tiny { font-size: 11px; }
+
+.muted { color: var(--text-muted); }
+
+.mono { font-family: var(--font-mono); }
+
+.between { justify-content: space-between; }
+
+.up { color: var(--status-success); font-size: 11px; }
+.down { color: var(--status-failed); font-size: 11px; }
+
+.metric {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px;
+}
+.metric .value {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--accent-text);
+  margin: 6px 0;
+}
+
+.btn-tiny {
+  padding: 2px 8px;
+  font-size: 10px;
+}
+
+/* ─────────────────────────────────────────────────────────────────
    Observations table (override .table for drawer compactness)
    ───────────────────────────────────────────────────────────────── */
 
@@ -906,3 +990,217 @@ label {
   color: var(--accent-text);
   font-family: var(--font-mono);
 }
+
+/* ─────────────────────────────────────────────────────────────────
+   Chat view (split-layout)
+   ───────────────────────────────────────────────────────────────── */
+
+.chat-layout {
+  display: flex;
+  height: 100%;
+  gap: var(--space-4);
+}
+
+.chat-sidebar-inner {
+  width: 200px;
+  flex-shrink: 0;
+}
+
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+}
+
+.chat-msg {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  max-width: 80%;
+}
+
+.chat-msg-user {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  align-self: flex-end;
+}
+
+.chat-msg-assistant {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  align-self: flex-start;
+}
+
+.chat-msg-role {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: var(--space-1);
+}
+
+.chat-msg-content {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-input-bar {
+  display: flex;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.chat-input-bar .input {
+  flex: 1;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Panel (view container — same as card, kept for mockup compat)
+   ───────────────────────────────────────────────────────────────── */
+
+.panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Editor (dashed-border form container)
+   ───────────────────────────────────────────────────────────────── */
+
+.editor {
+  border: 1px dashed var(--accent-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+  background: var(--bg-input);
+}
+.editor label {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  margin: var(--space-3) 0 var(--space-1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.editor input,
+.editor select,
+.editor textarea {
+  width: 100%;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Grid2 (two-column layout)
+   ───────────────────────────────────────────────────────────────── */
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Segmented button group
+   ───────────────────────────────────────────────────────────────── */
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.seg button {
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.seg button:hover {
+  background: var(--bg-elevated-2);
+  color: var(--text-primary);
+}
+.seg button.on {
+  background: var(--accent);
+  color: #0A0A0A;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Banner (info / guardrails)
+   ───────────────────────────────────────────────────────────────── */
+
+.banner {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  margin-bottom: var(--space-3);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Between (flex justify-content space-between)
+   ───────────────────────────────────────────────────────────────── */
+
+.between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Button — tiny variant
+   ───────────────────────────────────────────────────────────────── */
+
+.btn-tiny {
+  padding: 2px var(--space-2);
+  font-size: 10px;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Pill badges
+   ───────────────────────────────────────────────────────────────── */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-pill);
+  padding: 1px var(--space-2);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.pill-run   { background: rgba(243, 204, 78, 0.15); color: var(--status-running); border-color: rgba(243, 204, 78, 0.35); }
+.pill-done  { background: rgba(93, 213, 111, 0.15); color: var(--status-success); border-color: rgba(93, 213, 111, 0.35); }
+.pill-queued { background: rgba(123, 123, 123, 0.15); color: var(--status-idle);    border-color: rgba(123, 123, 123, 0.35); }
+.pill-fail  { background: rgba(244, 102, 102, 0.15); color: var(--status-failed);  border-color: rgba(244, 102, 102, 0.35); }
+
+/* ─────────────────────────────────────────────────────────────────
+   Monospace utility
+   ───────────────────────────────────────────────────────────────── */
+
+.mono { font-family: var(--font-mono); }
+
+/* ─────────────────────────────────────────────────────────────────
+   Small / subtitle utilities
+   ───────────────────────────────────────────────────────────────── */
+
+.small    { font-size: var(--text-sm); }
+.subtitle { font-size: var(--text-sm); color: var(--text-secondary); }

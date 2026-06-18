@@ -1,0 +1,43 @@
+{
+  "plan_brain": {
+    "primary": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "base_url": "https://openrouter.ai/api/v1"
+    },
+    "fallback": [
+      {
+        "provider": "nvidia_nim",
+        "model": "meta/llama-3.3-70b-instruct",
+        "api_key_env": "NIM_API_KEY",
+        "base_url": "https://integrate.api.nvidia.com/v1"
+      },
+      {
+        "provider": "local_ovms",
+        "model": "qwen3-8b-int4-ov",
+        "base_url": "http://localhost:8001/v3"
+      }
+    ]
+  },
+  "evaluator": {
+    "primary": {
+      "provider": "nvidia_nim",
+      "model": "nvidia/gpt-oss-120b",
+      "api_key_env": "NIM_API_KEY",
+      "base_url": "https://integrate.api.nvidia.com/v1"
+    },
+    "fallback": [
+      {
+        "provider": "local_ovms",
+        "model": "qwen3-8b-int4-ov",
+        "base_url": "http://localhost:8001/v3"
+      }
+    ]
+  },
+  "golden_set": {
+    "provider": "local_ovms",
+    "model": "qwen3-8b-int4-ov",
+    "base_url": "http://localhost:8001/v3"
+  }
+}

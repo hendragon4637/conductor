@@ -1,0 +1,142 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: no project selected
+    - navigation [ref=e10]:
+      - link "agent configs" [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ Finance Tracker" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/finance-tracker"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: Finance Tracker
+        - link "▸ simple-calculator" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/simple-calculator"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: simple-calculator
+        - link "▸ other-proj" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/other-proj"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: other-proj
+        - link "▸ smoke-proj" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/smoke-proj"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: smoke-proj
+        - button "+ New project" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [ref=e27] [cursor=pointer]:
+          - /url: "#/sessions"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e339]:
+        - generic [ref=e341]:
+          - heading "Plan" [level=2] [ref=e342]
+          - generic [ref=e343]: "A complete plan: goal, worktree decision, agents (existing or new), DAG with dependencies, success criteria, then approve."
+        - generic [ref=e344]: "🧠 Brain decomposes (frontier model) at every create/change: ① promote-from-chat · ② new plan here · ③ refine-with-brain · ④ append / cross-project node · ⑤ trigger (cron run_task). Each re-decomposes the DAG."
+        - generic [ref=e345]:
+          - generic [ref=e346]:
+            - generic [ref=e347]:
+              - generic [ref=e348]: ▸ finance-tracker
+              - generic [ref=e349] [cursor=pointer]:
+                - generic [ref=e350]: Plan from thread-1
+                - generic [ref=e352]: from chat
+            - generic [ref=e353] [cursor=pointer]: ＋ new plan, same worktree
+            - generic [ref=e354] [cursor=pointer]: ＋ new worktree + plan
+          - generic [ref=e355]:
+            - generic [ref=e358]:
+              - generic [ref=e359]: Plan from thread-1
+              - generic [ref=e360]: pending approval
+            - generic [ref=e361]: "derived from chat thread \"thread-1\" · plan brain: local-ovms/qwen3-8b-int4"
+            - generic [ref=e363]: Goal
+            - generic [ref=e364]: "I want to build a simple personal finance tracker: a FastAPI backend with CRUD for transactions (id, date, amount_cents, category, note) using SQLite for simplicity, and a minimal HTML page to add, list, and delete transactions. Help me outline the pieces. The final product must be runnable."
+            - generic [ref=e366]:
+              - generic [ref=e367]: Workspace / worktree
+              - button "change" [ref=e368] [cursor=pointer]
+            - generic [ref=e369]:
+              - generic [ref=e370]: Project finance-tracker
+              - generic [ref=e371]: Worktree —
+              - generic [ref=e372]: Branch —
+              - generic [ref=e373]: Kind work
+            - generic [ref=e375]:
+              - generic [ref=e376]: Plan DAG — chunks (each node = an AionUi team; built-in orchestrator leads, you pick members)
+              - generic [ref=e377]:
+                - button "＋ Append node" [active] [ref=e378] [cursor=pointer]
+                - button "＋ Cross-project node" [ref=e379] [cursor=pointer]
+            - generic [ref=e380]: "worktree: — · Conductor sends ONE brief per node to the built-in orchestrator (single entry point) · sequential chunks share one worktree · Conductor commits + tags node-<id> after each"
+            - generic [ref=e382]: No nodes yet. Append a node to start building the DAG.
+            - generic [ref=e398]:
+              - text: ＋ Append node (same worktree) · re-decomposes the live plan
+              - generic [ref=e399]: Team members (multi-select) — orchestrator leads automatically
+              - listbox [ref=e400]:
+                - option "finance-fullstack-executor (executor)" [ref=e401]
+                - option "finance-planner (planner)" [ref=e402]
+                - option "finance-reviewer (reviewer)" [ref=e403]
+                - option "opencode:backend-executor (executor)" [ref=e404]
+                - option "opencode:backend-planner (planner)" [ref=e405]
+                - option "opencode:backend-reviewer (reviewer)" [ref=e406]
+                - option "orchestrator (orchestrator)" [ref=e407]
+              - generic [ref=e408]: Depends on (node ids, multi-select)
+              - listbox [ref=e409]
+              - generic [ref=e410]: Task
+              - textbox "What should this node do?" [ref=e411]
+              - generic [ref=e412]: Success criterion
+              - textbox "e.g. all tests pass" [ref=e413]
+              - generic [ref=e414]:
+                - button "Append & spawn" [disabled] [ref=e415]
+                - button "Cancel" [ref=e416] [cursor=pointer]
+            - generic [ref=e384]:
+              - generic [ref=e385]: Execution (AionUi) team mode · 0 members
+              - generic [ref=e386]: Autonomy auto (non-stop)
+              - generic [ref=e387]: Est. budget ~1k tok
+              - generic [ref=e388]: Review goal (Conductor) + execution (AionUi reviewer)
+            - generic [ref=e389]:
+              - button "✓ Approve & spawn team" [ref=e390] [cursor=pointer]
+              - button "Save draft" [ref=e391] [cursor=pointer]
+              - button "Reject" [ref=e392] [cursor=pointer]
+            - generic [ref=e394]:
+              - button "🖼️" [ref=e395] [cursor=pointer]
+              - textbox "refine the plan with the brain…" [ref=e396]
+              - button "Send" [disabled] [ref=e397]

@@ -1,0 +1,128 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "AIPC Conductor" [ref=e5] [cursor=pointer]:
+      - /url: "#/"
+      - generic [ref=e7]: AIPC Conductor
+    - generic [ref=e9]: no project selected
+    - navigation [ref=e10]:
+      - link "agent configs" [ref=e11] [cursor=pointer]:
+        - /url: "#/configs"
+  - generic [ref=e12]:
+    - complementary [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Projects
+        - link "▸ Finance Tracker" [ref=e57] [cursor=pointer]:
+          - /url: "#/p/finance-tracker"
+          - generic [ref=e58]: ▸
+          - generic [ref=e59]: Finance Tracker
+        - link "▸ simple-calculator" [ref=e60] [cursor=pointer]:
+          - /url: "#/p/simple-calculator"
+          - generic [ref=e61]: ▸
+          - generic [ref=e62]: simple-calculator
+        - link "▸ other-proj" [ref=e63] [cursor=pointer]:
+          - /url: "#/p/other-proj"
+          - generic [ref=e64]: ▸
+          - generic [ref=e65]: other-proj
+        - link "▸ smoke-proj" [ref=e66] [cursor=pointer]:
+          - /url: "#/p/smoke-proj"
+          - generic [ref=e67]: ▸
+          - generic [ref=e68]: smoke-proj
+        - button "+ New project" [ref=e427] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]: Tabs
+        - link "· Chat" [ref=e21] [cursor=pointer]:
+          - /url: "#/chat"
+          - generic [ref=e22]: ·
+          - generic [ref=e23]: Chat
+        - link "· Plan" [ref=e24] [cursor=pointer]:
+          - /url: "#/plan"
+          - generic [ref=e25]: ·
+          - generic [ref=e26]: Plan
+        - link "· Sessions" [ref=e27] [cursor=pointer]:
+          - /url: "#/sessions"
+          - generic [ref=e28]: ·
+          - generic [ref=e29]: Sessions
+        - link "· Scores" [ref=e30] [cursor=pointer]:
+          - /url: "#/scores"
+          - generic [ref=e31]: ·
+          - generic [ref=e32]: Scores
+        - link "· Ratchet" [ref=e33] [cursor=pointer]:
+          - /url: "#/ratchet"
+          - generic [ref=e34]: ·
+          - generic [ref=e35]: Ratchet
+        - link "· Triggers" [ref=e36] [cursor=pointer]:
+          - /url: "#/triggers"
+          - generic [ref=e37]: ·
+          - generic [ref=e38]: Triggers
+        - link "· Worktrees" [ref=e39] [cursor=pointer]:
+          - /url: "#/worktrees"
+          - generic [ref=e40]: ·
+          - generic [ref=e41]: Worktrees
+        - link "· Agents" [ref=e42] [cursor=pointer]:
+          - /url: "#/configs"
+          - generic [ref=e43]: ·
+          - generic [ref=e44]: Agents
+        - link "· Memory" [ref=e45] [cursor=pointer]:
+          - /url: "#/memory"
+          - generic [ref=e46]: ·
+          - generic [ref=e47]: Memory
+        - link "· Settings" [ref=e48] [cursor=pointer]:
+          - /url: "#/settings"
+          - generic [ref=e49]: ·
+          - generic [ref=e50]: Settings
+    - main [ref=e53]:
+      - generic [ref=e775]:
+        - generic [ref=e777]:
+          - heading "Plan" [level=2] [ref=e778]
+          - generic [ref=e779]: "A complete plan: goal, worktree decision, agents (existing or new), DAG with dependencies, success criteria, then approve."
+        - generic [ref=e780]: "🧠 Brain decomposes (frontier model) at every create/change: ① promote-from-chat · ② new plan here · ③ refine-with-brain · ④ append / cross-project node · ⑤ trigger (cron run_task). Each re-decomposes the DAG."
+        - generic [ref=e781]:
+          - generic [ref=e782]:
+            - generic [ref=e783]:
+              - generic [ref=e784]: ▸ finance-tracker
+              - generic [ref=e785] [cursor=pointer]:
+                - generic [ref=e786]: Plan from thread-2
+                - generic [ref=e788]: from chat
+            - generic [ref=e789]:
+              - generic [ref=e790]: ▸ Other
+              - generic [ref=e791] [cursor=pointer]:
+                - generic [ref=e792]: Plan from thread-1
+                - generic [ref=e794]: from chat
+            - generic [ref=e795] [cursor=pointer]: ＋ new plan, same worktree
+            - generic [ref=e796] [cursor=pointer]: ＋ new worktree + plan
+          - generic [ref=e797]:
+            - generic [ref=e800]:
+              - generic [ref=e801]: Plan from thread-2
+              - generic [ref=e802]: pending approval
+            - generic [ref=e803]: "derived from chat thread \"thread-2\" · plan brain: local-ovms/qwen3-8b-int4"
+            - generic [ref=e805]: Goal
+            - generic [ref=e806]: "I want to build a simple personal finance tracker: a FastAPI backend with CRUD for transactions (id, date, amount_cents, category, note) using SQLite for simplicity, and a minimal HTML page to add, list, and delete transactions. Help me outline the pieces. The final product must be runnable."
+            - generic [ref=e808]:
+              - generic [ref=e809]: Workspace / worktree
+              - button "change" [ref=e810] [cursor=pointer]
+            - generic [ref=e811]:
+              - generic [ref=e812]: Project finance-tracker
+              - generic [ref=e813]: Worktree —
+              - generic [ref=e814]: Branch —
+              - generic [ref=e815]: Kind work
+            - generic [ref=e817]:
+              - generic [ref=e818]: Plan DAG — chunks (each node = an AionUi team; built-in orchestrator leads, you pick members)
+              - generic [ref=e819]:
+                - button "Edit" [disabled] [ref=e820]
+                - button "＋ Append node" [ref=e821] [cursor=pointer]
+                - button "＋ Cross-project node" [ref=e822] [cursor=pointer]
+            - generic [ref=e823]: "worktree: — · Conductor sends ONE brief per node to the built-in orchestrator (single entry point) · sequential chunks share one worktree · Conductor commits + tags node-<id> after each"
+            - generic [ref=e825]: No nodes yet. Append a node to start building the DAG.
+            - generic [ref=e827]:
+              - generic [ref=e828]: Execution (AionUi) team mode · 0 members
+              - generic [ref=e829]: Autonomy auto (non-stop)
+              - generic [ref=e830]: Est. budget ~1k tok
+              - generic [ref=e831]: Review goal (Conductor) + execution (AionUi reviewer)
+            - generic [ref=e832]:
+              - button "✓ Approve & spawn team" [ref=e833] [cursor=pointer]
+              - button "Save draft" [ref=e834] [cursor=pointer]
+              - button "Reject" [ref=e835] [cursor=pointer]
+            - generic [ref=e837]:
+              - button "🖼️" [ref=e838] [cursor=pointer]
+              - textbox "refine the plan with the brain…" [ref=e839]
+              - button "Send" [disabled] [ref=e840]

@@ -1,0 +1,61 @@
+# /opt/aipc/conductor/agent_configs/finance-planner.yaml
+# Planner: decomposes finance-tracker intent into a plan DAG for executor + reviewer.
+
+agent_config_id: finance-planner
+cli: opencode
+harness: opencode
+harness_capabilities:
+  interactive: true
+  headless: true
+  session_persistence: true
+  sub_agents: true
+  tool_calling: native
+  data_format: sqlite
+  data_path_template: ~/.local/share/opencode/opencode.db
+domain: finance
+role: planner
+pattern: standalone
+version: 1
+
+input_spec_schema: planning_task
+output_spec_schema: plan_dag
+
+system_prompt: |
+  You are a planning specialist for full-stack CRUD applications.
+
+  You receive a high-level task and decompose it into a sequence of
+  plan nodes. Each node specifies: agent_config (e.g. finance-fullstack-executor
+  or finance-reviewer), clear instructions, and dependency ordering.
+
+  Hard rules:
+  - Output a PlanDAG JSON with nodes and edges.
+  - Each node must reference an existing agent_config.
+  - Dependencies must be acyclic (planner → executor → reviewer).
+  - Do NOT implement anything — only produce the plan.
+
+  After completing the plan, print a JSON object on its own line prefixed
+  with `__PLAN_DAG__:`.
+
+allowed_tools:
+  - read
+
+permission_policy:
+  mode: auto_approve
+
+model_preference: openai/gpt-4o-mini
+
+routing_rules:
+  pattern_hint: standalone
+  on_success:
+    - condition: ""
+      next_config: null
+      terminates_task: true
+  on_failure:
+    - condition: ""
+      next_config: null
+      terminates_task: false
+      escalate: human_review
+  max_iterations: 1
+  terminates_task_if_none: true
+
+active: true

@@ -1,0 +1,12 @@
+name: review_verification
+applies_to: ["reviewer", "review", "qa"]
+items:
+  - id: ran_it
+    rubric_item: "Does the review show the product was actually run/exercised (not just read)?"
+    weight: 2.0
+  - id: e2e_cycle
+    rubric_item: "Was the full user cycle (e.g. add list delete) verified end to end in the running product?"
+    weight: 2.0
+  - id: caught_issues
+    rubric_item: "Does the review identify real issues or convincingly confirm none exist (specific, not generic)?"
+    weight: 1.5

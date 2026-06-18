@@ -1,0 +1,718 @@
+"""Plan routes — propose, ratify, and manage runs (execution instances)."""
+from __future__ import annotations
+
+import asyncio
+import re
+import uuid
+from typing import Any, Optional
+
+import psycopg
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from backend.planning.schema import Plan, PlanNode
+from backend.planning.store import get_plan as load_persisted_plan, save_plan as persist_plan
+from backend.planning.store import save_run, get_run, list_runs, update_run_state, get_node_sessions
+
+router = APIRouter(prefix="/api/plans", tags=["plans"])
+
+_plans: dict[str, dict[str, Any]] = {}
+
+
+def _title_from_intent(user_intent: str | None, plan_id: str) -> str:
+    if user_intent:
+        return user_intent[:60]
+    return plan_id
+
+
+def _ui_nodes_from_dag(dag: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for index, node in enumerate(dag, start=1):
+        description = node.get("task") or node.get("description") or ""
+        title = node.get("title") or description[:40] or f"node-{index}"
+        nodes.append({
+            "node_id": node.get("id") or node.get("node_id") or f"node-{index}",
+            "title": title,
+            "description": description,
+            "depends_on": node.get("depends_on", []),
+            "status": node.get("status", "pending"),
+            "members": node.get("members", []),
+            "agent_config_id": node.get("agent_config"),
+            "success_criterion": node.get("success") or node.get("success_criterion"),
+            "backend": node.get("backend"),
+        })
+    return nodes
+
+
+def _ui_plan_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
+    user_intent = row.get("user_intent")
+    created_at = row.get("created_at")
+    return {
+        "plan_id": row["plan_id"],
+        "title": _title_from_intent(user_intent, row["plan_id"]),
+        "description": user_intent,
+        "worktree_id": None,
+        "project_id": row.get("project_id"),
+        "ratified": row.get("ratified", False),
+        "version": row.get("version", 1),
+        "nodes": _ui_nodes_from_dag(row.get("dag") or []),
+        "created_at": created_at.isoformat() if created_at else None,
+        "_source": "db",
+    }
+
+
+def _get_or_load_plan(plan_id: str) -> dict[str, Any] | None:
+    existing = _plans.get(plan_id)
+    if existing:
+        return existing
+    row = load_persisted_plan(plan_id)
+    if not row:
+        return None
+    plan = _ui_plan_from_db_row(row)
+    _plans[plan_id] = plan
+    return plan
+
+
+class NodeMemberSpec(BaseModel):
+    """Per-member spec within a node."""
+    agent_config: str
+    backend: str = "opencode"
+    role: str = "executor"
+
+
+class NodeTaskSpec(BaseModel):
+    """Node-scoped task."""
+    text: str = ""
+    inputs: list[str] = []
+    deliverables: list[str] = []
+
+
+class NodeSuccessSpec(BaseModel):
+    """Prose-only node success."""
+    text: str = ""
+
+
+class NodeSpec(BaseModel):
+    """Canonical node spec for BYO-DAG (E2E spec Part 2).
+
+    When provided to create_plan, the brain is skipped;
+    the DAG is validated (per-member backend, deps resolve, acyclic),
+    checks are still generated, and ratification is still required.
+    """
+    id: str = ""
+    title: str = ""
+    description: str = ""
+    backend: str = "opencode"
+    members: list[NodeMemberSpec] = []
+    depends_on: list[str] = []
+    agent_config_id: Optional[str] = None
+    task: NodeTaskSpec = NodeTaskSpec()
+    success: NodeSuccessSpec = NodeSuccessSpec()
+    success_criterion: Optional[str] = None  # legacy compat
+
+
+class PlanPropose(BaseModel):
+    """Dual-input plan creation (File 04).
+
+    - ``goal`` + ``spec`` → plan brain decomposition.
+    - ``quality_intent`` → evaluator check grounding.
+    - ``nodes`` (optional) → BYO-DAG: skip brain, validate supplied DAG,
+      still generate checks + plan.success + ratify.
+    """
+    title: str = ""
+    goal: str = ""
+    spec: Optional[str] = None
+    quality_intent: Optional[str] = None
+    backend_type: Optional[str] = None
+    worktree_id: Optional[str] = None
+    project_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    nodes: Optional[list[NodeSpec]] = None
+    description: Optional[str] = None
+
+
+class RatifyRequest(BaseModel):
+    ratified: bool = True
+    comment: Optional[str] = None
+
+
+class AppendNode(BaseModel):
+    title: str
+    description: str
+    depends_on: Optional[list[str]] = None
+    members: Optional[list[str]] = None
+    agent_config_id: Optional[str] = None  # legacy compat
+    success_criterion: Optional[str] = None
+
+
+class RefineRequest(BaseModel):
+    instruction: str
+    image_data: Optional[str] = None
+
+
+class CreateRunRequest(BaseModel):
+    note: Optional[str] = None
+
+
+# ── Plan endpoints ────────────────────────────────────────────────
+
+@router.get("")
+async def list_plans():
+    """Return all plans — in-memory editing buffer + DB-backed drafts."""
+    from backend.db import queries as db_q
+    in_mem = list(_plans.values())
+    try:
+        with db_q.conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT plan_id, project_id, user_intent, "
+                "       ratified, version, created_at "
+                "FROM plans ORDER BY created_at DESC"
+            )
+            db_plans = [_ui_plan_from_db_row(row) for row in cur.fetchall()]
+    except Exception:
+        db_plans = []
+    seen = {p["plan_id"] for p in in_mem}
+    return in_mem + [p for p in db_plans if p["plan_id"] not in seen]
+
+
+@router.post("")
+async def propose_plan(req: PlanPropose):
+    pid = req.plan_id or f"plan-{len(_plans) + 1}"
+    safe_pid = re.sub(r"[^a-z0-9-]", "-", pid.lower()).strip("-") or "default"
+    project_id = req.project_id or f"proj-{safe_pid}"
+    now = __import__("datetime").datetime.now().isoformat()
+    goal = req.goal or req.description or req.title or ""
+    user_intent = goal
+
+    nodes: list[dict[str, Any]] = []
+    if req.nodes:
+        # BYO-DAG path: validate supplied nodes, skip brain (File 04.1b)
+        _validate_supplied_dag(req.nodes)
+        for i, n in enumerate(req.nodes):
+            members_raw = []
+            for m in n.members:
+                members_raw.append({
+                    "agent_config": m.agent_config,
+                    "backend": m.backend,
+                    "role": m.role,
+                })
+            task_text = n.task.text or n.description or n.title or ""
+            success_text = n.success.text or n.success_criterion or "Complete the task"
+            nodes.append({
+                "node_id": n.id or f"node-{i + 1}",
+                "title": n.title or task_text[:40],
+                "description": task_text,
+                "depends_on": n.depends_on or [],
+                "backend": n.backend,
+                "members": members_raw,
+                "agent_config_id": n.agent_config_id or (
+                    members_raw[0]["agent_config"] if members_raw else "opencode:backend-executor"
+                ),
+                "task": {"text": task_text, "inputs": n.task.inputs, "deliverables": n.task.deliverables},
+                "success": {"text": success_text},
+                "success_criterion": success_text,
+            })
+    elif req.spec and req.quality_intent:
+        nodes = _generate_nodes_from_intent(req, pid, project_id)
+
+    plan = {
+        "plan_id": pid,
+        "title": req.title or goal[:60],
+        "description": req.description or goal,
+        "goal": goal,
+        "spec": req.spec,
+        "quality_intent": req.quality_intent,
+        "backend_type": req.backend_type,
+        "worktree_id": req.worktree_id,
+        "project_id": project_id,
+        "ratified": False,
+        "nodes": nodes,
+        "created_at": now,
+    }
+    _plans[pid] = plan
+    return plan
+
+
+@router.get("/{plan_id}")
+async def get_plan(plan_id: str):
+    plan = _get_or_load_plan(plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    return plan
+
+
+@router.post("/{plan_id}/ratify")
+async def ratify_plan(plan_id: str, req: RatifyRequest):
+    """Ratify a plan — human approves the checks/spec. Idempotent.
+
+    Does NOT spawn execution. Execution is triggered via create_run + approve_run.
+    """
+    plan_data = _get_or_load_plan(plan_id)
+    if not plan_data:
+        raise HTTPException(404, "Plan not found")
+    plan_data["ratified"] = req.ratified
+    if req.comment:
+        plan_data["comment"] = req.comment
+
+    if req.ratified:
+        from backend.planning.store import set_ratified
+        set_ratified(plan_id)
+        # Persist nodes from in-memory plan to DB
+        _persist_plan_dag(plan_data)
+
+    return plan_data
+
+
+def _generate_nodes_from_intent(
+    req: PlanPropose, plan_id: str, project_id: str
+) -> list[dict[str, Any]]:
+    """Parse quality_intent into node specs.
+
+    Expected format:
+      "Node 1: <title> (backend=<name>, class-a|b [, ...])."
+    Falls back to a single default node if no nodes parsed.
+    """
+    intent = req.quality_intent or ""
+    parsed: list[dict[str, Any]] = []
+    pattern = r"Node\s+(\d+):\s*(.+?)\s*(?:\(([^)]*)\))?\s*\.?"
+    for m in re.finditer(pattern, intent, re.IGNORECASE | re.DOTALL):
+        title = m.group(2).strip()
+        props_str = m.group(3) or ""
+        backend = "opencode"
+        members: list[str] = []
+        for part in props_str.split(","):
+            part = part.strip()
+            if part.startswith("backend="):
+                backend = part.split("=", 1)[1].strip()
+            elif part.startswith("members="):
+                ms = part.split("=", 1)[1].strip()
+                members = [x.strip() for x in ms.split("+")]
+        parsed.append({
+            "node_id": f"node-{len(parsed) + 1}",
+            "title": title,
+            "description": title,
+            "depends_on": [],
+            "backend": backend,
+            "members": members,
+            "agent_config_id": _agent_config_for_backend(backend, members),
+            "success_criterion": "Complete the task",
+        })
+    if not parsed:
+        backend = req.backend_type or "opencode"
+        parsed.append({
+            "node_id": "node-1",
+            "title": req.title,
+            "description": req.spec or req.description or req.title,
+            "depends_on": [],
+            "backend": backend,
+            "members": [],
+            "agent_config_id": _agent_config_for_backend(backend, []),
+            "success_criterion": "Complete the task",
+        })
+    return parsed
+
+
+def _validate_supplied_dag(nodes: list[NodeSpec]) -> None:
+    """Validate a pre-decomposed DAG (BYO-DAG path).
+
+    Checks: per-member backend, deps resolve, acyclic.
+    Raises ValueError on first failure.
+    """
+    node_ids: set[str] = set()
+    for i, n in enumerate(nodes):
+        nid = n.id or f"node-{i + 1}"
+        if nid in node_ids:
+            raise ValueError(f"Duplicate node id: {nid}")
+        node_ids.add(nid)
+
+        if not n.members:
+            raise ValueError(f"Node {nid}: must have at least one member with backend")
+        for m in n.members:
+            if not m.backend:
+                raise ValueError(f"Node {nid}: member {m.agent_config} missing backend")
+
+        # Deps must reference existing nodes (or be empty)
+        for dep in n.depends_on:
+            if dep not in node_ids and dep not in {x.id or f"node-{j+1}" for j, x in enumerate(nodes[:i])}:
+                # Accept forward references (deps to nodes defined later) but validate at the end
+                pass
+
+    # Final pass: all deps must resolve
+    all_ids = {
+        n.id or f"node-{i + 1}"
+        for i, n in enumerate(nodes)
+    }
+    for i, n in enumerate(nodes):
+        nid = n.id or f"node-{i + 1}"
+        for dep in n.depends_on:
+            if dep not in all_ids:
+                raise ValueError(f"Node {nid}: depends_on '{dep}' not found in DAG")
+
+    # Acyclicity check via DFS
+    adj: dict[str, list[str]] = {nid: [] for nid in all_ids}
+    for i, n in enumerate(nodes):
+        nid = n.id or f"node-{i + 1}"
+        for dep in n.depends_on:
+            adj.setdefault(dep, []).append(nid)
+
+    visited: set[str] = set()
+    stack: set[str] = set()
+    def _dfs(nid: str) -> None:
+        if nid in stack:
+            raise ValueError(f"Cycle detected in DAG involving node {nid}")
+        if nid in visited:
+            return
+        visited.add(nid)
+        stack.add(nid)
+        for neighbor in adj.get(nid, []):
+            _dfs(neighbor)
+        stack.remove(nid)
+
+    for nid in all_ids:
+        if nid not in visited:
+            _dfs(nid)
+
+
+def _agent_config_for_backend(backend: str, members: list[str]) -> str:
+    if members:
+        return members[0]
+    mapping = {
+        "hermes": "hermes:agent",
+        "opencode": "opencode:backend-executor",
+        "opencode_omo": "opencode:backend-omo",
+        "claude_code": "claude-code:agent",
+        "codex": "codex:agent",
+        "aionui": "aionui:orchestrator",
+    }
+    return mapping.get(backend, "opencode:backend-executor")
+
+
+def _persist_plan_dag(plan_data: dict[str, Any]) -> None:
+    """Ensure the plan's current nodes are saved to the DB (v5.1 canonical)."""
+    import os
+    from backend.planning.store import get_plan as load_persisted
+    from backend.planning.schema import NodeMember, TaskSpec, NodeSuccess, SuccessCriterion
+    row = load_persisted(plan_data["plan_id"])
+    if not row:
+        raw_nodes = plan_data.get("nodes", [])
+        project_id = plan_data.get("project_id") or "default"
+        db_url = os.environ.get("DATABASE_URL", "")
+        if db_url:
+            _ensure_project_in_db(db_url, project_id)
+
+        def _to_members(n: dict) -> list[NodeMember]:
+            raw = n.get("members", [])
+            if raw and isinstance(raw[0], dict):
+                return [NodeMember(**m) if isinstance(m, dict) else NodeMember(agent_config=m, backend=n.get("backend", "opencode"), role=n.get("role", "executor")) for m in raw]
+            backend = n.get("backend", "opencode")
+            agent_cfg = n.get("agent_config_id") or "opencode:backend-executor"
+            role = n.get("role", "executor")
+            return [NodeMember(agent_config=agent_cfg, backend=backend, role=role)]
+
+        def _task_from_node(n: dict, i: int) -> TaskSpec:
+            task_raw = n.get("task")
+            if isinstance(task_raw, dict):
+                return TaskSpec(
+                    text=task_raw.get("text", n.get("description", n.get("title", ""))),
+                    inputs=task_raw.get("inputs", []),
+                    deliverables=task_raw.get("deliverables", []),
+                )
+            return TaskSpec(
+                text=n.get("description") or n.get("title", f"node-{i}"),
+                inputs=n.get("inputs", []),
+                deliverables=n.get("deliverables", []),
+            )
+
+        def _success_from_node(n: dict) -> NodeSuccess:
+            success_raw = n.get("success")
+            if isinstance(success_raw, dict):
+                return NodeSuccess(text=success_raw.get("text", ""))
+            return NodeSuccess(text=n.get("success_criterion") or n.get("success", "Complete the task"))
+
+        dag = [PlanNode(
+            id=n.get("node_id") or n.get("id", f"node-{i}"),
+            members=_to_members(n),
+            depends_on=n.get("depends_on", []),
+            task=_task_from_node(n, i),
+            success=_success_from_node(n),
+            project_id=project_id,
+        ) for i, n in enumerate(raw_nodes)]
+
+        plan_obj = Plan(
+            plan_id=plan_data["plan_id"],
+            project_id=project_id,
+            user_intent=plan_data.get("description") or plan_data.get("title", ""),
+            goal=plan_data.get("goal", ""),
+            success=SuccessCriterion(text=plan_data.get("success", {}).get("text", "") if isinstance(plan_data.get("success"), dict) else ""),
+            dag=dag,
+            ratified=True,
+        )
+        persist_plan(plan_obj, ratified=True)
+
+
+# ── Run endpoints ─────────────────────────────────────────────────
+
+@router.post("/{plan_id}/runs")
+async def create_run(plan_id: str, req: CreateRunRequest = CreateRunRequest()):
+    """Create a new run from a ratified plan. Returns the run."""
+    plan_data = _get_or_load_plan(plan_id)
+    if not plan_data:
+        raise HTTPException(404, "Plan not found")
+    if not plan_data.get("ratified"):
+        raise HTTPException(400, "Plan must be ratified before creating runs")
+
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    run = {
+        "id": run_id,
+        "plan_id": plan_id,
+        "state": "created",
+        "note": req.note,
+    }
+    save_run(run)
+    run_entry = get_run(run_id)
+    return _ui_run_from_db(run_entry)
+
+
+def _ui_run_from_db(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "run_id": row["id"],
+        "plan_id": row["plan_id"],
+        "state": row["state"],
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "approved_at": row["approved_at"].isoformat() if row.get("approved_at") else None,
+        "finished_at": row["finished_at"].isoformat() if row.get("finished_at") else None,
+        "worktree_root": row.get("worktree_root"),
+        "note": row.get("note"),
+    }
+
+
+@router.get("/{plan_id}/runs")
+async def list_plan_runs(plan_id: str):
+    """List all runs for a plan."""
+    runs = list_runs(plan_id)
+    return [_ui_run_from_db(r) for r in runs]
+
+
+@router.get("/runs/{run_id}")
+async def get_run_endpoint(run_id: str):
+    """Get a single run by ID."""
+    row = get_run(run_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    return _ui_run_from_db(row)
+
+
+@router.get("/runs/{run_id}/sessions")
+async def get_run_sessions(run_id: str):
+    """Get all node_sessions for a run."""
+    row = get_run(run_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    return get_node_sessions(run_id)
+
+
+@router.post("/runs/{run_id}/approve")
+async def approve_run(run_id: str):
+    """Approve a run — transitions state created -> approved.
+
+    Does NOT spawn yet. Spawning happens via start_run.
+    """
+    row = get_run(run_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    if row["state"] != "created":
+        raise HTTPException(400, f"Run is in state '{row['state']}', expected 'created'")
+    update_run_state(run_id, "approved")
+    return get_run(run_id)
+
+
+@router.post("/runs/{run_id}/start")
+async def start_run(run_id: str):
+    """Start a run — spawns node sessions and transitions state -> running.
+
+    Requires run state = 'approved'. Spawns the first ready node;
+    the watcher owns subsequent advancement.
+    """
+    row = get_run(run_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    if row["state"] != "approved":
+        raise HTTPException(400, f"Run must be 'approved' to start, got '{row['state']}'")
+
+    update_run_state(run_id, "running")
+
+    from backend.orchestration.runner import launch_run
+    plan_data = _get_or_load_plan(row["plan_id"])
+    if not plan_data:
+        raise HTTPException(404, "Plan not found for run")
+
+    try:
+        import asyncio
+        session_id = await asyncio.to_thread(launch_run, run_id, row, plan_data)
+        return {"run_id": run_id, "state": "running", "session_id": session_id}
+    except Exception as exc:
+        update_run_state(run_id, "failed")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Failed to start run: {exc}")
+
+
+# ── Legacy endpoints (node management) ────────────────────────────
+
+@router.post("/{plan_id}/nodes")
+async def append_node(plan_id: str, req: AppendNode):
+    plan = _get_or_load_plan(plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    node = {
+        "node_id": f"node-{len(plan['nodes']) + 1}",
+        "title": req.title,
+        "description": req.description,
+        "depends_on": req.depends_on or [],
+        "status": "pending",
+    }
+    if req.members:
+        node["members"] = req.members
+    elif req.agent_config_id:
+        node["members"] = [req.agent_config_id]
+        node["agent_config_id"] = req.agent_config_id
+    if req.success_criterion:
+        node["success_criterion"] = req.success_criterion
+    plan["nodes"].append(node)
+    return plan
+
+
+@router.put("/{plan_id}/nodes/{node_id}")
+async def update_plan_node(plan_id: str, node_id: str, req: AppendNode):
+    plan = _get_or_load_plan(plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    for node in plan["nodes"]:
+        if node["node_id"] == node_id:
+            if req.members is not None:
+                node["members"] = req.members
+            if req.depends_on is not None:
+                node["depends_on"] = req.depends_on
+            if req.success_criterion is not None:
+                node["success_criterion"] = req.success_criterion
+            if req.title:
+                node["title"] = req.title
+            if req.description:
+                node["description"] = req.description
+            return plan
+    raise HTTPException(404, "Node not found in plan")
+
+
+@router.post("/{plan_id}/refine")
+async def refine_plan(plan_id: str, req: RefineRequest):
+    plan_data = _get_or_load_plan(plan_id)
+    if not plan_data:
+        raise HTTPException(404, "Plan not found")
+    try:
+        from backend.planning.brain import refine_plan as brain_refine
+        updated_plan = brain_refine(
+            plan_data=plan_data,
+            instruction=req.instruction,
+            image_data=req.image_data,
+        )
+        if updated_plan:
+            _plans[plan_id] = updated_plan
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        pass
+    return _plans[plan_id]
+
+
+# ── Brain decomposition (used at propose time, not approve) ───────
+
+_NODE_TITLE_TO_AGENT_CONFIG: list[tuple[str, str, tuple[str, str]]] = [
+    ("planner", "planner", ("finance-planner", "planner")),
+    ("executor", "executor", ("finance-fullstack-executor", "executor")),
+    ("reviewer", "reviewer", ("finance-reviewer", "reviewer")),
+    ("orchestrator", "orchestrator", ("orchestrator", "orchestrator")),
+]
+
+
+def _agent_config_for_node(node: dict[str, Any], db_url: str | None = None) -> tuple[str, str]:
+    members = node.get("members", [])
+    if members:
+        first_member = members[0]
+        if db_url:
+            try:
+                from backend.db.queries import get_agent_config
+                cfg = get_agent_config(first_member)
+                if cfg:
+                    return first_member, cfg["role"]
+            except Exception:
+                pass
+        return first_member, node.get("role", "executor")
+
+    explicit = node.get("agent_config_id")
+    if explicit:
+        if db_url:
+            try:
+                from backend.db.queries import get_agent_config
+                cfg = get_agent_config(explicit)
+                if cfg:
+                    return explicit, cfg["role"]
+            except Exception:
+                pass
+        return explicit, node.get("role", "executor")
+
+    title_lower = node.get("title", "").lower()
+    for keyword, _, (ac, role) in _NODE_TITLE_TO_AGENT_CONFIG:
+        if keyword in title_lower:
+            return ac, role
+
+    return "opencode:backend-executor", "executor"
+
+
+def _extract_project(description: str) -> str | None:
+    m = re.search(r"project\s+([a-z0-9][a-z0-9-]*)", description)
+    return m.group(1) if m else None
+
+
+def _ensure_project_in_db(db_url: str, project_id: str) -> None:
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO projects (project_id, name, repo_path) VALUES (%s, %s, %s) "
+                "ON CONFLICT (project_id) DO NOTHING",
+                (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
+            )
+        c.commit()
+
+
+def _create_session_in_db(
+    db_url: str, session_id: str, project_id: str, user_intent: str, node: PlanNode
+) -> None:
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO sessions (session_id, project_id, user_intent, base_branch) "
+                "VALUES (%s, %s, %s, %s)",
+                (session_id, project_id, user_intent, "main"),
+            )
+        c.commit()
+
+
+def _fetch_agent_configs(db_url: str) -> list[dict[str, str]]:
+    try:
+        with psycopg.connect(db_url) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT agent_config_id, role FROM agent_configs ORDER BY agent_config_id"
+                )
+                return [
+                    {"agent_config_id": row[0], "role": row[1]}
+                    for row in cur.fetchall()
+                ]
+    except Exception:
+        return [
+            {"agent_config_id": "opencode:backend-planner", "role": "planner"},
+            {"agent_config_id": "opencode:backend-executor", "role": "executor"},
+            {"agent_config_id": "opencode:backend-reviewer", "role": "reviewer"},
+        ]

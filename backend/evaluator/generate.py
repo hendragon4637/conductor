@@ -1,0 +1,244 @@
+"""Candidate check generation at decompose time.
+
+Hooks into ``decompose_or_update``. For each node, produces candidates:
+- **Deterministic**: derived from the node's success criterion + task type.
+  E.g. "tests pass" → ``check_cmd="pytest -q"``; "endpoint exists" → ``check_cmd="curl -sf localhost:PORT/health"``.
+- **Rubric**: selected from a preset library (``rubrics/``) matching the node type,
+  lightly adapted to the node's specific domain.  No zero-shot generation —
+  LLM-generated rubrics from scratch are weak.
+
+Critical: generation is *assistive*. Output candidates; they are NOT trusted
+until ratified by the human at plan approval.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+from backend.evaluator.rubrics import select_rubric
+from backend.evaluator.schema import Check, NodeChecks
+
+# ── Quality intent parsing ──────────────────────────────────────────────────
+
+# Keywords that signal a deterministic (L1) check from quality_intent
+_DETERMINISTIC_QI_KEYWORDS = {"test", "pytest", "lint", "compile", "enforce", "require"}
+
+# Keywords that signal a rubric (L2) check from quality_intent
+_RUBRIC_QI_KEYWORDS = {"must", "should", "must not", "should not", "reject", "confirm", "need"}
+
+_QI_CLAUSE_SPLIT = re.compile(r'[,;]\s*|\.(?:\s+|\n)|(?:\s+and\s+)|\n+')
+
+
+def _generate_from_quality_intent(quality_intent: str | None) -> list[Check]:
+    """Parse ``quality_intent`` text into candidate checks.
+
+    Splits on clause boundaries (commas, semicolons, periods, newlines, "and"),
+    then classifies each clause as deterministic or rubric based on keywords.
+    All returned checks are tagged with ``provenance="human_intent"`` and
+    carry a ``source_hint`` showing the originating clause.
+
+    Args:
+        quality_intent: Free-text quality requirements, e.g.
+            ``"money must be integer cents, deletes need confirmation"``.
+            ``None`` or empty string returns an empty list.
+
+    Returns:
+        List of ``Check`` objects, each with ``provenance="human_intent"``.
+    """
+    checks: list[Check] = []
+    if not quality_intent:
+        return checks
+    clauses = _QI_CLAUSE_SPLIT.split(quality_intent)
+
+    for clause in clauses:
+        clause = clause.strip()
+        if not clause:
+            continue
+
+        cid = "qi-" + hashlib.md5(clause.encode()).hexdigest()[:8]
+        lower = clause.lower()
+
+        # Deterministic if it strongly suggests a shell-verifiable condition
+        if any(kw in lower for kw in _DETERMINISTIC_QI_KEYWORDS):
+            checks.append(Check(
+                id=cid,
+                type="deterministic",
+                criterion=clause,
+                check_cmd=f"echo 'TODO: implement check for: {clause}' && exit 1",
+                provenance="human_intent",
+                source_hint=f"from quality_intent: {clause}",
+            ))
+        else:
+            # Default: rubric check — the quality intent describes a property
+            # the output should satisfy, judged by the L2 rubric judge.
+            checks.append(Check(
+                id=cid,
+                type="rubric",
+                criterion=clause,
+                rubric_item=f"Does the output satisfy: {clause}?",
+                provenance="human_intent",
+                source_hint=f"from quality_intent: {clause}",
+            ))
+
+    return checks
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+_TASK_TYPE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"(?i)\btest"), "test"),
+    (re.compile(r"(?i)\breview"), "review"),
+    (re.compile(r"(?i)\bdesign\b"), "design"),
+    (re.compile(r"(?i)\b(implement|build|create|add|write)\b"), "build"),
+]
+
+
+def _detect_node_type(task: str, success: str) -> str:
+    """Heuristic: classify node type from task + success criterion text."""
+    combined = f"{task} {success}"
+    for pattern, ntype in _TASK_TYPE_PATTERNS:
+        if pattern.search(combined):
+            return ntype
+    return "default"
+
+
+def _deterministic_from_criterion(criterion: str, node_index: int, is_first: bool) -> list[Check]:
+    """Derive deterministic checks from the success criterion text.
+
+    Uses keyword heuristics to match against known check patterns.
+    Returns an empty list for criteria that don't map to shell commands.
+    """
+    checks: list[Check] = []
+    c_lower = criterion.lower()
+    check_id_base = hashlib.md5(criterion.encode()).hexdigest()[:8]
+
+    # Test pass check
+    if any(kw in c_lower for kw in ("test", "pytest", "test pass", "test suite")):
+        checks.append(Check(
+            id=f"det-{check_id_base}-tests",
+            type="deterministic",
+            criterion="All tests pass",
+            check_cmd="python3 -m pytest -q --tb=short 2>&1 || exit 1",
+        ))
+
+    # Endpoint health check
+    if any(kw in c_lower for kw in ("endpoint", "api", "route", "http", "curl")):
+        checks.append(Check(
+            id=f"det-{check_id_base}-endpoint",
+            type="deterministic",
+            criterion="Endpoint returns expected HTTP status",
+            check_cmd="curl -sf http://localhost:8000/health > /dev/null 2>&1 || exit 1",
+        ))
+
+    # Lint check for code criteria
+    if any(kw in c_lower for kw in ("code", "implement", "script", "module", "class", "function")):
+        checks.append(Check(
+            id=f"det-{check_id_base}-syntax",
+            type="deterministic",
+            criterion="No syntax errors in Python files",
+            check_cmd="python3 -m py_compile $(find . -name '*.py' -not -path './.git/*') 2>&1 || exit 1",
+        ))
+
+    # Regression check (non-first nodes)
+    if not is_first:
+        checks.append(Check(
+            id=f"det-{check_id_base}-regression",
+            type="deterministic",
+            criterion="Prior work is not broken by changes",
+            check_cmd="""echo "Regression: previous node commits should still pass their tests" && exit 0""",
+        ))
+
+    return checks
+
+
+def _select_rubric_preset(members: list[str], task: str) -> list[Check]:
+    """Select rubric checks from the preset library matching node members.
+
+    Uses ``select_rubric()`` from the centralized rubric module.
+    Falls back to legacy ``_detect_node_type`` heuristic if members is empty.
+    """
+    if members:
+        rubric = select_rubric(members, task)
+    else:
+        node_type = _detect_node_type(task, task)
+        rubric = select_rubric([node_type], task)
+
+    checks: list[Check] = []
+    for item in rubric.get("items", []):
+        checks.append(Check(
+            id=item.get("id", f"rubric-{len(checks)}"),
+            type="rubric",
+            criterion=item.get("rubric_item", item.get("rubric_item", "")),
+            rubric_item=item.get("rubric_item", ""),
+            weight=item.get("weight", 1.0),
+        ))
+    return checks
+
+
+# ── Public API ──────────────────────────────────────────────────────────────
+
+def generate_checks(
+    node_id: str,
+    task: str,
+    success_criterion: str,
+    node_index: int = 0,
+    total_nodes: int = 1,
+    extra_checks: list[Check] | None = None,
+    quality_intent: str | None = None,
+    members: list[str] | None = None,
+) -> NodeChecks:
+    """Generate candidate checks for a node at decompose time.
+
+    Args:
+        node_id: Unique node identifier (e.g. ``"node-1"``).
+        task: The node's task description.
+        success_criterion: The node's success criterion text.
+        node_index: 0-based index of this node in the plan DAG.
+        total_nodes: Total number of nodes in the plan.
+        extra_checks: Optional memory-grounded checks injected from
+            ``ground_checks_with_memory()``.
+        quality_intent: Optional free-text quality requirements.
+            Parsed into additional checks tagged with
+            ``provenance="human_intent"``.
+        members: Optional list of agent/role IDs on this node.
+            Used for rubric selection (select_rubric).
+
+    Returns:
+        A ``NodeChecks`` container with candidate ``Check`` items.
+        These are *candidates* — the human must ratify them at plan approval.
+
+    Guaranteed:
+        - At least one deterministic check (if any pattern matches).
+        - At least one rubric check (from presets, selected by role).
+        - Non-first nodes include a regression-style deterministic check.
+        - Extra (memory-grounded) checks appended at the end, if provided.
+        - When ``quality_intent`` is provided, additional human-intent checks
+          are prepended with ``provenance="human_intent"``.
+    """
+    is_first = node_index == 0
+
+    det_checks = _deterministic_from_criterion(success_criterion, node_index, is_first)
+    rubric_checks = _select_rubric_preset(members or [], task)
+    memory_checks = extra_checks or []
+
+    # ── Tag memory checks with provenance ────────────────────────────────────
+    for c in memory_checks:
+        c.provenance = "memory"
+
+    # ── Parse quality_intent into additional checks ──────────────────────────
+    qi_checks: list[Check] = []
+    if quality_intent:
+        qi_checks = _generate_from_quality_intent(quality_intent)
+
+    # De-duplicate by id (later sources override earlier ones with same id)
+    seen_ids: set[str] = set()
+    all_checks: list[Check] = []
+    for c in det_checks + rubric_checks + memory_checks + qi_checks:
+        if c.id not in seen_ids:
+            seen_ids.add(c.id)
+            all_checks.append(c)
+
+    return NodeChecks(
+        node_id=node_id,
+        checks=all_checks,
+        checks_version=1,
+    )

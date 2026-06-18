@@ -1,0 +1,15 @@
+{
+  "name": "aipc-conductor-gui",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri",
+    "ui:build": "cd ../ui && npm run build",
+    "ui:dev": "cd ../ui && npm run dev",
+    "dev": "tauri dev",
+    "build": "npm run ui:build && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

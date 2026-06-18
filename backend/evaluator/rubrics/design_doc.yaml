@@ -1,0 +1,12 @@
+name: design_doc
+applies_to: ["planner", "design", "architecture"]
+items:
+  - id: completeness
+    rubric_item: "Does the design cover all required components (data model, endpoints/interfaces, structure)?"
+    weight: 2.0
+  - id: actionable
+    rubric_item: "Is it concrete enough that an implementer could build from it without guessing key decisions?"
+    weight: 1.5
+  - id: consistent
+    rubric_item: "Is it internally consistent (no contradictions between sections)?"
+    weight: 1.0

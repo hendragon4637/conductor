@@ -1,7 +1,7 @@
 """POST /api/spawn — spawn a new trace for a task."""
 from __future__ import annotations
 from uuid import UUID
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -17,6 +17,8 @@ class SpawnRequest(BaseModel):
     input_spec: Optional[dict] = None
     preceding_trace_id: Optional[UUID] = None
     initial_input: Optional[str] = None
+    # Week 4: embedded (Tauri PTY) vs detached (gnome-terminal)
+    spawn_mode: Literal["detached", "embedded"] = "detached"
 
 
 class SpawnResponse(BaseModel):
@@ -24,6 +26,8 @@ class SpawnResponse(BaseModel):
     cli_session_id: str
     repo_path: str
     branch: str
+    spawn_mode: Literal["detached", "embedded"] = "detached"
+    pty_spec: Optional[dict] = None
 
 
 @router.post("", response_model=SpawnResponse)
@@ -35,6 +39,7 @@ async def spawn(req: SpawnRequest):
             input_spec=req.input_spec,
             preceding_trace_id=req.preceding_trace_id,
             initial_input=req.initial_input,
+            spawn_mode=req.spawn_mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

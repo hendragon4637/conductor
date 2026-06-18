@@ -54,13 +54,9 @@ allowed_tools:
   - lsp
 
 permission_policy:
-  bash: ask                    # always confirm bash commands
-  rm: deny                     # never allow rm
-  git_push: deny               # never push from this config
-  pip_install: ask
-  write: ask_outside_repo      # silent inside workspace, ask outside
+  mode: auto_approve            # all-allow; overridable via UI toggle per plan
 
-model_preference: minimax/minimax-m2.5:free   # free tier first
+model_preference: nvidia/gpt-oss-120b
 # Fallback chain handled by OmO/OpenCode config, not here.
 
 # Declarative routing rules.
