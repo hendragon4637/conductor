@@ -29,6 +29,7 @@
 ## 2026-06-16 — Obsidian repomix export is chunked
 ## 2026-06-16 — Backend e2e runtime = single backend process on :8090
 ## 2026-06-16 — Evaluator config prefers NVIDIA for gpt-oss-120b
+## 2026-06-18 — Multi-node advancement: pre-create node_sessions for all DAG nodes
 
 ## Glossary
 # Project Glossary

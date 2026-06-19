@@ -20,11 +20,15 @@ ProvenanceType = Literal["human_intent", "memory", "preset"]
 
 
 class Check(BaseModel):
-    """A single evaluation check — deterministic or rubric.
+    """A single evaluation check — deterministic (L1) or rubric (L2).
 
     Validation:
-    - deterministic checks MUST have ``check_cmd``, MUST NOT have ``rubric_item``
-    - rubric checks MUST have ``rubric_item``, MUST NOT have ``check_cmd``
+    - deterministic (L1) checks MUST have ``check_cmd``, MUST NOT have ``rubric_item``
+    - rubric (L2) checks MUST have ``rubric_item``, MUST NOT have ``check_cmd``
+
+    The ``tier`` property derives from ``type``:
+    - ``"deterministic"`` → ``"L1"``
+    - ``"rubric"`` → ``"L2"``
 
     Provenance:
     - ``human_intent`` (from quality_intent input)
@@ -47,6 +51,16 @@ class Check(BaseModel):
         description="Optional context about where this check came from, "
                     "e.g. 'from quality_intent: money must be integer cents'",
     )
+
+    @property
+    def tier(self) -> str:
+        """Derive evaluation tier from check type.
+
+        ``"deterministic"`` → ``"L1"``, ``"rubric"`` → ``"L2"``.
+        This aligns the data model with the spec's ``tier`` terminology
+        without duplicating the field.
+        """
+        return "L1" if self.type == "deterministic" else "L2"
 
     @model_validator(mode="after")
     def _validate_type_fields(self) -> "Check":

@@ -54,6 +54,15 @@ Artifact:
 Respond as {{"criteria_met": true/false, "explanation": "..."}}"""
 
 
+class JudgeUnavailableError(RuntimeError):
+    """Raised when ALL configured judge models are unreachable.
+
+    Never caught silently — the gate MUST surface this to the UI
+    (``node_sessions.judge_error``) rather than silently passing the node.
+    """
+    pass
+
+
 # ── Results ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -142,7 +151,7 @@ def _default_judge_llm(prompt: str) -> str:
         )
         with urllib.request.urlopen(req, timeout=JUDGE_TIMEOUT) as resp:
             result = json.loads(resp.read())
-    except Exception as exc:
+    except Exception as primary_exc:
         if JUDGE_MODEL_FALLBACK:
             body["model"] = JUDGE_MODEL_FALLBACK
             try:
@@ -153,16 +162,17 @@ def _default_judge_llm(prompt: str) -> str:
                 )
                 with urllib.request.urlopen(req, timeout=JUDGE_TIMEOUT) as resp:
                     result = json.loads(resp.read())
-            except Exception:
-                return json.dumps({
-                    "criteria_met": None,
-                    "explanation": f"Judge unavailable: {exc}",
-                })
+            except Exception as fallback_exc:
+                raise JudgeUnavailableError(
+                    f"All judge models unavailable. "
+                    f"Primary ({JUDGE_MODEL_PRIMARY}): {primary_exc}. "
+                    f"Fallback ({JUDGE_MODEL_FALLBACK}): {fallback_exc}."
+                ) from fallback_exc
         else:
-            return json.dumps({
-                "criteria_met": None,
-                "explanation": f"Judge unavailable: {exc}",
-            })
+            raise JudgeUnavailableError(
+                f"Primary judge model ({JUDGE_MODEL_PRIMARY}) unavailable: {primary_exc}. "
+                f"No fallback configured."
+            ) from primary_exc
 
     raw = result["choices"][0]["message"]["content"].strip()
     if raw.startswith("```"):
@@ -227,7 +237,7 @@ def run_l2(
     if llm_call is None:
         llm_call = _default_judge_llm
 
-    rubric_checks = [c for c in checks if getattr(c, "type", None) == "rubric"]
+    rubric_checks = [c for c in checks if getattr(c, "tier", None) == "L2"]
     if not rubric_checks:
         return L2Result(score=1.0, judgments=[])  # vacuous pass
 

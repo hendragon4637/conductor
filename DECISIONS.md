@@ -121,3 +121,29 @@ Decision: The normal Conductor backend/e2e flow runs through `backend.main:app` 
 ## 2026-06-16 — Evaluator config prefers NVIDIA for gpt-oss-120b
 Status: ACTIVE
 Decision: Where `gpt-oss-120b` is configured in Conductor-owned model selection, prefer the NVIDIA provider/config path rather than OpenCode Zen or unrelated hosted defaults. This affects brain/evaluator configuration and supporting documentation; executor spawn still follows per-agent YAML `model_preference`.
+
+## 2026-06-18 — Multi-node advancement: pre-create node_sessions for all DAG nodes
+Status: ACTIVE
+Decision: `launch_run()` now creates `node_sessions` for ALL DAG nodes upfront at run start, not just the first node. The root node gets `verdict='running'`; subsequent nodes get `verdict='pending'`. This eliminates the bug where `_complete_and_advance()` could not find a `node_session` for watcher-spawned subsequent nodes (causing `NOT NULL` violations on `run_id` and `backend`).
+
+Supporting changes:
+- `_next_ready_node()` checks `node_sessions` (not `tasks`) for done/running status — the old `tasks`-based logic would skip all pre-created `pending` sessions.
+- `_complete_and_advance()` sets the next node's verdict to `'running'` before spawning (via `UPDATE ... RETURNING id`) and fixes `st.node_session_id`.
+- The `all_done` check uses `node_sessions.verdict` instead of `tasks.status`, since `tasks` is not populated for watcher-spawned nodes.
+- A cleanup script is at `/tmp/clean_conductor.sh` for resetting Conductor DB + AionUi + workspace.
+
+## 2026-06-19 — L3 calibration: golden-set anchored jury, periodic drift detection
+Status: ACTIVE
+Decision: L3 calibration runs periodically (not in the hot path) to detect drift between the L2 judge's scores and the frozen human golden set. It re-scores golden artifacts via the L2 judge, computes MAE and agreement, upserts `judge_trust`, and surfaces drift. Calibration never auto-applies rubric edits — it queues `pending` proposals for human review.
+
+## 2026-06-19 — Ratchet: frozen-boundary safety, scope-gated mutations, held-out validation
+Status: ACTIVE
+Decision: The ratchet loop enforces a frozen boundary: `permissions`, `allowed_tools`, `model_preference`, `check_cmd`, `golden_set`, `budget` may never be mutated by automation. Only probabilistic fields (`system_prompt`, `skill`, `rubric_wording`, `judge_prompt`, `brief`) are editable. Mutations that win on the mining set must validate without regression on a held-out split before auto-application. Global-scope mutations (domain=backend/general) always queue for human approval; project-scope mutations may auto-apply.
+
+## 2026-06-19 — Plan evaluator: structural L1 + plan-rubric L2 for pre-execution gating
+Status: ACTIVE
+Decision: Plan evaluation runs at ratification time, before execution. L1 checks the DAG structure (nodes≥1, fields present, deps resolve, acyclic). L2 applies a `plan_structure.yaml` rubric via the L2 judge if L1 passes. The `plan_goal_review` score is stored on the run — it gates plan approval, not node execution. If the L2 judge is unavailable, L1 alone determines the verdict (fail-open).
+
+## 2026-06-19 — L4 two-case simulation: standalone + acceptance with common engine
+Status: ACTIVE
+Decision: L4 runs in two cases — `l4_standalone` (persona session with derived scenario, no plan context) and `l4_acceptance` (same persona+rubric verifying plan.success as the closing gate). Both use the same engine and persona; only the framing differs. The driver is selected by product type (web→browser, cli→shell, api→http, doc→none). L4 reports are observational only — friction scores are surfaced for human review with no auto-decide mechanism.

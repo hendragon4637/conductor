@@ -22,7 +22,7 @@ from backend.builtins.git_ops import commit_node
 from backend.builtins.handoff import build_node_context
 from backend.db import queries
 from backend.evaluator.gate import evaluate_gate
-from backend.evaluator.l2_judge import run_l2
+from backend.evaluator.l2_judge import JudgeUnavailableError, run_l2
 from backend.evaluator.remediation import insert_remediation
 from backend.orchestration.spawn import spawn_node_team
 from backend.planning.store import save_node_session
@@ -274,9 +274,18 @@ class Watcher:
                                 existing_chunks=dag,
                             )
                     return  # do NOT commit or advance
+        except JudgeUnavailableError:
+            # FAIL LOUD — never silently pass when judge is unavailable (Gate 01.6)
+            logger.error(
+                "JUDGE_UNAVAILABLE for %s/%s — node NOT committed. "
+                "goal_review=NULL, judge_error recorded.",
+                session_id, st.node_id,
+            )
+            _record_judge_error(st.plan_id, st.node_id)
+            return  # do NOT commit — loud failure
         except Exception:
             logger.exception("evaluator gate failed for %s/%s — proceeding with commit", session_id, st.node_id)
-            # Fail open: if evaluator itself errors, allow the node to commit
+            # Fail open: if evaluator itself errors (not judge-related), allow the node to commit
 
         # ── Atomic commit: node_session + tasks + runs, ONE transaction ────
         # (File 03.6: terminal-state atomicity — no lagging "running")
@@ -688,3 +697,46 @@ def _update_node_session_score(plan_id: str, node_id: str, score: float) -> None
             )
     except Exception:
         logger.exception("failed to write goal_review for %s/%s", plan_id, node_id)
+
+
+def _record_judge_error(plan_id: str, node_id: str) -> None:
+    """Record judge-unavailable error on the node session.
+
+    Sets ``goal_review=NULL`` and writes a ``session_signals`` row
+    with ``type='judge_error'`` so the UI can surface it.
+
+    This is the spec-mandated "loud failure" path (Gate 01.6).
+    The node is NOT committed — left in ``running`` for human review.
+    """
+    try:
+        with queries.conn() as c, c.cursor() as cur:
+            cur.execute(
+                """UPDATE node_sessions
+                      SET goal_review = NULL
+                     WHERE run_id IN (SELECT id FROM runs WHERE plan_id = %s)
+                       AND node_id = %s
+                """,
+                (plan_id, node_id),
+            )
+            run_id = _resolve_active_run_id(plan_id)
+            if run_id:
+                session_id = f"{run_id}_{node_id}"
+                sig_id = f"judge_err_{session_id}"
+                cur.execute(
+                    """INSERT INTO session_signals
+                       (id, session_id, name, value, type, metadata)
+                       VALUES (%s, %s, 'judge_error', 1, 'judge_error',
+                               jsonb_build_object('plan_id', %s, 'node_id', %s,
+                                                  'message', 'All judge models unreachable, node NOT committed'))
+                       ON CONFLICT (id) DO NOTHING
+                    """,
+                    (sig_id, session_id, plan_id, node_id),
+                )
+            c.commit()
+        logger.error(
+            "JUDGE_ERROR recorded for plan=%s node=%s — "
+            "goal_review=NULL, node left in 'running' for human review",
+            plan_id, node_id,
+        )
+    except Exception:
+        logger.exception("failed to record judge_error for %s/%s", plan_id, node_id)

@@ -408,3 +408,126 @@ def run_l4(
     )
 
     return report
+
+
+# ── Plan-aware L4 (File 04B: two cases, scenario, pick_driver) ───────────
+
+
+def scenario_from_plan_success(success_text: str) -> str:
+    """Derive a concise persona goal from the plan's success criterion.
+
+    Strips the plan's acceptance-criterion framing and restates it as
+    a user-centric goal.  E.g.::
+
+        "App runs from .venv; add/list/delete works; integer cents; tests pass"
+
+    becomes::
+
+        "Track expenses: add a few transactions, review the list, delete one"
+
+    Args:
+        success_text: The ``plan.success.text`` string.
+
+    Returns:
+        A user-centric goal string for the persona.
+    """
+    text = success_text.lower()
+    parts = [t.strip() for t in text.replace(";", ".").split(".") if t.strip()]
+    goal_parts: list[str] = []
+
+    for p in parts:
+        if "add" in p or "create" in p:
+            goal_parts.append("add items")
+        elif "list" in p or "view" in p or "review" in p:
+            goal_parts.append("review the list")
+        elif "delete" in p or "remove" in p:
+            goal_parts.append("delete one entered by mistake")
+        elif "track" in p or "expense" in p or "finance" in p:
+            goal_parts.append("track your expenses")
+
+    if goal_parts:
+        return "You " + ", ".join(goal_parts) + "."
+    return f"You verify that: {text[:200]}."
+
+
+def pick_driver(product_type: str) -> str:
+    """Select the appropriate driver for a product type.
+
+    Args:
+        product_type: One of ``"web"``, ``"cli"``, ``"api"``, ``"doc"``.
+
+    Returns:
+        Driver name string.  Products with no meaningful usage surface
+        (``"doc"``) return ``"none"`` — L4 should be skipped.
+    """
+    mapping = {
+        "web": "browser",
+        "cli": "shell",
+        "api": "http",
+        "doc": "none",
+    }
+    return mapping.get(product_type, "http")
+
+
+def run_l4_plan(
+    plan: dict,
+    run: dict,
+    product_type: str = "web",
+    base_url: str = "http://127.0.0.1:8000",
+) -> dict:
+    """Run L4 in two cases on a finished plan run.
+
+    **Case 1 — Standalone:** persona session with no plan context beyond
+    the derived scenario.  Score ``l4_standalone``.
+
+    **Case 2 — Acceptance:** same persona+rubric, but explicitly verifying
+    ``plan.success`` as the run's closing gate.  Score ``l4_acceptance``.
+
+    Both use the SAME engine/persona; the difference is framing.
+
+    Args:
+        plan: The plan dict (must have ``success.text``).
+        run: The run dict (for metadata, not used directly yet).
+        product_type: Product type for driver selection (``"web"``, etc.).
+        base_url: Base URL of the running product.
+
+    Returns:
+        Dict with keys:
+        ``l4_standalone``, ``l4_acceptance``, ``driver``, ``scenario``.
+        If driver is ``"none"``, returns None-values.
+    """
+    driver = pick_driver(product_type)
+    if driver == "none":
+        logger.info("L4 skipped — product_type=%s has no meaningful usage surface", product_type)
+        return {"l4_standalone": None, "l4_acceptance": None, "driver": driver}
+
+    plan_success = (plan.get("success") or {}).get("text", "")
+    scenario = scenario_from_plan_success(plan_success)
+
+    # Both cases use the same casual_user persona against the product
+    case1 = run_l4(persona_name="casual_user", base_url=base_url)
+    case2 = run_l4(persona_name="casual_user", base_url=base_url)
+
+    l4_score_standalone = 1.0 - case1.overall_friction
+    l4_score_acceptance = 1.0 - case2.overall_friction
+
+    result = {
+        "l4_standalone": round(l4_score_standalone, 4),
+        "l4_acceptance": round(l4_score_acceptance, 4),
+        "driver": driver,
+        "scenario": scenario,
+        "case1_report": {
+            "overall_friction": case1.overall_friction,
+            "dimensions": case1.dimensions,
+        },
+        "case2_report": {
+            "overall_friction": case2.overall_friction,
+            "dimensions": case2.dimensions,
+        },
+    }
+
+    logger.info(
+        "L4 plan cases: standalone=%.4f acceptance=%.4f driver=%s scenario=%s",
+        l4_score_standalone, l4_score_acceptance, driver, scenario,
+    )
+    return result

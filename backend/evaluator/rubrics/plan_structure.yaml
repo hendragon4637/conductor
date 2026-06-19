@@ -1,0 +1,15 @@
+name: plan_structure
+applies_to: ["planner", "plan"]
+items:
+  - id: covers_goal
+    rubric_item: "Do the nodes together fully cover the plan goal (nothing missing)?"
+    weight: 2.0
+  - id: right_sized
+    rubric_item: "Is each node a bounded, single-responsibility unit (not too big/small)?"
+    weight: 1.5
+  - id: deps_correct
+    rubric_item: "Are dependencies correct and minimal (no missing or spurious edges)?"
+    weight: 1.5
+  - id: measurable
+    rubric_item: "Does each node have a measurable success criterion?"
+    weight: 1.0

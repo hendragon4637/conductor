@@ -43,12 +43,26 @@
 - L4 produces structured friction scores per dimension; report is surfaced for human review — NEVER auto-decides feature direction
 - L4 `L4Report` has no `auto_apply` or `decision` field — it carries observations only
 
+## L3 calibration
+- `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
+- `count_golden(node_type, split=None)` returns total or split-specific counts from `golden_set`.
+- `get_judge_trust(node_type)` returns the current `judge_trust` row for a node_type — used by `assert_ready()` before ratchet experiments.
+- Calibration runs out-of-band, scheduled periodically (weekly). It is NOT in the hot path.
+- Each `golden_set` row has `frozen=TRUE` — the ratchet may never set this to FALSE.
+- Use `calibrate()`'s `CalibrationReport.items` list to surface per-item drift to humans.
+
 ## Ratchet
 - Ratchet consumes the evaluator's `goal_review` Langfuse score, NOT the watcher verdict — experiment scoring uses `run_l2()`
 - Frozen-boundary enforcement: ratchet may ONLY mutate probabilistic artifacts (skill, agents_md, prompt, rubric). Structural markers (`:` / `=`) distinguish config values from natural language mentions
 - Scope gating: global-scope winners (domain=backend/general) are QUEUED for human approval; project-scope winners may auto-apply
 - Held-out validation: candidate mutations must not regress on held-out tasks — overfitting to mining set causes revert
 - Failure mining reads Langfuse `goal_review` score comments (format: `check_id: FAIL (explanation)`) to cluster recurring rubric failures
+- `assert_ready(agent_config_id, node_type)` must pass before `run_experiment()` — raises `RuntimeError` if judge not trusted, heldout < 5, or recent scores empty
+- `reject_if_frozen(target)` raises `ValueError` if the target field is in the frozen set — call before any mutation write
+- `propose_mutation(failures)` returns a minimal system_prompt edit targeting the mined failure cluster — never touches frozen fields
+- `validate_on_heldout(agent_config_id, node_type, candidate)` runs REAL L2 judge calls against the held-out split — not a proxy
+- `run_experiment(agent_config_id, node_type)` is the main loop: mine → propose → validate → apply-or-queue → record
+- Global-scope mutations (domain=backend/general) are written with `status='pending'` in `experiments` table; project-scope get `status='applied'`
 
 ## Memory ↔ Evaluator integration
 - Read direction: call `ground_checks_with_memory(task, project, agent)` BEFORE `generate_checks()` to inject memory-grounded rubric items from Neo4j product memory

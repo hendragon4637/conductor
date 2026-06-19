@@ -41,7 +41,7 @@ def run_l1(
     detail: list[tuple[str, bool, str]] = []
 
     for c in checks:
-        if getattr(c, "type", None) != "deterministic":
+        if getattr(c, "tier", None) != "L1":
             continue
         cmd = getattr(c, "check_cmd", None)
         if not cmd:
