@@ -70,6 +70,7 @@ def get_brain_model(role: str = "plan_brain") -> dict[str, Any]:
                 "provider": cand.get("provider", "unknown"),
                 "model": cand.get("model", "unknown"),
                 "base_url": cand.get("base_url", "").rstrip("/"),
+                "api_key_env": cand.get("api_key_env"),
             }
 
     raise RuntimeError(f"no model available for role {role!r}")

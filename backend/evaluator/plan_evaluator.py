@@ -228,3 +228,61 @@ def _build_plan_rubric_checks() -> list[Check]:
         )
         for item in rubric["items"]
     ]
+
+
+# ── Plan gate / revise loop ────────────────────────────────────────
+
+MAX_PLAN_REVISIONS = 2
+PLAN_GATE_THRESHOLD = 0.7
+
+
+@dataclass
+class PlanGateDecision:
+    action: str
+    plan_goal_review: float = 0.0
+    reason: dict | None = None
+    feedback_text: str = ""
+
+
+def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE_THRESHOLD) -> PlanGateDecision:
+    result = evaluate_plan(dag, plan_goal, threshold)
+    if not result.l1.passed:
+        l1_failures = [c for c in result.l1.checks if not c.get("passed", False)]
+        fail_details = "; ".join(f"{c.get('check', '?')}: {c.get('detail', '')}" for c in l1_failures)
+        return PlanGateDecision(
+            action="revise",
+            reason={"L1": l1_failures},
+            feedback_text=f"Plan L1 structural check failed: {fail_details}",
+        )
+    if not result.passed:
+        score = result.plan_goal_review
+        return PlanGateDecision(
+            action="revise",
+            plan_goal_review=score,
+            reason={"L2": "below threshold", "score": score},
+            feedback_text=f"Plan quality review score ({score:.2f}) is below required threshold ({threshold:.2f}). Review and refine the plan decomposition.",
+        )
+    return PlanGateDecision(
+        action="ratify",
+        plan_goal_review=result.plan_goal_review,
+    )
+
+
+def run_plan_gate(plan_data: dict, max_rounds: int = MAX_PLAN_REVISIONS) -> PlanGateDecision:
+    dag = plan_data.get("nodes", []) or plan_data.get("dag", [])
+    plan_goal = plan_data.get("goal", "")
+    normalized_dag = []
+    for n in dag:
+        node = dict(n)
+        if "id" not in node and "node_id" in node:
+            node["id"] = node["node_id"]
+        normalized_dag.append(node)
+    decision: PlanGateDecision = PlanGateDecision(action="revise", feedback_text="No gate rounds attempted")
+    for _ in range(max_rounds):
+        decision = gate_plan(normalized_dag, plan_goal)
+        if decision.action == "ratify":
+            return decision
+        plan_data["gate_feedback"] = decision.reason
+        plan_data["gate_feedback_text"] = decision.feedback_text
+    plan_data["gate_exhausted"] = True
+    return decision

@@ -1,7 +1,7 @@
 """Bounded remediation — inserts a fix node via the existing decompose lifecycle.
 
 When the evaluator gate rejects a node (L1 or L2), this module builds a
-remediation node that depends on the failed node and carries the same checks.
+remediation node with verbal feedback (reflection) from the failing checks.
 It reuses ``decompose_or_update("append_node")`` — no new orchestration.
 """
 from __future__ import annotations
@@ -32,6 +32,92 @@ def _render_fix_task(reason: dict) -> str:
     if isinstance(detail, dict):
         parts.append(str(detail))
     return "\n".join(parts)
+
+
+def build_feedback(decision: dict) -> dict:
+    """Build structured verbal feedback from a gate decision.
+
+    Returns a dict with:
+      - failed_checks: list of {tier, id, detail, why}
+      - reflection: concise, specific summary of what to fix
+    """
+    layer = decision.get("layer", "?")
+    detail = decision.get("detail", [])
+    failed = []
+
+    if layer == "L1" and isinstance(detail, list):
+        for check_id, ok, tail in detail:
+            if not ok:
+                failed.append({
+                    "tier": "L1",
+                    "id": check_id,
+                    "detail": tail[:300],
+                })
+    elif layer == "L2" and isinstance(detail, list):
+        for j in detail:
+            if isinstance(j, dict):
+                if not j.get("criteria_met", True):
+                    failed.append({
+                        "tier": "L2",
+                        "id": j.get("check_id", "?"),
+                        "why": j.get("explanation", "no explanation"),
+                    })
+            elif isinstance(j, (list, tuple)) and len(j) >= 2:
+                check_id, ok = j[0], j[1]
+                if not ok:
+                    failed.append({"tier": "L2", "id": str(check_id)})
+            elif hasattr(j, "criteria_met"):
+                if not j.criteria_met:
+                    failed.append({
+                        "tier": "L2",
+                        "id": j.check_id,
+                        "why": j.explanation or "no explanation",
+                    })
+
+    # Build a concise reflection
+    if not failed:
+        reflection = "No specific failures identified; review and retry."
+    else:
+        parts = []
+        for f in failed:
+            if f.get("why"):
+                parts.append(f"  - {f['id']}: {f['why']}")
+            elif f.get("detail"):
+                parts.append(f"  - {f['id']}: check failed")
+            else:
+                parts.append(f"  - {f['id']}")
+        reflection = "\n".join(parts)
+
+    return {"failed_checks": failed, "reflection": reflection}
+
+
+def build_remediation_brief(
+    original_task: str,
+    success_criterion: str,
+    feedback: dict,
+) -> str:
+    """Build the fix-forward brief for a remediation attempt.
+
+    Includes original goal, failed checks, and what to fix.
+    Instructs the agent to fix existing work, not start over.
+    """
+    lines = [
+        f"GOAL (retry): {original_task}",
+        "",
+        "YOUR PREVIOUS ATTEMPT FAILED THESE CHECKS:",
+    ]
+    for fc in feedback.get("failed_checks", []):
+        tid = fc.get("tier", "?")
+        cid = fc.get("id", "?")
+        why = fc.get("why") or fc.get("detail", "")
+        lines.append(f"  [{tid}] {cid}: {why}")
+
+    lines.append("")
+    lines.append(f"WHAT TO FIX: {feedback.get('reflection', 'Review and fix the issues above.')}")
+    lines.append("")
+    lines.append("The code from your previous attempt is in this worktree. FIX IT — do NOT start over.")
+    lines.append(f"SUCCESS: {success_criterion}")
+    return "\n".join(lines)
 
 
 def insert_remediation(
@@ -68,11 +154,18 @@ def insert_remediation(
         )
         return None
 
+    # Build verbal feedback from the gate decision
+    feedback = build_feedback(decision)
+    original_task = (failed_node.get("task") or {}).get("text", "")
+    success_criterion = (failed_node.get("success") or {}).get("text", "")
+
+    brief = build_remediation_brief(original_task, success_criterion, feedback)
+
     payload = {
         "members": failed_node.get("members", ["opencode:backend-executor"]),
         "depends_on": [failed_node.get("id", "?")],
-        "task": _render_fix_task(decision),
-        "success_criterion": f"Fix the failures: {_render_fix_task(decision)[:200]}",
+        "task": brief,
+        "success_criterion": f"Fix the failures: {feedback.get('reflection', 'see above')[:200]}",
     }
 
     try:

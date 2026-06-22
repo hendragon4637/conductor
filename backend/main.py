@@ -47,8 +47,11 @@ async def health():
 @app.on_event("startup")
 async def _startup_watcher() -> None:
     watcher = get_watcher()
+    print("[startup] watcher obtained, calling start()", flush=True)
     watcher.start()
+    print("[startup] watcher started, calling bootstrap_from_db()", flush=True)
     bootstrap_from_db()
+    print("[startup] done", flush=True)
 
 
 app.include_router(projects_api.router)

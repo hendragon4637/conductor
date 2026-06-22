@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -18,15 +19,18 @@ from backend.evaluator.schema import Check, Judgment
 # ── Judge model config (mirrors plan brain selector pattern) ────────────────
 JUDGE_MODEL_PRIMARY = os.environ.get(
     "JUDGE_MODEL_PRIMARY",
-    "nvidia/gpt-oss-120b",
+    "deepseek-v4-flash-free",
 )
 JUDGE_MODEL_FALLBACK = os.environ.get("JUDGE_MODEL_FALLBACK", "nemotron-3-ultra-free")
 JUDGE_ENDPOINT = os.environ.get(
     "JUDGE_ENDPOINT",
-    os.environ.get("BRAIN_ENDPOINT", "https://zen.opencode.ai/v1"),
+    os.environ.get("BRAIN_ENDPOINT", "https://opencode.ai/zen/v1/chat/completions"),
 )
 JUDGE_API_KEY_ENV = os.environ.get("JUDGE_API_KEY_ENV", "OPENCODE_ZEN_API_KEY")
-JUDGE_TIMEOUT = 60.0
+JUDGE_TIMEOUT = 120.0
+
+# L2 input-size guard — oversized artifacts trigger a flag-fail instead of truncation
+L2_MAX_CHARS = int(os.environ.get("L2_MAX_INPUT_CHARS", "24000"))
 
 # ── Prompt template ─────────────────────────────────────────────────────────
 
@@ -74,6 +78,8 @@ class L2Result:
     """Total number of rubric items evaluated."""
     items_met: int = 0
     """Number of rubric items that met criteria."""
+    oversize: bool = False
+    """True when artifact exceeds L2_MAX_CHARS — flag-fail, not truncated."""
 
 
 # ── Artifact collection ──────────────────────────────────────────────────────
@@ -81,25 +87,64 @@ class L2Result:
 def collect_artifact(worktree: str, max_chars: int = 8000) -> str:
     """Collect evidence from the worktree for the judge to evaluate.
 
-    Includes git diff (uncommitted changes) and listing of key file contents.
+    Captures working-tree diff, last-commit diff (for committed executor
+    results), tracked file listing, file contents, and untracked files.
     """
     parts: list[str] = []
 
-    # Git diff
+    has_wt_diff = False
     try:
         result = subprocess.run(
             ["git", "diff", "--no-color"],
-            cwd=worktree,
-            capture_output=True, text=True, timeout=30,
+            cwd=worktree, capture_output=True, text=True, timeout=30,
         )
         diff = result.stdout.strip()
         if diff:
-            parts.append("[Git diff]")
+            parts.append("[Git diff working tree]")
             parts.append(diff[:max_chars // 2])
+            has_wt_diff = True
     except Exception:
         parts.append("[Git diff: unavailable]")
 
-    # Untracked files
+    try:
+        rc = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=worktree, capture_output=True, text=True, timeout=15,
+        )
+        commit_count = int(rc.stdout.strip() or 0)
+        if commit_count > 1:
+            result = subprocess.run(
+                ["git", "diff", "HEAD~1..HEAD", "--no-color"],
+                cwd=worktree, capture_output=True, text=True, timeout=30,
+            )
+            committed_diff = result.stdout.strip()
+            if committed_diff:
+                parts.append("[Last commit diff]")
+                parts.append(committed_diff[:max_chars // 2])
+        elif commit_count == 1:
+            result = subprocess.run(
+                ["git", "show", "HEAD", "--no-color"],
+                cwd=worktree, capture_output=True, text=True, timeout=30,
+            )
+            shown = result.stdout.strip()
+            if shown:
+                parts.append("[Full commit diff]")
+                parts.append(shown[:max_chars // 2])
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=worktree, capture_output=True, text=True, timeout=15,
+        )
+        tracked = [f for f in result.stdout.strip().splitlines() if f.strip()]
+        if tracked:
+            parts.append("[Tracked files]")
+            parts.append("\n".join(tracked[:30]))
+    except Exception:
+        pass
+
     try:
         result = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
@@ -132,6 +177,14 @@ def _default_judge_llm(prompt: str) -> str:
     """Call the judge model. Falls back to local model if primary is unreachable."""
     import urllib.request
 
+    api_key = os.environ.get(JUDGE_API_KEY_ENV, "")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "conductor-l2-judge/1.0",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     model = JUDGE_MODEL_PRIMARY
     body = {
         "model": model,
@@ -140,25 +193,28 @@ def _default_judge_llm(prompt: str) -> str:
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.0,
-        "max_tokens": 256,
+        "max_tokens": 2048,
     }
+
+    print(f"[L2] LLM request: model={model} endpoint={JUDGE_ENDPOINT} prompt_preview={prompt[:300]}", flush=True)
 
     try:
         req = urllib.request.Request(
             JUDGE_ENDPOINT,
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=JUDGE_TIMEOUT) as resp:
             result = json.loads(resp.read())
     except Exception as primary_exc:
         if JUDGE_MODEL_FALLBACK:
+            print(f"[L2] Primary model {model} failed, falling back to {JUDGE_MODEL_FALLBACK}: {primary_exc}", flush=True)
             body["model"] = JUDGE_MODEL_FALLBACK
             try:
                 req = urllib.request.Request(
                     JUDGE_ENDPOINT,
                     data=json.dumps(body).encode(),
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                 )
                 with urllib.request.urlopen(req, timeout=JUDGE_TIMEOUT) as resp:
                     result = json.loads(resp.read())
@@ -174,10 +230,13 @@ def _default_judge_llm(prompt: str) -> str:
                 f"No fallback configured."
             ) from primary_exc
 
-    raw = result["choices"][0]["message"]["content"].strip()
+    msg = result["choices"][0]["message"]
+    raw = (msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or "").strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1]
         raw = raw.rsplit("```", 1)[0]
+
+    print(f"[L2] LLM response: raw_len={len(raw)} preview={raw[:300]}", flush=True)
     return raw
 
 
@@ -238,10 +297,25 @@ def run_l2(
         llm_call = _default_judge_llm
 
     rubric_checks = [c for c in checks if getattr(c, "tier", None) == "L2"]
+    print(f"[L2] run: worktree={worktree} rubric_checks={len(rubric_checks)} trace_id={trace_id}", flush=True)
     if not rubric_checks:
+        print("[L2] run: no rubric checks, vacuous pass (score=1.0)", flush=True)
         return L2Result(score=1.0, judgments=[])  # vacuous pass
 
     artifact = collect_artifact(worktree)
+    print(f"[L2] artifact collected: {len(artifact)} chars for {worktree}", flush=True)
+
+    # L2 input-size guard: oversize → flag-fail (no silent truncation)
+    if len(artifact) > L2_MAX_CHARS:
+        print(f"[L2] artifact OVERSIZE: {len(artifact)} chars > {L2_MAX_CHARS} cap for {worktree}", flush=True)
+        return L2Result(
+            score=0.0,
+            judgments=[],
+            rubric_count=len(rubric_checks),
+            items_met=0,
+            oversize=True,
+        )
+
     judgments: list[Judgment] = []
     total_weight = 0.0
     met_weight = 0.0
@@ -249,6 +323,7 @@ def run_l2(
     for c in rubric_checks:
         question = getattr(c, "rubric_item", None) or c.criterion
         prompt = JUDGE_USER_PROMPT.format(rubric_item=question, artifact=artifact)
+        print(f"[L2] rubric check: id={c.id} weight={getattr(c, 'weight', 1.0)} question={question}", flush=True)
 
         raw = llm_call(prompt)
         parsed = _extract_json(raw)
@@ -259,6 +334,7 @@ def run_l2(
                 criteria_met=False,
                 explanation="Judge returned unparseable response",
             )
+            print(f"[L2] rubric {c.id}: unparseable response: {raw[:200]}", flush=True)
         else:
             met = parsed.get("criteria_met")
             if met is None:
@@ -268,6 +344,7 @@ def run_l2(
                 criteria_met=bool(met),
                 explanation=str(parsed.get("explanation", "")),
             )
+            print(f"[L2] rubric {c.id}: criteria_met={judgment.criteria_met} explanation={judgment.explanation}", flush=True)
 
         judgments.append(judgment)
         w = getattr(c, "weight", 1.0) or 1.0
@@ -277,6 +354,7 @@ def run_l2(
 
     score = met_weight / total_weight if total_weight > 0 else 1.0
     items_met = sum(1 for j in judgments if j.criteria_met)
+    print(f"[L2] result: score={score:.4f} items_met={items_met}/{len(judgments)} for {worktree}", flush=True)
 
     # Write to Langfuse if trace_id is provided
     if trace_id:

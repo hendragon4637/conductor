@@ -120,13 +120,13 @@ def _deterministic_from_criterion(criterion: str, node_index: int, is_first: boo
             check_cmd="python3 -m pytest -q --tb=short 2>&1 || exit 1",
         ))
 
-    # Endpoint health check
-    if any(kw in c_lower for kw in ("endpoint", "api", "route", "http", "curl")):
+    # File-existence check for code output
+    if any(kw in c_lower for kw in ("endpoint", "api", "route", "http", "file")):
         checks.append(Check(
-            id=f"det-{check_id_base}-endpoint",
+            id=f"det-{check_id_base}-files",
             type="deterministic",
-            criterion="Endpoint returns expected HTTP status",
-            check_cmd="curl -sf http://localhost:8000/health > /dev/null 2>&1 || exit 1",
+            criterion="Expected code files exist",
+            check_cmd="ls -la *.py 2>/dev/null || ls -la src/*.py 2>/dev/null || ls -la backend/*.py 2>/dev/null || (echo 'No Python files found' && exit 1)",
         ))
 
     # Lint check for code criteria
@@ -172,6 +172,28 @@ def _select_rubric_preset(members: list[str], task: str) -> list[Check]:
             weight=item.get("weight", 1.0),
         ))
     return checks
+
+
+# ── Scope validation ────────────────────────────────────────────────────────
+
+L1_RUNTIME_SIGNALS = ("curl", "uvicorn", "localhost", "127.0.0.1", "http://", "https://", ":8000", ":3000", "health")
+
+
+def _validate_check_scope(c: Check) -> tuple[bool, str]:
+    """Validate a single check for scope violations (runtime leaks).
+
+    L1 (deterministic) checks must not contain runtime signals like
+    curl, localhost, or health-check patterns — those require a running
+    product and belong to a higher layer.
+    """
+    if c.tier == "L1" and c.check_cmd:
+        cmd_lower = c.check_cmd.lower()
+        for signal in L1_RUNTIME_SIGNALS:
+            if signal in cmd_lower:
+                return False, f"L1 runtime leak: {signal} in check_cmd"
+    if c.tier == "L2" and not c.rubric_item:
+        return False, "L2 check missing rubric_item"
+    return True, ""
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
@@ -237,8 +259,20 @@ def generate_checks(
             seen_ids.add(c.id)
             all_checks.append(c)
 
+    # ── Validate generated checks, drop runtime leaks ─────────────────────────
+    validated = []
+    dropped = 0
+    for c in all_checks:
+        ok, reason = _validate_check_scope(c)
+        if ok:
+            validated.append(c)
+        else:
+            dropped += 1
+    if dropped:
+        print(f"[generate] validate_checks: dropped {dropped} leaked/runtime checks for node {node_id}", flush=True)
+
     return NodeChecks(
         node_id=node_id,
-        checks=all_checks,
+        checks=validated,
         checks_version=1,
     )

@@ -15,6 +15,7 @@ import os
 import json
 import subprocess
 import time
+import uuid
 from typing import Any
 
 from backend.aionui import AionUiClient
@@ -23,14 +24,18 @@ from backend.builtins.handoff import build_node_context
 from backend.db import queries
 from backend.evaluator.gate import evaluate_gate
 from backend.evaluator.l2_judge import JudgeUnavailableError, run_l2
-from backend.evaluator.remediation import insert_remediation
+
 from backend.orchestration.spawn import spawn_node_team
 from backend.planning.store import save_node_session
+from backend.watcher.signals import SIGNAL_SOURCES, derive_verdict, TERMINAL_VERDICTS
 from backend.watcher.signals_query import node_signal, AIONUI_DB
 from backend.watcher.verdict import verdict, VERDICT_RUNNING
 from backend.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
+    logger.setLevel(logging.INFO)
 
 # Default per-session thresholds (can be overridden per role)
 DEFAULT_THRESHOLDS = {
@@ -56,6 +61,7 @@ class SessionState:
         plan_id: str | None = None,
         project_id: str | None = None,
         node_session_id: str | None = None,
+        backend: str | None = None,
     ):
         self.session_id = session_id
         self.pid = pid
@@ -66,6 +72,7 @@ class SessionState:
         self.plan_id = plan_id
         self.project_id = project_id
         self.node_session_id = node_session_id
+        self.backend = backend
         self.thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
         self.status: str = VERDICT_RUNNING
         self.last_seen: float = time.time()
@@ -146,15 +153,42 @@ class Watcher:
 
     def _check_session(self, session_id: str, st: SessionState) -> None:
         """Poll one session's signals and update verdict."""
-        sig = self._poll_state(st)
-        self._persist_signal(session_id, sig)
-        v = verdict(vars(st), sig)
+        v = self._poll_via_signalsource(st)
+        if v is None:
+            sig = self._poll_state(st)
+            self._persist_signal(session_id, sig)
+            v = verdict(vars(st), sig)
         st.last_verdict_ts = time.time()
 
         if v != st.status:
             logger.info("watcher %s: %s -> %s", session_id, st.status, v)
+            print(f"[PRINT] watcher verdict transition: {session_id}: {st.status} -> {v}", flush=True)
             st.status = v
             self._handle_verdict(session_id, st, v)
+
+    def _poll_via_signalsource(self, st: SessionState) -> str | None:
+        """Try polling via the SignalSource registry. Returns verdict or None if no source."""
+        src = SIGNAL_SOURCES.get(st.backend) if st.backend is not None else None
+        if src is None:
+            if st.backend is not None:
+                logger.error("watcher: no SignalSource for backend %s (session %s)", st.backend, st.session_id)
+            return None
+        sig = src.query(st)
+        v = derive_verdict(sig, time.time())
+        persist_sig: dict[str, Any] = {
+            "pid_alive": True,
+            "terminal": sig.terminal,
+            "quota_suspected": sig.quota_suspected,
+            "token_rate": 0.0,
+            "fs_changed": sig.fs_changed,
+            "last_activity": sig.last_activity_ts or time.time(),
+            "any_error": sig.any_error,
+            "error_codes": sig.detail.get("error_codes", []),
+            "age_s": None,
+            "watcher_node_id": st.node_id,
+        }
+        self._persist_signal(st.session_id, persist_sig)
+        return v
 
     def _handle_verdict(self, session_id: str, st: SessionState, v: str) -> None:
         """React to a verdict transition."""
@@ -241,40 +275,46 @@ class Watcher:
             logger.exception("failed to persist signal for %s", session_id)
 
     def _complete_and_advance(self, session_id: str, st: SessionState) -> None:
+        print(f"[PRINT] _complete_and_advance: session={session_id} node={st.node_id} plan={st.plan_id} worktree={st.worktree}", flush=True)
         if not st.node_id or not st.plan_id or not st.worktree:
+            print(f"[PRINT] _complete_and_advance: missing required fields, returning", flush=True)
             return
 
         # ── Evaluator gate (L1 deterministic → L2 rubric) ──────────────────
         decision_l2_score: float | None = None
         try:
             task_checks = _load_node_checks(st.plan_id, st.node_id)
+            print(f"[PRINT] _complete_and_advance: loaded {len(task_checks)} checks for {st.plan_id}/{st.node_id}", flush=True)
+            logger.debug("_complete_and_advance: loaded %d checks for %s/%s", len(task_checks), st.plan_id, st.node_id)
             if task_checks:
+                print(f"[PRINT] _complete_and_advance: calling evaluate_gate (L1->L2) for {st.plan_id}/{st.node_id}", flush=True)
                 decision = evaluate_gate(task_checks, st.worktree, l2_fn=run_l2)
                 decision_l2_score = decision.goal_review
+                print(f"[PRINT] _complete_and_advance: evaluate_gate result action={decision.action} goal_review={decision.goal_review} layer={decision.reason.get('layer', '?')}", flush=True)
+                logger.debug(
+                    "evaluate_gate result: goal_review=%s action=%s for %s/%s",
+                    decision.goal_review, decision.action, st.plan_id, st.node_id,
+                )
                 if decision.action == "remediate":
+                    print(f"[PRINT] _complete_and_advance: REMEDIATE {session_id}/{st.node_id} layer={decision.reason.get('layer', '?')}", flush=True)
                     logger.info(
-                        "Evaluator gate: remediate %s/%s (%s), inserting remediation node",
+                        "Evaluator gate: remediate %s/%s (%s), creating remediation attempt",
                         session_id, st.node_id, decision.reason.get("layer", "?"),
                     )
                     # Write goal_review before remediation
                     if decision.goal_review is not None:
-                        _update_node_session_score(st.plan_id, st.node_id, decision.goal_review)
-                    plan = _load_plan_by_id(st.plan_id)
-                    if plan and plan.get("dag"):
-                        dag = plan["dag"]
-                        failed = next(
-                            (n for n in dag if n.get("id") == st.node_id),
-                            None,
-                        )
-                        if failed:
-                            insert_remediation(
-                                plan_id=st.plan_id,
-                                failed_node=failed,
-                                decision=decision.reason,
-                                existing_chunks=dag,
-                            )
+                        logger.debug("writing goal_review=%.2f for %s/%s (remediate path)", decision.goal_review, st.plan_id, st.node_id)
+                        _update_node_session_score(st.node_session_id, decision.goal_review)
+                    self._handle_remediation(session_id, st, decision)
                     return  # do NOT commit or advance
+
+            # Pass-through: gate passed, write score, commit proceeds below
+            if decision_l2_score is not None:
+                print(f"[PRINT] _complete_and_advance: L2 PASS for {st.plan_id}/{st.node_id} score={decision_l2_score:.4f}", flush=True)
+                logger.debug("evaluator PASS for %s/%s — writing goal_review=%.2f", st.plan_id, st.node_id, decision_l2_score)
+                _update_node_session_score(st.node_session_id, decision_l2_score)
         except JudgeUnavailableError:
+            print(f"[PRINT] _complete_and_advance: JUDGE_UNAVAILABLE for {session_id}/{st.node_id}", flush=True)
             # FAIL LOUD — never silently pass when judge is unavailable (Gate 01.6)
             logger.error(
                 "JUDGE_UNAVAILABLE for %s/%s — node NOT committed. "
@@ -285,6 +325,7 @@ class Watcher:
             return  # do NOT commit — loud failure
         except Exception:
             logger.exception("evaluator gate failed for %s/%s — proceeding with commit", session_id, st.node_id)
+            print(f"[PRINT] _complete_and_advance: evaluator gate EXCEPTION for {session_id}/{st.node_id}, proceeding with commit", flush=True)
             # Fail open: if evaluator itself errors (not judge-related), allow the node to commit
 
         # ── Atomic commit: node_session + tasks + runs, ONE transaction ────
@@ -304,7 +345,7 @@ class Watcher:
             try:
                 with queries.conn() as c2, c2.cursor() as cur2:
                     cur2.execute(
-                        "SELECT id, backend FROM node_sessions WHERE run_id = %s AND node_id = %s",
+                        "SELECT id, backend FROM node_sessions WHERE run_id = %s AND node_id = %s ORDER BY attempt DESC LIMIT 1",
                         (run_id, st.node_id),
                     )
                     row = cur2.fetchone()
@@ -444,6 +485,154 @@ class Watcher:
             st.status = VERDICT_RUNNING
         except Exception:
             logger.exception("failed to spawn next node for %s", session_id)
+
+    def _handle_remediation(self, session_id: str, st: SessionState, decision: GateDecision) -> None:
+        """Create remediation attempt per spec (File 08):
+        - Close current node_session (verdict=failed)
+        - Create new node_session (attempt+1, same node_id, same worktree, feedback)
+        - Build remediation brief (original task + verbal feedback)
+        - Spawn same node with remediation brief (fix-forward)
+        - Reset watcher state for the new attempt
+        """
+        run_id = _resolve_active_run_id(st.plan_id)
+        if not run_id:
+            logger.error("Cannot remediate — no active run for plan %s", st.plan_id)
+            return
+
+        MAX_ATTEMPTS = 3
+
+        # 1. Get current attempt info from DB
+        prev_ns_id = st.node_session_id
+        prev_attempt = 1
+        try:
+            with queries.conn() as c, c.cursor() as cur:
+                cur.execute(
+                    "SELECT id, attempt FROM node_sessions WHERE run_id = %s AND node_id = %s ORDER BY attempt DESC LIMIT 1",
+                    (run_id, st.node_id),
+                )
+                row = cur.fetchone()
+                if row:
+                    prev_ns_id = dict(row)["id"]
+                    prev_attempt = dict(row)["attempt"]
+        except Exception:
+            logger.exception("failed to fetch current attempt for %s/%s", run_id, st.node_id)
+
+        # 2. Check attempt cap
+        if prev_attempt >= MAX_ATTEMPTS:
+            logger.warning(
+                "Remediation cap reached for %s/%s (attempt %d/%d) — setting to failed",
+                st.plan_id, st.node_id, prev_attempt, MAX_ATTEMPTS,
+            )
+            _set_node_session_failed(prev_ns_id, f"exhausted {MAX_ATTEMPTS} attempts")
+            _set_run_failed(run_id)
+            return
+
+        # 3. Build verbal feedback from gate decision
+        from backend.evaluator.remediation import build_feedback, build_remediation_brief
+        feedback = build_feedback(decision.reason)
+
+        # 4. Close current node_session as failed
+        try:
+            with queries.conn() as c, c.cursor() as cur:
+                cur.execute(
+                    """UPDATE node_sessions
+                          SET verdict = 'failed',
+                              goal_review = COALESCE(%s, goal_review),
+                              finished_at = NOW()
+                        WHERE id = %s AND verdict = 'running'
+                    """,
+                    (decision.goal_review, prev_ns_id),
+                )
+        except Exception:
+            logger.exception("failed to close node_session %s", prev_ns_id)
+
+        # 5. Create new node_session for retry (attempt+1, same node_id, same worktree)
+        new_ns_id = f"ns_{uuid.uuid4().hex[:8]}"
+        try:
+            with queries.conn() as c, c.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO node_sessions
+                       (id, run_id, node_id, backend, verdict, worktree, attempt, remediation_of, feedback)
+                       VALUES (%s, %s, %s, 'opencode', 'running', %s, %s, %s, %s::jsonb)
+                       RETURNING id
+                    """,
+                    (new_ns_id, run_id, st.node_id, st.worktree, prev_attempt + 1, prev_ns_id, json.dumps(feedback)),
+                )
+                row = cur.fetchone()
+                if row:
+                    st.node_session_id = dict(row)["id"]
+                else:
+                    st.node_session_id = new_ns_id
+        except Exception:
+            logger.exception("failed to create remediation node_session for %s/%s", run_id, st.node_id)
+            return
+
+        # 6. Build remediation brief
+        plan = _load_plan_by_id(st.plan_id)
+        if not plan:
+            logger.error("Cannot remediate — plan %s not found", st.plan_id)
+            return
+        dag = plan.get("dag", [])
+        if isinstance(dag, str):
+            try:
+                dag = json.loads(dag)
+            except json.JSONDecodeError:
+                dag = []
+        node = next((n for n in dag if n.get("id") == st.node_id), None)
+        if not node:
+            logger.error("Cannot remediate — node %s not found in plan DAG", st.node_id)
+            return
+        original_task = (node.get("task") or {}).get("text", "")
+        success_criterion = (node.get("success") or {}).get("text", "")
+        brief = build_remediation_brief(original_task, success_criterion, feedback)
+
+        # 7. Reset watcher state for the new attempt
+        st.status = VERDICT_RUNNING
+        st.started_ts = time.time()
+        st.last_seen = st.started_ts
+        st.last_change_ts = None
+        st.saw_change = False
+        st.last_git_sig = None
+        st.last_query_sig = None
+        st.unchanged_cycles = 0
+        st.conversation_id = None
+
+        # 8. Spawn the same node with remediation brief (fix-forward, same worktree)
+        try:
+            dep_context = ""
+            deps = node.get("depends_on", []) or []
+            if deps:
+                dep_context = build_node_context(st.worktree, deps)
+
+            aionui = AionUiClient(os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+            wm = WorktreeManager(os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace"))
+            plan["worktree_path"] = st.worktree
+
+            # Override node task with remediation brief (same members, same config)
+            node_with_brief = dict(node)
+            node_with_brief["task"] = {"text": brief}
+
+            conv_map = spawn_node_team(
+                node=node_with_brief,
+                plan=plan,
+                session_id=session_id,
+                aionui=aionui,
+                wm=wm,
+                members=node.get("members", ["opencode:backend-executor"]),
+                dep_context=dep_context,
+                db_url=os.environ.get("DATABASE_URL", ""),
+                workspace_root=os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace"),
+                auto_approve=plan.get("auto_approve", True),
+            )
+            orch_conv = conv_map.get("orchestrator") or next(iter(conv_map.values()), None)
+            st.conversation_id = orch_conv
+            print(f"[PRINT] _handle_remediation: spawned remediation for {session_id}/{st.node_id} attempt={prev_attempt+1}", flush=True)
+            logger.info(
+                "Spawned remediation for %s/%s attempt=%d ns=%s conv=%s",
+                session_id, st.node_id, prev_attempt + 1, st.node_session_id, orch_conv,
+            )
+        except Exception:
+            logger.exception("failed to spawn remediation for %s/%s", session_id, st.node_id)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -593,25 +782,40 @@ def _resolve_node_conversation_ids(session_id: str, node_id: str | None) -> list
 
 
 def _load_node_checks(plan_id: str, node_id: str | None) -> list:
-    """Load evaluation checks for a plan node from the tasks table."""
+    """Load evaluation checks for a plan node from the plan's DAG (plans.dag[].checks).
+
+    v5.1 canonical: checks live on the plan DAG JSONB, NOT the tasks table.
+    Returns ``Check`` objects (not raw dicts) so downstream ``run_l2``
+    can access the ``tier`` property.
+    """
     if not node_id:
         return []
     try:
+        import json
+        from backend.evaluator.schema import Check
+
         with queries.conn() as c, c.cursor() as cur:
             cur.execute(
-                "SELECT checks FROM tasks WHERE plan_id = %s AND node_id = %s",
-                (plan_id, node_id),
+                "SELECT dag FROM plans WHERE plan_id = %s",
+                (plan_id,),
             )
             row = cur.fetchone()
             if not row:
                 return []
-            raw = dict(row).get("checks")
-            if not raw:
+            dag = dict(row).get("dag", [])
+            if not dag:
                 return []
-            import json
-            if isinstance(raw, str):
-                raw = json.loads(raw)
-            return list(raw) if isinstance(raw, list) else []
+            if isinstance(dag, str):
+                dag = json.loads(dag)
+            for node in dag:
+                if isinstance(node, dict) and node.get("id") == node_id:
+                    raw = node.get("checks", [])
+                    if isinstance(raw, str):
+                        raw = json.loads(raw)
+                    if not isinstance(raw, list):
+                        return []
+                    return [Check(**c) if isinstance(c, dict) else c for c in raw]
+            return []
     except Exception:
         logger.exception("failed to load checks for %s/%s", plan_id, node_id)
         return []
@@ -682,21 +886,24 @@ def _resolve_active_run_id(plan_id: str) -> str | None:
     return None
 
 
-def _update_node_session_score(plan_id: str, node_id: str, score: float) -> None:
-    """Write L2 goal_review to node_sessions (OLTP path for ratchet)."""
+def _update_node_session_score(ns_id: str, score: float) -> None:
+    """Write L2 goal_review to the specific node_session (OLTP path for ratchet).
+
+    Uses ``id`` directly so it only touches the current attempt, not earlier
+    remediation attempts for the same plan_id+node_id.
+    """
     try:
         with queries.conn() as c, c.cursor() as cur:
             cur.execute(
                 """UPDATE node_sessions
                       SET goal_review = %s
-                     WHERE run_id IN (SELECT id FROM runs WHERE plan_id = %s)
-                       AND node_id = %s
-                       AND (goal_review IS NULL OR goal_review != %s)
+                    WHERE id = %s
+                      AND (goal_review IS NULL OR goal_review != %s)
                 """,
-                (score, plan_id, node_id, score),
+                (score, ns_id, score),
             )
     except Exception:
-        logger.exception("failed to write goal_review for %s/%s", plan_id, node_id)
+        logger.exception("failed to write goal_review for %s", ns_id)
 
 
 def _record_judge_error(plan_id: str, node_id: str) -> None:
@@ -740,3 +947,32 @@ def _record_judge_error(plan_id: str, node_id: str) -> None:
         )
     except Exception:
         logger.exception("failed to record judge_error for %s/%s", plan_id, node_id)
+
+
+def _set_node_session_failed(ns_id: str, fail_reason: str) -> None:
+    """Set a node_session verdict to ``failed`` with a reason."""
+    try:
+        with queries.conn() as c, c.cursor() as cur:
+            cur.execute(
+                """UPDATE node_sessions
+                      SET verdict = 'failed',
+                          fail_reason = %s,
+                          finished_at = NOW()
+                    WHERE id = %s
+                """,
+                (fail_reason, ns_id),
+            )
+    except Exception:
+        logger.exception("failed to set node_session %s to failed", ns_id)
+
+
+def _set_run_failed(run_id: str) -> None:
+    """Set a run state to ``failed``."""
+    try:
+        with queries.conn() as c, c.cursor() as cur:
+            cur.execute(
+                "UPDATE runs SET state = 'failed', finished_at = NOW() WHERE id = %s",
+                (run_id,),
+            )
+    except Exception:
+        logger.exception("failed to set run %s to failed", run_id)

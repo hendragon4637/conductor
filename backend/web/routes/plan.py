@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from typing import Any, Optional
@@ -13,6 +14,10 @@ from pydantic import BaseModel
 from backend.planning.schema import Plan, PlanNode
 from backend.planning.store import get_plan as load_persisted_plan, save_plan as persist_plan
 from backend.planning.store import save_run, get_run, list_runs, update_run_state, get_node_sessions
+from backend.planning.meta_planner import decompose, generate_checks, attach_checks_to_dag, formulate
+from backend.planning.meta_planner.goal_formulator import MetaGoal
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/plans", tags=["plans"])
 
@@ -129,6 +134,7 @@ class PlanPropose(BaseModel):
     plan_id: Optional[str] = None
     nodes: Optional[list[NodeSpec]] = None
     description: Optional[str] = None
+    use_meta_planner: bool = False
 
 
 class RatifyRequest(BaseModel):
@@ -212,6 +218,25 @@ async def propose_plan(req: PlanPropose):
                 "success": {"text": success_text},
                 "success_criterion": success_text,
             })
+    elif req.use_meta_planner:
+        try:
+            mp_nodes = _generate_via_meta_planner(
+                goal=goal,
+                spec=req.spec or "",
+                quality_intent=req.quality_intent or "",
+                plan_id=pid,
+            )
+            nodes = mp_nodes
+            # Override goal/spec with meta-planner output
+            if mp_nodes and "meta_goal" in mp_nodes[0]:
+                mg = mp_nodes[0].pop("meta_goal", {})
+                goal = mg.get("goal", goal)
+                req.spec = mg.get("spec", req.spec)
+                req.quality_intent = mg.get("quality_intent", req.quality_intent)
+        except Exception as exc:
+            logger.warning("Meta-planner failed, falling back: %s", exc)
+            if req.spec and req.quality_intent:
+                nodes = _generate_nodes_from_intent(req, pid, project_id)
     elif req.spec and req.quality_intent:
         nodes = _generate_nodes_from_intent(req, pid, project_id)
 
@@ -250,6 +275,22 @@ async def ratify_plan(plan_id: str, req: RatifyRequest):
     plan_data = _get_or_load_plan(plan_id)
     if not plan_data:
         raise HTTPException(404, "Plan not found")
+
+    if req.ratified:
+        from backend.evaluator.plan_evaluator import run_plan_gate
+        decision = run_plan_gate(plan_data)
+        if decision.action == "revise":
+            raise HTTPException(
+                400,
+                detail={
+                    "error": "Plan gate rejected",
+                    "reason": decision.reason,
+                    "feedback": decision.feedback_text,
+                    "gate_exhausted": plan_data.get("gate_exhausted", False),
+                },
+            )
+        plan_data["plan_goal_review"] = decision.plan_goal_review
+
     plan_data["ratified"] = req.ratified
     if req.comment:
         plan_data["comment"] = req.comment
@@ -310,6 +351,89 @@ def _generate_nodes_from_intent(
             "success_criterion": "Complete the task",
         })
     return parsed
+
+
+def _generate_via_meta_planner(
+    goal: str,
+    spec: str,
+    quality_intent: str,
+    plan_id: str,
+) -> list[dict[str, Any]]:
+    """Run the full meta-planner pipeline: goal-formula → decompose → check-gen.
+
+    Args:
+        goal: Raw user goal/description.
+        spec: Optional spec/constraints text.
+        quality_intent: Quality guidance text.
+        plan_id: Target plan ID.
+
+    Returns:
+        List of node dicts compatible with the plan response format.
+
+    Note:
+        The meta-planner internally handles clarifying loops. If the goal
+        is too vague for autonomous resolution, it defers (returns empty).
+    """
+    mg = formulate(raw_input=goal, origin="internal_drive")
+    if mg.needs_clarification:
+        logger.warning("Meta-planner deferred: %s", mg.questions)
+        return []
+    meta_goal = mg
+
+    # Stage 2: Decompose into DAG
+    dag = decompose(
+        goal=meta_goal.goal,
+        spec=meta_goal.spec or spec,
+        quality_intent=meta_goal.quality_intent or quality_intent,
+    )
+
+    if not dag or not dag.nodes:
+        logger.warning("Meta-planner produced empty DAG")
+        return []
+
+    # Stage 3: Generate checks (separate LLM call)
+    all_checks = generate_checks(
+        dag=dag,
+        quality_intent=meta_goal.quality_intent,
+    )
+    attach_checks_to_dag(dag, all_checks)
+
+    # Convert PlanDAG → node dicts for the route response
+    node_dicts = []
+    for n in dag.nodes:
+        checks_list = []
+        for c in getattr(n, "checks", []):
+            checks_list.append({
+                "id": c.id,
+                "type": c.type,
+                "criterion": c.criterion,
+                "check_cmd": c.check_cmd,
+                "rubric_item": c.rubric_item,
+                "weight": c.weight,
+                "provenance": c.provenance,
+            })
+        members_list = [
+            {"agent_config": m.agent_config, "backend": m.backend, "role": m.role}
+            for m in n.members
+        ]
+        task_text = n.task.text
+        success_text = n.success.text
+        backend = members_list[0].get("backend", "opencode") if members_list else "opencode"
+        node_dicts.append({
+            "node_id": n.id,
+            "title": task_text[:40],
+            "description": task_text,
+            "depends_on": n.depends_on,
+            "backend": backend,
+            "members": members_list,
+            "agent_config_id": members_list[0]["agent_config"] if members_list else "opencode:backend-executor",
+            "task": {"text": task_text, "inputs": n.task.inputs, "deliverables": n.task.deliverables},
+            "success": {"text": success_text},
+            "success_criterion": success_text,
+            "checks": checks_list,
+            "meta_goal": meta_goal.model_dump(),
+        })
+    return node_dicts
 
 
 def _validate_supplied_dag(nodes: list[NodeSpec]) -> None:
@@ -392,10 +516,12 @@ def _persist_plan_dag(plan_data: dict[str, Any]) -> None:
     import os
     from backend.planning.store import get_plan as load_persisted
     from backend.planning.schema import NodeMember, TaskSpec, NodeSuccess, SuccessCriterion
+    from backend.evaluator.generate import generate_checks
     row = load_persisted(plan_data["plan_id"])
     if not row:
         raw_nodes = plan_data.get("nodes", [])
         project_id = plan_data.get("project_id") or "default"
+        quality_intent = plan_data.get("quality_intent")
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url:
             _ensure_project_in_db(db_url, project_id)
@@ -429,14 +555,44 @@ def _persist_plan_dag(plan_data: dict[str, Any]) -> None:
                 return NodeSuccess(text=success_raw.get("text", ""))
             return NodeSuccess(text=n.get("success_criterion") or n.get("success", "Complete the task"))
 
-        dag = [PlanNode(
-            id=n.get("node_id") or n.get("id", f"node-{i}"),
-            members=_to_members(n),
-            depends_on=n.get("depends_on", []),
-            task=_task_from_node(n, i),
-            success=_success_from_node(n),
-            project_id=project_id,
-        ) for i, n in enumerate(raw_nodes)]
+        def _members_list(n: dict) -> list[str]:
+            """Extract flat member strings from node members list for generate_checks."""
+            raw = n.get("members", [])
+            agent_cfg = n.get("agent_config_id") or "opencode:backend-executor"
+            if not raw:
+                return [agent_cfg]
+            if isinstance(raw[0], dict):
+                return [m.get("agent_config", agent_cfg) for m in raw]
+            return raw
+
+        dag: list[PlanNode] = []
+        total = len(raw_nodes)
+        for i, n in enumerate(raw_nodes):
+            nid = n.get("node_id") or n.get("id", f"node-{i}")
+            task_text = _task_from_node(n, i).text
+            success_text = _success_from_node(n).text
+            members_flat = _members_list(n)
+
+            generated = generate_checks(
+                node_id=nid,
+                task=task_text,
+                success_criterion=success_text,
+                node_index=i,
+                total_nodes=total,
+                members=members_flat,
+                quality_intent=quality_intent,
+            )
+
+            pn = PlanNode(
+                id=nid,
+                members=_to_members(n),
+                depends_on=n.get("depends_on", []),
+                task=_task_from_node(n, i),
+                success=_success_from_node(n),
+                checks=generated.checks,
+                project_id=project_id,
+            )
+            dag.append(pn)
 
         plan_obj = Plan(
             plan_id=plan_data["plan_id"],

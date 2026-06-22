@@ -32,9 +32,9 @@ SourceType = Literal["chat_promote", "new_plan", "refine", "append_node",
                       "cross_project", "trigger", "byo_dag"]
 
 
-def _next_node_id(existing: list[ChunkNode]) -> str:
+def _next_node_id(existing: list[ChunkNode] | list[dict]) -> str:
     """Generate the next available node-id for incremental appends."""
-    existing_ids = {c.id for c in existing}
+    existing_ids = {c.id if hasattr(c, 'id') else c.get('id', '?') for c in existing}
     i = 1
     while f"node-{i}" in existing_ids:
         i += 1
@@ -269,6 +269,11 @@ def decompose_or_update(
 
     elif source in ("append_node", "cross_project"):
         # Incremental: add node(s) to live DAG, keep completed nodes intact
+        # Convert raw dicts (from JSONB) to ChunkNode objects
+        existing = [
+            _parse_chunk(c) if isinstance(c, dict) else c
+            for c in existing
+        ]
         return _incremental_append(
             plan_id=plan_id,
             existing_chunks=existing,
@@ -466,6 +471,15 @@ def _incremental_append(
     Preserves all completed chunks. The new node is added to the DAG
     with the given members, dependencies, and task.
     """
+    # Normalize members: extract agent_config from dict entries
+    _members: list[str] = []
+    for m in members:
+        if isinstance(m, dict):
+            _members.append(m.get("agent_config", "opencode:backend-executor"))
+        else:
+            _members.append(str(m))
+    members = _members
+
     new_id = _next_node_id(existing_chunks)
 
     new_chunk = ChunkNode(
@@ -522,6 +536,8 @@ def _parse_chunk(c: dict[str, Any]) -> ChunkNode:
 
     if isinstance(members, str):
         members = [members]
+    elif members and isinstance(members[0], dict):
+        members = [m.get("agent_config", "opencode:backend-executor") for m in members]
 
     success_text = str(success_data.get("text", ""))
     success = NodeSuccess(text=success_text)

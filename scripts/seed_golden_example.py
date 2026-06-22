@@ -232,10 +232,10 @@ def seed(conn=None) -> dict[str, int]:
 
     for ex in EXAMPLES:
         with conn.cursor() as cur:
-            # Idempotent: skip if (node_type, split, task) already exists
+            # Idempotent: skip if (node_type, split, artifact_blob) already exists
             cur.execute(
-                "SELECT 1 FROM golden_set WHERE node_type = %s AND split = %s AND task = %s",
-                (ex["node_type"], ex["split"], ex["task"]),
+                "SELECT 1 FROM golden_set WHERE node_type = %s AND split = %s AND artifact_blob = %s",
+                (ex["node_type"], ex["split"], ex["artifact_blob"]),
             )
             if cur.fetchone():
                 skipped += 1

@@ -1,10 +1,12 @@
 """Rubric loading and selection logic.
 
-Loads preset rubric YAML files from ``rubrics/`` directory.
+Loads preset rubric YAML files from ``rubrics/`` directory or from the
+``rubrics`` table in PostgreSQL (DB preferred, YAML as fallback).
 ``select_rubric`` picks the best rubric for a node based on role + task text.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -16,8 +18,36 @@ def _rubrics_dir() -> Path:
     return Path(os.path.dirname(__file__)) / "rubrics"
 
 
+def _row_to_rubric(row: dict[str, Any]) -> dict[str, Any]:
+    rubric = {"name": row["name"], "applies_to": row["applies_to"], "items": row["items"]}
+    if "tier" in row:
+        rubric["tier"] = row["tier"]
+    if not isinstance(rubric["applies_to"], (list, tuple)):
+        rubric["applies_to"] = json.loads(rubric["applies_to"]) if isinstance(rubric["applies_to"], str) else []
+    if not isinstance(rubric["items"], (list, tuple)):
+        rubric["items"] = json.loads(rubric["items"]) if isinstance(rubric["items"], str) else []
+    return rubric
+
+
+def _load_all_from_db() -> list[dict[str, Any]]:
+    try:
+        from backend.db import get_connection
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                _ = cur.execute("SELECT name, applies_to, tier, items FROM rubrics ORDER BY name")
+                return [_row_to_rubric(dict(r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
 def load_all_rubrics() -> list[dict[str, Any]]:
-    """Load all rubric YAML files from the rubrics directory."""
+    """Load all rubrics — from DB registry first, falling back to YAML files."""
+    db_rubrics = _load_all_from_db()
+    if db_rubrics:
+        return db_rubrics
     rubrics_dir = _rubrics_dir()
     rubrics: list[dict[str, Any]] = []
     if not rubrics_dir.is_dir():
@@ -41,6 +71,45 @@ def load_rubric(name: str) -> dict[str, Any] | None:
     return None
 
 
+def _select_best_rubric(
+    rubrics: list[dict[str, Any]],
+    node_members: list[str | dict[str, Any]],
+    task_text: str = "",
+) -> dict[str, Any] | None:
+    task_lower = task_text.lower()
+    roles: set[str] = set()
+    for m in node_members:
+        if isinstance(m, dict):
+            raw = m.get("role", "")
+        else:
+            raw = m.split(":", 1)[1].lower() if ":" in m else m.lower()
+        if raw:
+            roles.add(raw)
+            roles.update(raw.split("-"))
+
+    best_match: dict[str, Any] | None = None
+    best_score = 0
+    for r in rubrics:
+        applies_to = {a.lower() for a in r.get("applies_to", [])}
+        if "default" in applies_to:
+            continue
+        matched = len(roles & applies_to)
+        if matched > best_score:
+            best_score = matched
+            best_match = r
+    if best_match:
+        return best_match
+
+    for r in rubrics:
+        applies_to = {a.lower() for a in r.get("applies_to", [])}
+        if "default" in applies_to:
+            continue
+        if any(kw in task_lower for kw in applies_to):
+            return r
+
+    return None
+
+
 def select_rubric(node_members: list[str | dict[str, Any]], task_text: str = "") -> dict[str, Any]:
     """Select the best rubric for a node based on its members' roles and task.
 
@@ -60,44 +129,51 @@ def select_rubric(node_members: list[str | dict[str, Any]], task_text: str = "")
     Returns:
         A rubric dict with ``name``, ``applies_to``, and ``items``.
     """
-    task_lower = task_text.lower()
-    roles: set[str] = set()
-    for m in node_members:
-        if isinstance(m, dict):
-            raw = m.get("role", "")
-        else:
-            # "opencode:backend-executor" -> "backend-executor"
-            raw = m.split(":", 1)[1].lower() if ":" in m else m.lower()
-        if raw:
-            roles.add(raw)
-            # Compound role segments: "backend-executor" -> "backend", "executor"
-            roles.update(raw.split("-"))
     all_rubrics = load_all_rubrics()
-
-    # Priority 1: match by role — pick rubric with most matching role tokens
-    best_match: dict[str, Any] | None = None
-    best_score = 0
-    for r in all_rubrics:
-        applies_to = {a.lower() for a in r.get("applies_to", [])}
-        if "default" in applies_to:
-            continue
-        matched = len(roles & applies_to)
-        if matched > best_score:
-            best_score = matched
-            best_match = r
-    if best_match:
-        return best_match
-
-    # Priority 2: match by keyword in task text
-    for r in all_rubrics:
-        applies_to = {a.lower() for a in r.get("applies_to", [])}
-        if "default" in applies_to:
-            continue
-        if any(kw in task_lower for kw in applies_to):
-            return r
-
-    # Priority 3: fallback
+    result = _select_best_rubric(all_rubrics, node_members, task_text)
+    if result:
+        return result
     fallback = load_rubric("generic_quality")
     if fallback:
         return fallback
     return {"name": "generic_quality", "applies_to": ["default"], "items": []}
+
+
+def retrieve_rubric_by_name(name: str) -> dict[str, Any] | None:
+    try:
+        from backend.db import get_connection
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                _ = cur.execute(
+                    "SELECT name, applies_to, tier, items FROM rubrics WHERE name = %s",
+                    (name,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return _row_to_rubric(dict(row))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return None
+
+
+def retrieve_rubric(node_members: list[str | dict[str, Any]], task_text: str = "") -> dict[str, Any]:
+    try:
+        from backend.db import get_connection
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                _ = cur.execute("SELECT name, applies_to, tier, items FROM rubrics ORDER BY name")
+                rows = cur.fetchall()
+                if rows:
+                    db_rubrics = [_row_to_rubric(dict(r)) for r in rows]
+                    result = _select_best_rubric(db_rubrics, node_members, task_text)
+                    if result:
+                        return result
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return select_rubric(node_members, task_text)
