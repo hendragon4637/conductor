@@ -41,9 +41,21 @@ def evaluate_gate(
 
     l1 = run_l1(check_list, worktree)
     if not l1.passed:
+        checks_by_id = {getattr(c, "id", ""): c for c in check_list}
+        detail: list[dict[str, Any]] = []
+        for check_id, ok, output in l1.detail:
+            check = checks_by_id.get(check_id)
+            detail.append({
+                "check_id": check_id,
+                "ok": ok,
+                "output": output,
+                "criterion": getattr(check, "criterion", ""),
+                "check_cmd": getattr(check, "check_cmd", ""),
+                "worktree": worktree,
+            })
         return GateDecision(
             action="remediate",
-            reason={"layer": "L1", "detail": l1.detail},
+            reason={"layer": "L1", "detail": detail},
         )
 
     if l2_fn is not None:

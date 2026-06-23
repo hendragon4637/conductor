@@ -117,7 +117,7 @@ def _deterministic_from_criterion(criterion: str, node_index: int, is_first: boo
             id=f"det-{check_id_base}-tests",
             type="deterministic",
             criterion="All tests pass",
-            check_cmd="python3 -m pytest -q --tb=short 2>&1 || exit 1",
+            check_cmd="python3 -m pytest -q --tb=short 2>&1 || (echo 'L1 preset det-tests failed: pytest did not pass when run from the node worktree. Fix test failures or add the expected tests in the checked project tree.' && exit 1)",
         ))
 
     # File-existence check for code output
@@ -126,7 +126,7 @@ def _deterministic_from_criterion(criterion: str, node_index: int, is_first: boo
             id=f"det-{check_id_base}-files",
             type="deterministic",
             criterion="Expected code files exist",
-            check_cmd="ls -la *.py 2>/dev/null || ls -la src/*.py 2>/dev/null || ls -la backend/*.py 2>/dev/null || (echo 'No Python files found' && exit 1)",
+            check_cmd="ls -la *.py 2>/dev/null || ls -la src/*.py 2>/dev/null || ls -la backend/*.py 2>/dev/null || (echo 'L1 preset det-files failed: no Python files found in checked locations from the node worktree: root/*.py, src/*.py, backend/*.py. Create or move the expected implementation file into one of those checked locations, or adjust the plan checks before ratification.' && exit 1)",
         ))
 
     # Lint check for code criteria
@@ -135,7 +135,7 @@ def _deterministic_from_criterion(criterion: str, node_index: int, is_first: boo
             id=f"det-{check_id_base}-syntax",
             type="deterministic",
             criterion="No syntax errors in Python files",
-            check_cmd="python3 -m py_compile $(find . -name '*.py' -not -path './.git/*') 2>&1 || exit 1",
+            check_cmd="files=$(find . -name '*.py' -not -path './.git/*'); if [ -z \"$files\" ]; then echo 'L1 preset det-syntax failed: no Python files found under the node worktree for syntax checking.'; exit 1; fi; python3 -m py_compile $files 2>&1 || (echo 'L1 preset det-syntax failed: one or more Python files under the node worktree have syntax errors. Fix the reported files.' && exit 1)",
         ))
 
     # Regression check (non-first nodes)

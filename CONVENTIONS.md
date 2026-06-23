@@ -25,6 +25,8 @@
 - Two polling signals: git diff (file changes) + DB query (cheap query signature)
 - "Terminal" = stable (no change) for >= 2 consecutive polls + settle_s seconds
 - No heuristic for terminal content type — stability is the signal
+- `backend.watcher` logger MUST have a `StreamHandler` at module init (Python loggers without handlers silently swallow output; uvicorn does not set up handlers for `backend.watcher` automatically)
+- Add `[PRINT]`-prefixed `print(..., flush=True)` calls at all verdict transitions and evaluator gate decision points for debug visibility regardless of logger configuration
 
 ## Evaluator (meta-evaluator)
 - Evaluator sits between watcher "done" verdict and node commit — NEVER modify watcher for evaluation
@@ -32,6 +34,8 @@
 - Checks are generated at decompose time via `generate_checks()`, ratified by human at plan approval
 - Remediation nodes reuse `decompose_or_update("append_node")` lifecycle — no new orchestration
 - L1 runs shell commands in the node worktree; exit 0 = pass
+- L1 checks are FORBIDDEN from containing runtime signals (curl, localhost, 127.0.0.1, http://, uvicorn) — these belong to higher layers (L4). `validate_checks()` rejects leaked checks at generation time.
+- L2 input is size-guarded (`L2_MAX_INPUT_CHARS=24000`): oversize → flag-fail (score=0, oversize=True), no silent truncation
 - Rubrics come from preset library, never zero-shot generated
 - Evaluator gate fail-open: if L1 itself errors, node still commits (never block on evaluator infra)
 - L3 (meta-eval) runs out-of-band, NOT in the hot path — scheduled periodically (e.g. weekly)
@@ -40,6 +44,8 @@
 - L3 drift → rubric refinement proposals are QUEUED with `status='pending'`, never auto-applied
 - L4 runs conditionally only when the product has a user-facing surface (`needs_usage_sim`)
 - L4 executes behaviors as HTTP requests against a running product server (black-box, no source reading)
+- Remediation carries verbal feedback from the gate failure: `build_feedback()` builds structured `{failed_checks, reflection}` from the gate decision; `build_remediation_brief()` builds the fix-forward prompt (original goal + failed checks + what to fix + "FIX IT — do NOT start over")
+- Remediation attempt cap is 2 (1 original + 1 retry); `remediation_of` links retry to its predecessor
 - L4 produces structured friction scores per dimension; report is surfaced for human review — NEVER auto-decides feature direction
 - L4 `L4Report` has no `auto_apply` or `decision` field — it carries observations only
 

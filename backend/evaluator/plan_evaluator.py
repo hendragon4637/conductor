@@ -2,23 +2,52 @@ from __future__ import annotations
 
 """Plan-evaluator: gates DAG structure BEFORE execution (File 04A).
 
-Reuses L1+L2 engine:
-- L1 = structural asserts (acyclic, nodes complete, deps resolve)
-- L2 = plan rubric (covers_goal, right_sized, deps_correct, measurable)
+L1 structural asserts (acyclic, nodes complete, deps resolve).
+L2 plan rubric (covers_goal, right_sized, deps_correct, measurable)
+via meta_planner LLM call, NOT the node-level L2 judge.
 
 Output ``plan_goal_review`` (0-1) stored on the run.
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
-from backend.evaluator.l2_judge import L2Result, run_l2
-from backend.evaluator.schema import Check
+from backend.evaluator.rubrics import load_rubric
+from backend.planning.meta_planner.llm import call_llm_structured, get_meta_planner_model
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 L1_STRUCTURAL_RUBRIC = "plan_structure"
+
+# ── plan_l2 response schema ─────────────────────────────────────────
+
+class JudgeItemResponse(BaseModel):
+    """A single rubric item judged by the plan-level L2."""
+    id: str = Field(description="Rubric item ID (covers_goal, right_sized, deps_correct, measurable)")
+    met: bool = Field(description="True if this rubric criterion is satisfied by the plan")
+
+class PlanJudgeResponse(BaseModel):
+    """All rubric items judged by the plan-level L2."""
+    items: list[JudgeItemResponse] = Field(description="Judgments for each rubric item")
+
+# ── Plan L2 prompt template ─────────────────────────────────────────
+
+PLAN_JUDGE_PROMPT = """You are evaluating a plan DAG before execution. Rate each rubric item as met or not met.
+
+Plan goal:
+{plan_goal}
+
+Plan nodes:
+{plan_nodes}
+
+Rubric:
+{rubric}
+
+For each rubric item, determine whether the plan satisfies it. Return the judgments as a JSON object with an "items" array, each with "id" and "met" (boolean)."""
+
+# ── Data classes ────────────────────────────────────────────────────
 
 
 @dataclass
@@ -30,10 +59,17 @@ class PlanL1Result:
 
 
 @dataclass
+class PlanL2Result:
+    """Result of plan-level L2 rubric evaluation (not the node-level L2)."""
+    score: float = 0.0
+    judgments: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class PlanEvalResult:
     """Combined result of plan evaluation (L1 + L2)."""
     l1: PlanL1Result
-    l2: L2Result | None = None
+    l2: PlanL2Result | None = None
     plan_goal_review: float = 0.0
     passed: bool = False
 
@@ -154,60 +190,22 @@ def run_plan_l1(dag: list[dict]) -> PlanL1Result:
     return PlanL1Result(passed=all_ok, checks=checks, note=note)
 
 
-def evaluate_plan(
+def plan_l2(
     dag: list[dict],
     plan_goal: str = "",
-    l2_threshold: float = 0.7,
-) -> PlanEvalResult:
-    """Run full plan evaluation (L1 structural + L2 plan rubric).
+) -> PlanL2Result:
+    """Run plan-level L2 rubric evaluation via the meta_planner LLM.
+
+    This is the plan-structure gate (covers_goal, right_sized, deps_correct,
+    measurable) — separate from the node-level L2 rubric judge.
 
     Args:
         dag: List of node dicts from the plan.
-        plan_goal: The plan's goal text (for L2 context, optional).
-        l2_threshold: Minimum L2 score to consider the plan passing.
+        plan_goal: The plan's goal text.
 
     Returns:
-        ``PlanEvalResult`` with L1 and L2 results and combined verdict.
+        ``PlanL2Result`` with weighted score and per-item judgments.
     """
-    # L1
-    l1 = run_plan_l1(dag)
-    if not l1.passed:
-        return PlanEvalResult(
-            l1=l1, l2=None, plan_goal_review=0.0, passed=False,
-        )
-
-    # L2 — plan rubric
-    plan_text = "\n".join(
-        f"Node {n.get('id', '?')}: {n.get('task', {}).get('text', '')[:200]}"
-        for n in dag
-    )
-    if plan_goal:
-        plan_text = f"Goal: {plan_goal}\n\n{plan_text}"
-
-    rubric_checks = _build_plan_rubric_checks()
-    try:
-        l2_result = run_l2(checks=rubric_checks, worktree="", trace_id=None)
-    except Exception as exc:
-        logger.warning("Plan L2 judge failed: %s — using L1-only result", exc)
-        return PlanEvalResult(
-            l1=l1, l2=None, plan_goal_review=0.0, passed=l1.passed,
-        )
-
-    score = l2_result.score
-    passed = score >= l2_threshold
-
-    return PlanEvalResult(
-        l1=l1,
-        l2=l2_result,
-        plan_goal_review=round(score, 4),
-        passed=passed,
-    )
-
-
-def _build_plan_rubric_checks() -> list[Check]:
-    """Build L2 rubric checks for the plan structure rubric."""
-    from backend.evaluator.rubrics import load_rubric
-
     rubric = load_rubric("plan_structure") or {
         "name": "plan_structure",
         "items": [
@@ -218,16 +216,86 @@ def _build_plan_rubric_checks() -> list[Check]:
         ],
     }
 
-    return [
-        Check(
-            id=item["id"],
-            type="rubric",
-            criterion=item["rubric_item"],
-            rubric_item=item["rubric_item"],
-            weight=item.get("weight", 1.0),
-        )
+    plan_nodes = "\n".join(
+        json.dumps({
+            "id": n.get("id", "?"),
+            "task": n.get("task", {}).get("text", ""),
+            "success": n.get("success", {}).get("text", ""),
+            "depends_on": n.get("depends_on", []),
+        }, indent=2)
+        for n in dag
+    )
+
+    rubric_text = "\n".join(
+        f"- {item['id']} (weight {item.get('weight', 1.0)}): {item['rubric_item']}"
         for item in rubric["items"]
-    ]
+    )
+
+    prompt = PLAN_JUDGE_PROMPT.format(
+        plan_goal=plan_goal or "(not provided)",
+        plan_nodes=plan_nodes,
+        rubric=rubric_text,
+    )
+
+    try:
+        model_cfg = get_meta_planner_model()
+        resp = call_llm_structured(prompt, PlanJudgeResponse, model_cfg=model_cfg)
+    except Exception as exc:
+        logger.warning("Plan L2 LLM call failed: %s — returning score 0", exc)
+        return PlanL2Result(score=0.0)
+
+    total_weight = 0.0
+    met_weight = 0.0
+    judgments: list[dict] = []
+    item_map = {item["id"]: item for item in rubric["items"]}
+
+    for judged in resp.items:
+        rubric_item = item_map.get(judged.id)
+        weight = rubric_item.get("weight", 1.0) if rubric_item else 1.0
+        total_weight += weight
+        if judged.met:
+            met_weight += weight
+        judgments.append({
+            "id": judged.id,
+            "met": judged.met,
+            "weight": weight,
+        })
+
+    score = met_weight / total_weight if total_weight > 0 else 0.0
+    return PlanL2Result(score=score, judgments=judgments)
+
+
+def evaluate_plan(
+    dag: list[dict],
+    plan_goal: str = "",
+    l2_threshold: float = 0.7,
+) -> PlanEvalResult:
+    """Run full plan evaluation (L1 structural + L2 plan rubric).
+
+    Args:
+        dag: List of node dicts from the plan.
+        plan_goal: The plan's goal text (for L2 context).
+        l2_threshold: Minimum L2 score to consider the plan passing.
+
+    Returns:
+        ``PlanEvalResult`` with L1 and L2 results and combined verdict.
+    """
+    l1 = run_plan_l1(dag)
+    if not l1.passed:
+        return PlanEvalResult(
+            l1=l1, l2=None, plan_goal_review=0.0, passed=False,
+        )
+
+    l2_result = plan_l2(dag, plan_goal)
+    score = l2_result.score
+    passed = score >= l2_threshold
+
+    return PlanEvalResult(
+        l1=l1,
+        l2=l2_result,
+        plan_goal_review=round(score, 4),
+        passed=passed,
+    )
 
 
 # ── Plan gate / revise loop ────────────────────────────────────────

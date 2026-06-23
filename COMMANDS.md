@@ -62,7 +62,16 @@ cd /opt/aipc/conductor && python -m pytest backend/tests/test_ratchet_wiring.py 
 ```
 
 ## Migrations
-Database migrations are in `/opt/aipc/conductor/backend/migrations/`. New migration files prefixed with incrementing number + description (e.g., `011_fix_verdict_defaults.sql`). Run manually via psql.
+Database migrations are in `/opt/aipc/conductor/backend/migrations/`. New migration files prefixed with incrementing number + description (e.g., `011_fix_verdict_defaults.sql`). Run manually via psql with:
+```bash
+docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql
+```
+
+## E2E test
+```bash
+cd /opt/aipc/conductor && uv run python scripts/e2e_l2_test.py
+```
+Cleans state: `bash /opt/aipc/conductor/scripts/clean_e2e_state.sh`
 
 ## Environment
 ```bash

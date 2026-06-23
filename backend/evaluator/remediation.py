@@ -23,9 +23,23 @@ def _render_fix_task(reason: dict) -> str:
     layer = reason.get("layer", "?")
     detail = reason.get("detail", [])
     if layer == "L1" and isinstance(detail, list):
-        for check_id, ok, tail in detail:
+        for item in detail:
+            if isinstance(item, dict):
+                check_id = item.get("check_id", "?")
+                ok = item.get("ok", False)
+                tail = str(item.get("output", ""))
+                command = item.get("check_cmd", "")
+                criterion = item.get("criterion", "")
+            else:
+                check_id, ok, tail = item
+                command = ""
+                criterion = ""
             status = "PASSED" if ok else "FAILED"
             parts.append(f"  [{status}] {check_id}")
+            if criterion:
+                parts.append(f"    Criterion: {criterion}")
+            if command:
+                parts.append(f"    Command: {command}")
             if not ok:
                 parts.append(f"    Output: {tail[:300]}")
         return "\n".join(parts)
@@ -46,7 +60,19 @@ def build_feedback(decision: dict) -> dict:
     failed = []
 
     if layer == "L1" and isinstance(detail, list):
-        for check_id, ok, tail in detail:
+        for item in detail:
+            if isinstance(item, dict):
+                if item.get("ok") is False:
+                    failed.append({
+                        "tier": "L1",
+                        "id": item.get("check_id", "?"),
+                        "criterion": item.get("criterion", ""),
+                        "command": item.get("check_cmd", ""),
+                        "worktree": item.get("worktree", ""),
+                        "detail": str(item.get("output", ""))[:300],
+                    })
+                continue
+            check_id, ok, tail = item
             if not ok:
                 failed.append({
                     "tier": "L1",
@@ -82,6 +108,8 @@ def build_feedback(decision: dict) -> dict:
         for f in failed:
             if f.get("why"):
                 parts.append(f"  - {f['id']}: {f['why']}")
+            elif f.get("command"):
+                parts.append(f"  - {f['id']}: failed `{f['command']}`")
             elif f.get("detail"):
                 parts.append(f"  - {f['id']}: check failed")
             else:
@@ -111,10 +139,17 @@ def build_remediation_brief(
         cid = fc.get("id", "?")
         why = fc.get("why") or fc.get("detail", "")
         lines.append(f"  [{tid}] {cid}: {why}")
+        if fc.get("criterion"):
+            lines.append(f"      Criterion: {fc['criterion']}")
+        if fc.get("worktree"):
+            lines.append(f"      Worktree checked: {fc['worktree']}")
+        if fc.get("command"):
+            lines.append(f"      Exact command that failed: {fc['command']}")
 
     lines.append("")
     lines.append(f"WHAT TO FIX: {feedback.get('reflection', 'Review and fix the issues above.')}")
     lines.append("")
+    lines.append("If your previous work appears correct but evaluator feedback conflicts with your assessment, prioritize the evaluator feedback. Make the work satisfy the exact failed check, including its command, working directory, and checked paths.")
     lines.append("The code from your previous attempt is in this worktree. FIX IT — do NOT start over.")
     lines.append(f"SUCCESS: {success_criterion}")
     return "\n".join(lines)

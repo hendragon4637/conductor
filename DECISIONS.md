@@ -142,8 +142,24 @@ Decision: The ratchet loop enforces a frozen boundary: `permissions`, `allowed_t
 
 ## 2026-06-19 — Plan evaluator: structural L1 + plan-rubric L2 for pre-execution gating
 Status: ACTIVE
-Decision: Plan evaluation runs at ratification time, before execution. L1 checks the DAG structure (nodes≥1, fields present, deps resolve, acyclic). L2 applies a `plan_structure.yaml` rubric via the L2 judge if L1 passes. The `plan_goal_review` score is stored on the run — it gates plan approval, not node execution. If the L2 judge is unavailable, L1 alone determines the verdict (fail-open).
+Decision: Plan evaluation runs at ratification time, before execution. L1 checks the DAG structure (nodes≥1, fields present, deps resolve, acyclic). L2 applies a `plan_structure.yaml` rubric via the meta_planner LLM (call_llm_structured), NOT the node-level L2 judge. The `plan_goal_review` score is stored on the run — it gates plan approval, not node execution. If the plan L2 LLM call fails, L1 alone determines the verdict (fail-open, score 0).
 
 ## 2026-06-19 — L4 two-case simulation: standalone + acceptance with common engine
 Status: ACTIVE
 Decision: L4 runs in two cases — `l4_standalone` (persona session with derived scenario, no plan context) and `l4_acceptance` (same persona+rubric verifying plan.success as the closing gate). Both use the same engine and persona; only the framing differs. The driver is selected by product type (web→browser, cli→shell, api→http, doc→none). L4 reports are observational only — friction scores are surfaced for human review with no auto-decide mechanism.
+
+## 2026-06-20 — L2 judge model: deepseek-v4-flash-free as primary
+Status: ACTIVE
+Decision: The L2 judge uses `deepseek-v4-flash-free` on OpenCode Zen as the primary judge model. `openai/gpt-oss-120b` is NOT available on OpenCode Zen (returns 401 "Model not supported"). The fallback is `nemotron-3-ultra-free`. No NVIDIA NIM models are configured. `JUDGE_MODEL_PRIMARY=deepseek-v4-flash-free` and `JUDGE_ENDPOINT=https://opencode.ai/zen/v1/chat/completions` are the env defaults.
+
+## 2026-06-20 — L1 check scope boundaries (no runtime leaks)
+Status: ACTIVE
+Decision: L1 deterministic checks must never contain runtime signals (curl, localhost, 127.0.0.1, http://, uvicorn). These belong to higher evaluation layers (L4). The old `_deterministic_from_criterion` generated a `curl -sf http://localhost:8000/health` L1 check — replaced with a file-existence check. `validate_checks()` in `generate.py` rejects any leaked runtime checks at generation time. The L2 input-size guard (`L2_MAX_INPUT_CHARS=24000`) prevents oversized artifacts from being sent to the judge — oversize triggers a flag-fail (score=0, oversize=True) instead of silent truncation.
+
+## 2026-06-20 — Remediation flow with verbal feedback (reflection)
+Status: ACTIVE
+Decision: When the evaluator gate rejects a node (L1 or L2), `build_feedback()` constructs structured verbal feedback from the failing checks including a `reflection` summary. `build_remediation_brief()` builds a fix-forward prompt instructing the agent to fix existing work in the same worktree rather than starting over. The remediation node's task carries the full brief (original goal + failed checks + what to fix). Attempt cap is 2 (1 original + 1 remediation). Schema migration `v4_030_remediation_flow.sql` adds `remediation_of`, `feedback`, and `fail_reason` columns to `node_sessions` plus the `idx_ns_node_attempt` index on `(run_id, node_id, attempt)`.
+
+## 2026-06-20 — Watcher logger handler fix
+Status: ACTIVE
+Decision: The `backend.watcher` logger in `supervisor.py` had no `StreamHandler`, causing all watcher-level log output to be silently swallowed during normal operation. Added an `if not logger.handlers: logger.addHandler(StreamHandler(sys.stdout))` guard at module init. Critical `[PRINT]`-prefixed print statements added to `_check_session` (verdict transitions) and `_complete_and_advance` (evaluator gate decisions) for debug visibility regardless of logger configuration.

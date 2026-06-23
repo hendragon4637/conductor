@@ -30,6 +30,14 @@
 ## 2026-06-16 — Backend e2e runtime = single backend process on :8090
 ## 2026-06-16 — Evaluator config prefers NVIDIA for gpt-oss-120b
 ## 2026-06-18 — Multi-node advancement: pre-create node_sessions for all DAG nodes
+## 2026-06-19 — L3 calibration: golden-set anchored jury, periodic drift detection
+## 2026-06-19 — Ratchet: frozen-boundary safety, scope-gated mutations, held-out validation
+## 2026-06-19 — Plan evaluator: structural L1 + plan-rubric L2 for pre-execution gating
+## 2026-06-19 — L4 two-case simulation: standalone + acceptance with common engine
+## 2026-06-20 — L2 judge model: deepseek-v4-flash-free as primary
+## 2026-06-20 — L1 check scope boundaries (no runtime leaks)
+## 2026-06-20 — Remediation flow with verbal feedback (reflection)
+## 2026-06-20 — Watcher logger handler fix
 
 ## Glossary
 # Project Glossary
@@ -80,6 +88,17 @@
 | **Conductor MCP** | MCP server on `127.0.0.1:8092` exposing safe plan operations (`conductor-create_plan`, `conductor-refine_plan`, `conductor-get_plan`, `conductor-list_sessions`, `conductor-search_memory`). No approve/spawn. |
 | **Obsidian vault MCP** | MCP server on `127.0.0.1:8093` exposing `/home/aipc/conductor-notes/` as read-only markdown resources via `obsidian-read_note`. |
 | **Hermes Agent** | Nous Research v0.16.0 — second execution backend alongside AionUi. Self-routing agent core; receives one goal per node from Conductor, self-decomposes, and routes to its own subagents. Runs via HTTP API (`:8642/v1`), Docker sandboxed, with Conductor worktree mounted at `/workspace`. |
+| **Calibration** | The L3 process of re-scoring frozen golden artifacts via the L2 judge and computing MAE and agreement. Results are stored in `judge_trust`. Does NOT modify the golden set. |
+| **CalibrationReport** | Output from `calibrate()`: node_type, total golden items, agreement rate, MAE, trusted boolean, per-item `CalibrationItem` list, and a human-readable note. |
+| **CalibrationItem** | A single golden item's calibration result: item_id, judge_score, human_score, judge_met, human_met, absolute_error. |
+| **Judge trust** | A score/fact in the `judge_trust` table recording how well the L2 judge's scores agree with the human golden set for a given node_type. Trusted when MAE ≤ 0.15 and agreement ≥ 0.80. |
+| **Plan evaluator** | A pre-execution gate that checks plan DAG structure (L1: nodes valid, fields present, deps resolve, acyclic) and optionally applies plan-structure rubrics (L2) at ratification time. Produces `plan_goal_review` stored on the run. |
+| **PlanL1Result** | Output from `run_plan_l1()`: passed boolean, checks list (per-check passed/detail), and a human-readable note. Checks cover: at least one node, per-node required fields, dependency resolution, and acyclicity. |
+| **PlanEvalResult** | Output from `evaluate_plan()`: L1 result, optional L2 result, `plan_goal_review` score, combined passed verdict, and note. Falls back to L1-only if L2 judge is unavailable. |
+| **Plan goal review** | A score (0.0-1.0) stored on the run indicating plan quality. Set by `evaluate_plan()` at ratification time. Gates plan approval, not node execution. |
+| **ExperimentResult** | Output from `run_experiment()`: agent_config_id, node_type, mutation applied (bool), validated without regression (bool), scope (project/global), winner text, experiment_id, mutation_id, heldout results. |
+| **Mutation** | A candidate agent config edit produced by `propose_mutation()`. Contains the target field, old text, new text, and a rationale string summarizing the failure cluster. |
+| **Pattern** | A mined failure cluster from `mine_failures()`: rubric_item, fail_count, example artifacts (list), and a synthesized pattern description. Input to `propose_mutation()`. |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -109,6 +128,8 @@
 - Two polling signals: git diff (file changes) + DB query (cheap query signature)
 - "Terminal" = stable (no change) for >= 2 consecutive polls + settle_s seconds
 - No heuristic for terminal content type — stability is the signal
+- `backend.watcher` logger MUST have a `StreamHandler` at module init (Python loggers without handlers silently swallow output; uvicorn does not set up handlers for `backend.watcher` automatically)
+- Add `[PRINT]`-prefixed `print(..., flush=True)` calls at all verdict transitions and evaluator gate decision points for debug visibility regardless of logger configuration
 
 ## Evaluator (meta-evaluator)
 - Evaluator sits between watcher "done" verdict and node commit — NEVER modify watcher for evaluation
@@ -116,6 +137,8 @@
 - Checks are generated at decompose time via `generate_checks()`, ratified by human at plan approval
 - Remediation nodes reuse `decompose_or_update("append_node")` lifecycle — no new orchestration
 - L1 runs shell commands in the node worktree; exit 0 = pass
+- L1 checks are FORBIDDEN from containing runtime signals (curl, localhost, 127.0.0.1, http://, uvicorn) — these belong to higher layers (L4). `validate_checks()` rejects leaked checks at generation time.
+- L2 input is size-guarded (`L2_MAX_INPUT_CHARS=24000`): oversize → flag-fail (score=0, oversize=True), no silent truncation
 - Rubrics come from preset library, never zero-shot generated
 - Evaluator gate fail-open: if L1 itself errors, node still commits (never block on evaluator infra)
 - L3 (meta-eval) runs out-of-band, NOT in the hot path — scheduled periodically (e.g. weekly)
@@ -124,8 +147,18 @@
 - L3 drift → rubric refinement proposals are QUEUED with `status='pending'`, never auto-applied
 - L4 runs conditionally only when the product has a user-facing surface (`needs_usage_sim`)
 - L4 executes behaviors as HTTP requests against a running product server (black-box, no source reading)
+- Remediation carries verbal feedback from the gate failure: `build_feedback()` builds structured `{failed_checks, reflection}` from the gate decision; `build_remediation_brief()` builds the fix-forward prompt (original goal + failed checks + what to fix + "FIX IT — do NOT start over")
+- Remediation attempt cap is 2 (1 original + 1 retry); `remediation_of` links retry to its predecessor
 - L4 produces structured friction scores per dimension; report is surfaced for human review — NEVER auto-decides feature direction
 - L4 `L4Report` has no `auto_apply` or `decision` field — it carries observations only
+
+## L3 calibration
+- `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
+- `count_golden(node_type, split=None)` returns total or split-specific counts from `golden_set`.
+- `get_judge_trust(node_type)` returns the current `judge_trust` row for a node_type — used by `assert_ready()` before ratchet experiments.
+- Calibration runs out-of-band, scheduled periodically (weekly). It is NOT in the hot path.
+- Each `golden_set` row has `frozen=TRUE` — the ratchet may never set this to FALSE.
+- Use `calibrate()`'s `CalibrationReport.items` list to surface per-item drift to humans.
 
 ## Ratchet
 - Ratchet consumes the evaluator's `goal_review` Langfuse score, NOT the watcher verdict — experiment scoring uses `run_l2()`
@@ -133,6 +166,12 @@
 - Scope gating: global-scope winners (domain=backend/general) are QUEUED for human approval; project-scope winners may auto-apply
 - Held-out validation: candidate mutations must not regress on held-out tasks — overfitting to mining set causes revert
 - Failure mining reads Langfuse `goal_review` score comments (format: `check_id: FAIL (explanation)`) to cluster recurring rubric failures
+- `assert_ready(agent_config_id, node_type)` must pass before `run_experiment()` — raises `RuntimeError` if judge not trusted, heldout < 5, or recent scores empty
+- `reject_if_frozen(target)` raises `ValueError` if the target field is in the frozen set — call before any mutation write
+- `propose_mutation(failures)` returns a minimal system_prompt edit targeting the mined failure cluster — never touches frozen fields
+- `validate_on_heldout(agent_config_id, node_type, candidate)` runs REAL L2 judge calls against the held-out split — not a proxy
+- `run_experiment(agent_config_id, node_type)` is the main loop: mine → propose → validate → apply-or-queue → record
+- Global-scope mutations (domain=backend/general) are written with `status='pending'` in `experiments` table; project-scope get `status='applied'`
 
 ## Memory ↔ Evaluator integration
 - Read direction: call `ground_checks_with_memory(task, project, agent)` BEFORE `generate_checks()` to inject memory-grounded rubric items from Neo4j product memory
@@ -255,7 +294,16 @@ cd /opt/aipc/conductor && python -m pytest backend/tests/test_ratchet_wiring.py 
 ```
 
 ## Migrations
-Database migrations are in `/opt/aipc/conductor/backend/migrations/`. New migration files prefixed with incrementing number + description (e.g., `011_fix_verdict_defaults.sql`). Run manually via psql.
+Database migrations are in `/opt/aipc/conductor/backend/migrations/`. New migration files prefixed with incrementing number + description (e.g., `011_fix_verdict_defaults.sql`). Run manually via psql with:
+```bash
+docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql
+```
+
+## E2E test
+```bash
+cd /opt/aipc/conductor && uv run python scripts/e2e_l2_test.py
+```
+Cleans state: `bash /opt/aipc/conductor/scripts/clean_e2e_state.sh`
 
 ## Environment
 ```bash

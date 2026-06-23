@@ -22,7 +22,7 @@ from .memory_integration import (
     ground_checks_with_memory,
     ground_meta_evaluation,
 )
-from .plan_evaluator import PlanEvalResult, PlanL1Result, evaluate_plan, run_plan_l1
+from .plan_evaluator import PlanEvalResult, PlanL1Result, PlanL2Result, evaluate_plan, plan_l2, run_plan_l1
 from .ratchet import (
     ExperimentResult,
     FrozenTargetError,
@@ -55,6 +55,7 @@ __all__ = [
     "Pattern",
     "PlanEvalResult",
     "PlanL1Result",
+    "PlanL2Result",
     "add_golden",
     "assert_ready",
     "calibrate",
@@ -81,6 +82,7 @@ __all__ = [
     "run_l4",
     "run_l4_plan",
     "run_meta_eval",
+    "plan_l2",
     "run_plan_l1",
     "scenario_from_plan_success",
     "validate_on_heldout",

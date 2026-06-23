@@ -15,7 +15,7 @@ import pytest
 from backend.evaluator.schema import Check
 from backend.evaluator.l1_checks import run_l1
 from backend.evaluator.gate import evaluate_gate, GateDecision
-from backend.evaluator.remediation import insert_remediation, _render_fix_task
+from backend.evaluator.remediation import build_feedback, build_remediation_brief, insert_remediation, _render_fix_task
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -143,9 +143,13 @@ class TestEvaluateGate:
     def test_remediate_reason_contains_check_id(self, tmp_worktree, failing_checks):
         decision = evaluate_gate(failing_checks, tmp_worktree)
         detail = decision.reason.get("detail", [])
-        check_id, ok, _ = detail[0]
-        assert check_id == "det-syntax"
-        assert ok is False
+        failed = detail[0]
+        assert failed["check_id"] == "det-syntax"
+        assert failed["ok"] is False
+        assert failed["criterion"] == "No syntax errors"
+        assert failed["check_cmd"] == "python3 -c 'import nonexistent_module'"
+        assert failed["worktree"] == tmp_worktree
+        assert "nonexistent_module" in failed["output"]
 
 
 # ── Remediation Tests ───────────────────────────────────────────────────────
@@ -157,17 +161,47 @@ class TestRemediation:
         reason = {
             "layer": "L1",
             "detail": [
-                ("det-syntax", False, "SyntaxError: bad syntax"),
+                {
+                    "check_id": "det-syntax",
+                    "ok": False,
+                    "output": "SyntaxError: bad syntax",
+                    "criterion": "No syntax errors",
+                    "check_cmd": "python3 -m py_compile app.py",
+                    "worktree": "/tmp/worktree",
+                },
             ],
         }
         task = _render_fix_task(reason)
         assert "FAILED" in task
         assert "det-syntax" in task
+        assert "No syntax errors" in task
+        assert "python3 -m py_compile app.py" in task
         assert "SyntaxError" in task
 
     def test_render_fix_task_empty_detail(self):
         task = _render_fix_task({"layer": "L1", "detail": []})
         assert "Fix the following" in task
+
+    def test_l1_feedback_brief_includes_exact_check_context(self):
+        feedback = build_feedback({
+            "layer": "L1",
+            "detail": [
+                {
+                    "check_id": "det-files",
+                    "ok": False,
+                    "output": "No Python files found",
+                    "criterion": "Expected code files exist",
+                    "check_cmd": "ls -la *.py || ls -la src/*.py",
+                    "worktree": "/tmp/worktree",
+                },
+            ],
+        })
+        brief = build_remediation_brief("Implement endpoint", "Endpoint works", feedback)
+        assert feedback["failed_checks"][0]["command"] == "ls -la *.py || ls -la src/*.py"
+        assert "Expected code files exist" in brief
+        assert "/tmp/worktree" in brief
+        assert "ls -la *.py || ls -la src/*.py" in brief
+        assert "prioritize the evaluator feedback" in brief
 
     def test_insert_remediation_escalates_when_capped(self):
         """Bounded: after attempt_cap remediations, escalate (returns None)."""
