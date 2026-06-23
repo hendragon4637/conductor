@@ -123,33 +123,32 @@ class TestRunL1:
 # ── Gate Tests ──────────────────────────────────────────────────────────────
 
 class TestEvaluateGate:
-    """2. Gate decision logic: advance vs remediate."""
+    """2. Gate decision logic: done vs remediate."""
 
     def test_all_checks_pass_advances(self, tmp_worktree, passing_checks):
         decision = evaluate_gate(passing_checks, tmp_worktree)
-        assert decision.action == "advance"
-        assert decision.reason.get("L1_detail") is not None
+        assert decision.action == "done"
+        assert decision.l1_passed_ids == ["det-syntax"]
 
     def test_failing_check_remediates(self, tmp_worktree, failing_checks):
         decision = evaluate_gate(failing_checks, tmp_worktree)
         assert decision.action == "remediate"
-        assert decision.reason.get("layer") == "L1"
-        assert len(decision.reason.get("detail", [])) == 1
+        assert len(decision.l1_feedback) == 1
+        assert decision.l1_feedback[0]["tier"] == "L1"
 
     def test_empty_checks_advances(self, tmp_worktree):
         decision = evaluate_gate([], tmp_worktree)
-        assert decision.action == "advance"
+        assert decision.action == "done"
 
     def test_remediate_reason_contains_check_id(self, tmp_worktree, failing_checks):
         decision = evaluate_gate(failing_checks, tmp_worktree)
-        detail = decision.reason.get("detail", [])
-        failed = detail[0]
-        assert failed["check_id"] == "det-syntax"
-        assert failed["ok"] is False
-        assert failed["criterion"] == "No syntax errors"
-        assert failed["check_cmd"] == "python3 -c 'import nonexistent_module'"
-        assert failed["worktree"] == tmp_worktree
-        assert "nonexistent_module" in failed["output"]
+        assert len(decision.l1_feedback) == 1
+        fb = decision.l1_feedback[0]
+        assert fb["check_id"] == "det-syntax"
+        assert fb["tier"] == "L1"
+        assert fb["criterion"] == "No syntax errors"
+        assert fb["worktree"] == tmp_worktree
+        assert "nonexistent_module" in fb.get("evidence", "")
 
 
 # ── Remediation Tests ───────────────────────────────────────────────────────
@@ -172,15 +171,12 @@ class TestRemediation:
             ],
         }
         task = _render_fix_task(reason)
-        assert "FAILED" in task
         assert "det-syntax" in task
-        assert "No syntax errors" in task
         assert "python3 -m py_compile app.py" in task
-        assert "SyntaxError" in task
 
     def test_render_fix_task_empty_detail(self):
         task = _render_fix_task({"layer": "L1", "detail": []})
-        assert "Fix the following" in task
+        assert "No specific failures identified" in task
 
     def test_l1_feedback_brief_includes_exact_check_context(self):
         feedback = build_feedback({
@@ -197,9 +193,9 @@ class TestRemediation:
             ],
         })
         brief = build_remediation_brief("Implement endpoint", "Endpoint works", feedback)
-        assert feedback["failed_checks"][0]["command"] == "ls -la *.py || ls -la src/*.py"
+        # feedback uses what/why/how/evidence keys (not "command")
+        assert feedback["failed_checks"][0]["why"] == "ls -la *.py || ls -la src/*.py"
         assert "Expected code files exist" in brief
-        assert "/tmp/worktree" in brief
         assert "ls -la *.py || ls -la src/*.py" in brief
         assert "prioritize the evaluator feedback" in brief
 

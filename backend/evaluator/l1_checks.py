@@ -19,6 +19,16 @@ class L1Result:
     duration_s: float = 0.0
     """Total wall-clock time to run all checks."""
 
+    @property
+    def passed_ids(self) -> list[str]:
+        """List of check IDs that passed."""
+        return [cid for cid, ok, _ in self.detail if ok]
+
+    @property
+    def failed_ids(self) -> list[str]:
+        """List of check IDs that failed."""
+        return [cid for cid, ok, _ in self.detail if not ok]
+
 
 def run_l1(
     checks: list,

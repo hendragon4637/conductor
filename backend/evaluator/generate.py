@@ -196,6 +196,81 @@ def _validate_check_scope(c: Check) -> tuple[bool, str]:
     return True, ""
 
 
+# ── agent_config default_checks loader ─────────────────────────────────────
+
+def _load_agent_config_checks(agent_config_id: str | None) -> tuple[list[Check], list[Check]]:
+    """Load co-located default_checks from the agent_config.
+
+    Direct lookup by agent_config_id — no registry search.
+    Falls back to empty lists if not found or no default_checks set.
+
+    Returns:
+        (l1_checks, l2_checks) lists of Check objects.
+    """
+    l1_out: list[Check] = []
+    l2_out: list[Check] = []
+    if not agent_config_id:
+        return l1_out, l2_out
+
+    try:
+        import json
+        import os
+
+        db_url = os.environ.get("DATABASE_URL", "")
+        if not db_url:
+            return l1_out, l2_out
+
+        from backend.db.queries import conn as db_conn
+        with db_conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT default_checks FROM agent_configs WHERE agent_config_id = %s",
+                (agent_config_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return l1_out, l2_out
+            raw = row[0]
+            if isinstance(raw, str):
+                dc = json.loads(raw)
+            elif isinstance(raw, dict):
+                dc = raw
+            else:
+                return l1_out, l2_out
+    except Exception:
+        return l1_out, l2_out
+
+    for l1_item in dc.get("l1", []):
+        on_fail_raw = l1_item.pop("on_fail", None) or {}
+        c = Check(
+            id=l1_item.get("id", f"det-{len(l1_out)}"),
+            type="deterministic",
+            criterion=l1_item.get("criterion", on_fail_raw.get("what", "L1 check")),
+            check_cmd=l1_item.get("cmd", ""),
+            provenance="agent_default",
+            source_hint=f"from agent_config {agent_config_id}",
+            on_fail=OnFailTemplate(
+                what=on_fail_raw.get("what", ""),
+                how=on_fail_raw.get("how", ""),
+                evidence_from=on_fail_raw.get("evidence_from", "stdout"),
+            ) if on_fail_raw else None,
+        )
+        l1_out.append(c)
+
+    for l2_item in dc.get("l2", []):
+        c = Check(
+            id=l2_item.get("id", f"rubric-{len(l2_out)}"),
+            type="rubric",
+            criterion=l2_item.get("rubric_item", ""),
+            rubric_item=l2_item.get("rubric_item", ""),
+            weight=l2_item.get("weight", 1.0),
+            provenance="agent_default",
+            source_hint=f"from agent_config {agent_config_id}",
+        )
+        l2_out.append(c)
+
+    return l1_out, l2_out
+
+
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def generate_checks(
@@ -207,8 +282,16 @@ def generate_checks(
     extra_checks: list[Check] | None = None,
     quality_intent: str | None = None,
     members: list[str] | None = None,
+    agent_config_id: str | None = None,
 ) -> NodeChecks:
     """Generate candidate checks for a node at decompose time.
+
+    Priority:
+    1. agent_config default_checks (co-located L1/L2) — direct lookup by id.
+    2. Rubric preset from registry (fallback if no agent_config L2 found).
+    3. Heuristic deterministic checks from success criterion.
+    4. Memory-grounded checks from ``extra_checks``.
+    5. Quality-intent checks from ``quality_intent``.
 
     Args:
         node_id: Unique node identifier (e.g. ``"node-1"``).
@@ -222,31 +305,30 @@ def generate_checks(
             Parsed into additional checks tagged with
             ``provenance="human_intent"``.
         members: Optional list of agent/role IDs on this node.
-            Used for rubric selection (select_rubric).
+            Used for rubric selection (fallback, if no agent_config L2).
+        agent_config_id: Optional agent_config id for co-located default_checks.
 
     Returns:
         A ``NodeChecks`` container with candidate ``Check`` items.
         These are *candidates* — the human must ratify them at plan approval.
-
-    Guaranteed:
-        - At least one deterministic check (if any pattern matches).
-        - At least one rubric check (from presets, selected by role).
-        - Non-first nodes include a regression-style deterministic check.
-        - Extra (memory-grounded) checks appended at the end, if provided.
-        - When ``quality_intent`` is provided, additional human-intent checks
-          are prepended with ``provenance="human_intent"``.
     """
     is_first = node_index == 0
 
-    det_checks = _deterministic_from_criterion(success_criterion, node_index, is_first)
-    rubric_checks = _select_rubric_preset(members or [], task)
-    memory_checks = extra_checks or []
+    # 1. agent_config default_checks (co-located)
+    ac_l1, ac_l2 = _load_agent_config_checks(agent_config_id)
 
-    # ── Tag memory checks with provenance ────────────────────────────────────
+    # 2. Rubric preset fallback (only if no agent_config L2)
+    rubric_checks = ac_l2 if ac_l2 else _select_rubric_preset(members or [], task)
+
+    # 3. Heuristic deterministic checks (always, as supplementary)
+    det_checks = _deterministic_from_criterion(success_criterion, node_index, is_first)
+
+    # 4. Memory-grounded checks
+    memory_checks = extra_checks or []
     for c in memory_checks:
         c.provenance = "memory"
 
-    # ── Parse quality_intent into additional checks ──────────────────────────
+    # 5. Quality-intent checks
     qi_checks: list[Check] = []
     if quality_intent:
         qi_checks = _generate_from_quality_intent(quality_intent)
@@ -254,7 +336,7 @@ def generate_checks(
     # De-duplicate by id (later sources override earlier ones with same id)
     seen_ids: set[str] = set()
     all_checks: list[Check] = []
-    for c in det_checks + rubric_checks + memory_checks + qi_checks:
+    for c in ac_l1 + det_checks + rubric_checks + memory_checks + qi_checks:
         if c.id not in seen_ids:
             seen_ids.add(c.id)
             all_checks.append(c)

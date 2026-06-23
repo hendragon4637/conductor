@@ -177,7 +177,7 @@ class TestGenerateChecks:
             total_nodes=1,
         )
         assert any(
-            c.type == "deterministic" and "endpoint" in c.id
+            c.type == "deterministic" and "files" in c.id
             for c in nc.checks
         )
 

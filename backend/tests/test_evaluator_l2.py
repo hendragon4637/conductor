@@ -197,7 +197,7 @@ class TestGateWithL2:
             l2_fn=lambda c, w: run_l2(c, w, llm_call=_mock_judge_pass),
             threshold=0.7,
         )
-        assert decision.action == "advance"
+        assert decision.action == "done"
 
     def test_l1_pass_l2_fail_remediates(self, tmp_worktree_with_diff):
         """2. L1 passes, L2 catches quality issue L1 missed → remediate."""
@@ -213,7 +213,8 @@ class TestGateWithL2:
             threshold=0.7,
         )
         assert decision.action == "remediate"
-        assert decision.reason.get("layer") == "L2"
+        assert decision.l2_passed is False
+        assert len(decision.l2_feedback) > 0
 
     def test_l1_fail_skips_l2(self, tmp_worktree_with_diff):
         """L1 fail → remediate before L2 runs (saves tokens)."""
@@ -229,14 +230,16 @@ class TestGateWithL2:
             threshold=0.7,
         )
         assert decision.action == "remediate"
-        assert decision.reason.get("layer") == "L1"
+        assert len(decision.l1_feedback) == 1
+        assert decision.l2_passed is False  # never ran
+        assert decision.goal_review is None
 
     def test_existing_gate_tests_still_pass(self, tmp_worktree_with_diff):
         """Gate without l2_fn still works as before (backward compat)."""
         from backend.evaluator.schema import Check
         from backend.evaluator.gate import evaluate_gate
         decision = evaluate_gate([], tmp_worktree_with_diff)
-        assert decision.action == "advance"
+        assert decision.action == "done"
 
 
 # ── Preset Selection Tests ───────────────────────────────────────────────────

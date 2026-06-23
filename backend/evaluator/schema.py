@@ -9,14 +9,26 @@ Every check carries a ``provenance`` tag identifying its origin:
 - ``human_intent`` — derived from the ``quality_intent`` input at plan creation
 - ``memory`` — recalled from Neo4j product memory
 - ``preset`` — from built-in rubric presets or deterministic logic
+- ``agent_default`` — from the agent_config's default_checks
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-ProvenanceType = Literal["human_intent", "memory", "preset"]
+ProvenanceType = Literal["human_intent", "memory", "preset", "agent_default"]
+
+
+class OnFailTemplate(BaseModel):
+    """Deterministic feedback template (no LLM) — provides what/how/evidence_from.
+
+    These are defined in agent_config's default_checks.l1[].on_fail.
+    At gate time, ``evidence`` is injected from the actual command output.
+    """
+    what: str = Field(description="Short description of what failed")
+    how: str = Field(description="Actionable guidance on how to fix")
+    evidence_from: str | None = Field(default=None, description="Source for evidence injection: stdout | path_check")
 
 
 class Check(BaseModel):
@@ -34,6 +46,7 @@ class Check(BaseModel):
     - ``human_intent`` (from quality_intent input)
     - ``memory`` (from Neo4j recall)
     - ``preset`` (from rubric presets or deterministic heuristics)
+    - ``agent_default`` (from agent_config default_checks)
     """
     id: str = Field(description="Unique check id within the node, e.g. 'det-1', 'rubric-func-completeness'")
     type: Literal["deterministic", "rubric"]
@@ -44,12 +57,17 @@ class Check(BaseModel):
     provenance: ProvenanceType = Field(
         default="preset",
         description="Origin of this check: human_intent (from quality_intent input), "
-                    "memory (from Neo4j recall), or preset (from rubrics)",
+                    "memory (from Neo4j recall), preset (from rubrics), or agent_default",
     )
     source_hint: str | None = Field(
         default=None,
         description="Optional context about where this check came from, "
                     "e.g. 'from quality_intent: money must be integer cents'",
+    )
+    on_fail: OnFailTemplate | None = Field(
+        default=None,
+        description="L1 deterministic feedback template (what/how/evidence_from). "
+                    "Used at gate time to produce structured L1 feedback.",
     )
 
     @property

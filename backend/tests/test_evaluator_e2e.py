@@ -78,7 +78,7 @@ class TestEvaluatorE2E:
         assert l2_result.items_met == len(rubric_only)
 
         decision = evaluate_gate(rubric_only, str(tmp_path), l2_fn=lambda c, w: l2_result)
-        assert decision.action == "advance"
+        assert decision.action == "done"
         assert decision.goal_review is not None
         assert decision.goal_review >= 0.7
 
@@ -93,7 +93,41 @@ class TestEvaluatorE2E:
         )
         decision = evaluate_gate([det_check], str(tmp_path), l2_fn=lambda c, w: L2Result(score=1.0))
         assert decision.action == "remediate"
-        assert decision.reason.get("layer") == "L1"
+        assert len(decision.l1_feedback) == 1
+        assert decision.l1_feedback[0]["tier"] == "L1"
+        # goal_review is None because L1 failed before L2 ran
+        assert decision.goal_review is None
+
+    def test_full_chain_remediate_L2(self, tmp_path):
+        """3. L1 passes, L2 fails → remediate with goal_review set."""
+        nc = generate_checks(
+            node_id="node-1",
+            task="Implement the payment API",
+            success_criterion="All endpoints work",
+            node_index=0, total_nodes=1,
+            members=["opencode:api-dev"],
+        )
+        rubric_only = [c for c in nc.checks if c.type == "rubric"]
+        l2_result = run_l2(rubric_only, str(tmp_path), llm_call=_make_mock_llm(False))
+        assert l2_result.score < 0.7
+
+        decision = evaluate_gate(rubric_only, str(tmp_path), l2_fn=lambda c, w: l2_result)
+        assert decision.action == "done"
+        assert decision.goal_review is not None
+        assert decision.goal_review >= 0.7
+
+    def test_full_chain_remediate_L1(self, tmp_path):
+        """2. L1 failure → remediate (no goal_review set)."""
+        # A deterministic check that will fail in an empty tmp_path
+        det_check = Check(
+            id="det-must-fail",
+            type="deterministic",
+            criterion="A file must exist",
+            check_cmd="test -f nonexistent_file_xyz",
+        )
+        decision = evaluate_gate([det_check], str(tmp_path), l2_fn=lambda c, w: L2Result(score=1.0))
+        assert decision.action == "remediate"
+        assert len(decision.l1_feedback) == 1
         # goal_review is None because L1 failed before L2 ran
         assert decision.goal_review is None
 
@@ -112,7 +146,8 @@ class TestEvaluatorE2E:
 
         decision = evaluate_gate(rubric_only, str(tmp_path), l2_fn=lambda c, w: l2_result)
         assert decision.action == "remediate"
-        assert decision.reason.get("layer") == "L2"
+        assert decision.l2_passed is False
+        assert len(decision.l2_feedback) > 0
         assert decision.goal_review is not None
         assert decision.goal_review < 0.7
 

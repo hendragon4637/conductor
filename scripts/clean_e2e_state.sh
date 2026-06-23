@@ -39,6 +39,7 @@ if [ -f "$AIONUI_DB" ]; then
         DELETE FROM conversations;
         DELETE FROM assistant_sessions;
         DELETE FROM team_tasks;
+        DELETE FROM teams;
         DELETE FROM cron_jobs;
         VACUUM;
     " 2>/dev/null && echo "    OK" || echo "    Failed to clean AionUi DB"
