@@ -56,7 +56,7 @@ allowed_tools:
 permission_policy:
   mode: auto_approve            # all-allow; overridable via UI toggle per plan
 
-model_preference: nvidia/gpt-oss-120b
+model_preference: nvidia/openai/gpt-oss-120b
 # Fallback chain handled by OmO/OpenCode config, not here.
 
 # Declarative routing rules.
