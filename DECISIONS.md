@@ -187,3 +187,27 @@ Decision: `Check.tier` is a `@property` derived from `type`: `type="deterministi
 ## 2026-06-23 — Debug logging on Pydantic validation failure in LLM calls
 Status: ACTIVE
 Decision: `call_llm_structured()` in `llm.py` logs the raw LLM text (full length + payload) on Pydantic validation failure. This enables diagnosis of JSON truncation or malformed responses from the LLM, which previously produced opaque `ValidationError` tracebacks.
+
+## 2026-06-25 — Domain profile system (File 01)
+Status: ACTIVE
+Decision: Domain profiles (`DomainProfile` model in `domain_profile.py`) encode acceptance criteria, conventions, and quality dimensions per deliverable type. Six seed profiles: `software_app`, `cli_script`, `api_service`, `data_pipeline`, `research_report`, `generic`. Profiles stored in `domain_profiles` table in PostgreSQL (migration `v4_090_domain_profiles.sql`). `get_domain_profile()` uses a three-tier fallback: DB → seed profiles → generic fallback. `infer_domain()` uses keyword classification with `software_app > cli_script > api_service > data_pipeline > research_report > generic` priority order — `software_app` checked before `api_service` to prevent "FastAPI" from matching `api_service`.
+
+## 2026-06-25 — Convention injection at formulation (File 02)
+Status: ACTIVE
+Decision: `enrich_with_conventions()` in `goal_formulator.py` injects domain conventions into the `MetaGoal` spec after formulation. Uses `_user_already_addressed()` keyword-overlap heuristic to avoid overriding explicit user intent. Unstated conventions are appended to `meta_goal.spec`. Unknown domains trigger `needs_clarification` for human-origin goals. Domain inference uses combined `goal + spec` for richer keyword matching. Convention injection integrated into `_generate_via_meta_planner()` in `plan.py` between formulate and decompose stages.
+
+## 2026-06-25 — Capability-aware staffing gate (File 03)
+Status: ACTIVE
+Decision: `plan_evaluator.py` implements deterministic staffing mismatch detection: `_CAPABILITY_MAP` maps agent_config domain→role→capabilities, `_infer_required_caps()` extracts capability requirements from task text, `staffing_l1()` compares required vs available capabilities per node. `staffing_capable` rubric item (weight 2.0) added to `plan_structure.yaml`. Staffing gate runs as part of plan-level L1 evaluation before L2 rubric judge.
+
+## 2026-06-25 — Agent config generation-on-miss (File 04)
+Status: ACTIVE
+Decision: `agent_generator.py` implements registry-first policy: `needs_new_agent_config()` checks existing roster before proposing a new config. `propose_agent_config()` generates a proposal via LLM (`AGENTGEN_PROMPT`). `validate_proposal()` checks completeness, capability coverage, ID collision, and backend validity. `submit_proposal()` queues validated proposals for human ratification (never auto-approves).
+
+## 2026-06-25 — Domain profile fallback tiers (seed before generic)
+Status: ACTIVE
+Decision: `get_domain_profile()` in `domain_profile.py` falls back to in-memory `SEED_PROFILES` when the DB query fails (table doesn't exist yet), before falling back to the generic profile. Previously fell back directly to generic, which lost domain-specific conventions. This ensures unit tests pass without a DB migration.
+
+## 2026-06-25 — `_persist_plan_clarification` ensures project exists
+Status: ACTIVE
+Decision: `_persist_plan_clarification()` in `plan.py` now calls `_ensure_project_in_db()` before inserting into `plans` table. This fixes the FK constraint violation (`plans_project_id_fkey`) that occurred when auto-generated project IDs (`proj-plan-N`) had no corresponding `projects` row. Previously only `_persist_plan_dag()` ensured the project existed.

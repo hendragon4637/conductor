@@ -44,6 +44,12 @@
 ## 2026-06-23 — Plan evaluator validates L1 check IDs against canonical pool
 ## 2026-06-23 — `Check.tier` is a computed `@property`
 ## 2026-06-23 — Debug logging on Pydantic validation failure in LLM calls
+## 2026-06-25 — Domain profile system (File 01)
+## 2026-06-25 — Convention injection at formulation (File 02)
+## 2026-06-25 — Capability-aware staffing gate (File 03)
+## 2026-06-25 — Agent config generation-on-miss (File 04)
+## 2026-06-25 — Domain profile fallback tiers (seed before generic)
+## 2026-06-25 — `_persist_plan_clarification` ensures project exists
 
 ## Glossary
 # Project Glossary
@@ -232,7 +238,7 @@
 - The `model_preference` field in the YAML is passed directly to AionUi as `current_model_id`
 - The old minimax→opencode override in `spawn.py` (`_normalize_model`) has been removed — do not re-add
 - Re-sync via `uv run python scripts/bootstrap_first_config.py` after editing any YAML in `agent_configs/`
-- For the OpenCode backend executor family, `nvidia/gpt-oss-120b` is the default/fallback model when a node-level preference is absent
+- For the OpenCode backend executor family, `nvidia/openai/gpt-oss-120b` is the default/fallback model when a node-level preference is absent
 
 ## Database access
 - Runtime code should resolve PostgreSQL through `DATABASE_URL`; avoid duplicating host/database names in application logic
