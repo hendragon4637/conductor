@@ -104,6 +104,7 @@ def launch_run(
         auto_approve=plan_data.get("auto_approve", True),
     )
     orch_conv_id = _find_orch_conv(conv_map)
+    team_id = conv_map.get("__team_id__")
     worktree_path = plan_data.get("worktree_path")
     _update_session_runtime(session_id, worktree_path)
 
@@ -117,6 +118,8 @@ def launch_run(
         "verdict": "running",
         "worktree": worktree_path,
         "attempt": 1,
+        "aionui_conversation_id": orch_conv_id,
+        "aionui_team_id": team_id,
     })
     for node in nodes:
         nid = node.get("id") or node.get("node_id")
@@ -325,10 +328,13 @@ def _find_orch_conv(conv_map: dict[str, str]) -> str | None:
 
     The orchestrator is stored under the key 'orchestrator' or the
     first entry if no explicit orchestrator key exists.
+    Skips internal keys prefixed with ``__`` (e.g. ``__team_id__``).
     """
     if "orchestrator" in conv_map:
         return conv_map["orchestrator"]
     for key in conv_map:
+        if key.startswith("__"):
+            continue
         return conv_map[key]
     return None
 

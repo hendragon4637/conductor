@@ -28,7 +28,7 @@ ORCHESTRATOR_MODEL_FALLBACK = os.environ.get(
 
 
 def _normalize_model(model: str | None) -> str:
-    return model or "nvidia/gpt-oss-120b"
+    return model or "nvidia/openai/gpt-oss-120b"
 
 
 def _orchestrator_permission_profile() -> dict[str, Any]:
@@ -165,7 +165,7 @@ def spawn_team(
             len(nodes) == 1 or node == nodes[0]
         )
 
-        model = cfg.get("model_preference") or "nvidia/gpt-oss-120b"
+        model = cfg.get("model_preference") or "nvidia/openai/gpt-oss-120b"
 
         # Use agent_config_id + role for a descriptive member label
         member_name = f"{cfg['agent_config_id']} ({cfg['role']})"
@@ -387,6 +387,7 @@ def _spawn_single_member_team(
     )
 
     conv_id = ""
+    team_id = team_data.get("id", "")
     agents_result = team_data.get("agents", [])
     if agents_result:
         conv_id = agents_result[0].get("conversation_id", "")
@@ -396,7 +397,10 @@ def _spawn_single_member_team(
         _create_aionui_link(_db_url, task_id, conv_id)
         aionui.send_message(conv_id, build_single_agent_lead_brief(node=node, dep_context=dep_context))
 
-    return {member_id: conv_id} if conv_id else {}
+    result = {member_id: conv_id} if conv_id else {}
+    if team_id:
+        result["__team_id__"] = team_id
+    return result
 
 
 def spawn_node_team(
@@ -530,7 +534,8 @@ def spawn_node_team(
         agents=team_agents,
     )
 
-    # 6. Extract conversation IDs
+    # 6. Extract conversation IDs + team ID
+    team_id = team_data.get("id", "")
     conv_map: dict[str, str] = {}
     team_agents_result = team_data.get("agents", [])
     for i, agent_info in enumerate(team_agents_result):
@@ -567,6 +572,8 @@ def spawn_node_team(
         except Exception as e:
             print(f"  [spawn] Failed to send prompt to orchestrator: {e}")
 
+    if team_id:
+        conv_map["__team_id__"] = team_id
     return conv_map
 
 
