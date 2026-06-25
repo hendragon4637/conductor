@@ -6,13 +6,18 @@ L1 structural asserts (acyclic, nodes complete, deps resolve).
 L2 plan rubric (covers_goal, right_sized, deps_correct, measurable)
 via meta_planner LLM call, NOT the node-level L2 judge.
 
+File 03 adds a capability-aware staffing gate: the evaluator checks
+whether each node's assigned agent_config can actually do the work.
+
 Output ``plan_goal_review`` (0-1) stored on the run.
 """
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 
+import psycopg
 from backend.evaluator.rubrics import load_rubric
 from backend.planning.meta_planner.llm import call_llm_structured, get_meta_planner_model
 from pydantic import BaseModel, Field
@@ -20,6 +25,143 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 L1_STRUCTURAL_RUBRIC = "plan_structure"
+
+# ── Capability inference for staffing gate (File 03) ──────────────────
+
+# Domain→role→capability mapping (starter, inferred from agent_config fields)
+_CAPABILITY_MAP: dict[str, dict[str, list[str]]] = {
+    "backend": {
+        "executor": ["backend", "tests"],
+        "planner": ["planning", "analysis"],
+        "reviewer": ["review", "code_review"],
+    },
+    "finance": {
+        "executor": ["fullstack", "backend", "frontend", "tests"],
+        "planner": ["planning", "finance"],
+        "reviewer": ["review", "finance"],
+    },
+    "fullstack": {
+        "executor": ["fullstack", "backend", "frontend", "tests"],
+    },
+    "general": {
+        "executor": ["backend", "tests", "general"],
+        "planner": ["planning", "general"],
+        "reviewer": ["review", "general"],
+    },
+}
+
+
+def _get_db_url() -> str:
+    return os.environ["DATABASE_URL"]
+
+
+def infer_agent_config_capabilities(agent_config_id: str, domain: str = "", role: str = "") -> list[str]:
+    """Return capability tag list for an agent_config.
+
+    Tries the database first (``agent_configs.capability_summary`` column if it
+    exists), then falls back to the static ``_CAPABILITY_MAP`` keyed by
+    domain+role.
+
+    Args:
+        agent_config_id: The agent config identifier (used for DB lookup).
+        domain: Domain override (skips DB if provided).
+        role: Role override.
+
+    Returns:
+        List of capability tags (e.g. ``["backend", "tests"]``).
+    """
+    # If domain+role provided directly, use the static map first
+    if domain and role:
+        return _CAPABILITY_MAP.get(domain, {}).get(role, _CAPABILITY_MAP.get("general", {}).get(role, ["general"]))
+
+    # Try DB query for the full row
+    try:
+        dsn = _get_db_url()
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT domain, role FROM agent_configs WHERE agent_config_id = %s AND active = TRUE",
+                (agent_config_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                domain_val, role_val = row[0], row[1]
+                return _CAPABILITY_MAP.get(domain_val, {}).get(role_val, _CAPABILITY_MAP.get("general", {}).get(role_val, ["general"]))
+    except Exception:
+        logger.debug("Failed to query agent_config '%s' for capabilities", agent_config_id)
+
+    return ["general"]
+
+
+def staffing_view(dag: list[dict]) -> list[dict]:
+    """Build a staffing view of the DAG: node→agent_config→capabilities.
+
+    Each entry contains the node id, the assigned agent_config, its role,
+    backend type, inferred capability tags, and the node's task text.
+
+    Args:
+        dag: List of node dicts with ``members``, ``task``.
+
+    Returns:
+        List of dicts, one per (node, member) pair.
+    """
+    view: list[dict] = []
+    for n in dag:
+        nid = n.get("id", "?")
+        task_text = n.get("task", {}).get("text", "")
+        for m in (n.get("members") or []):
+            ac_id = m.get("agent_config", "")
+            view.append({
+                "node": nid,
+                "agent_config": ac_id,
+                "role": m.get("role", ""),
+                "backend": m.get("backend", ""),
+                "capabilities": infer_agent_config_capabilities(ac_id),
+                "node_task": task_text,
+            })
+    return view
+
+
+def _infer_required_caps(task_text: str) -> set[str]:
+    """Infer required capabilities from node task text (keyword-based).
+
+    Returns a set of capability tags the task likely needs.
+    """
+    lower = task_text.lower()
+    required: set[str] = set()
+    if any(kw in lower for kw in ("frontend", "ui", "html", "css", "javascript", "react", "vue", "angular", "web page", "user interface", "dashboard")):
+        required.add("frontend")
+    if any(kw in lower for kw in ("backend", "api", "endpoint", "server", "database", "fastapi", "flask", "django")):
+        required.add("backend")
+    if any(kw in lower for kw in ("test", "pytest", "unittest")):
+        required.add("tests")
+    if any(kw in lower for kw in ("fullstack", "full-stack", "full stack")):
+        required.add("fullstack")
+    if any(kw in lower for kw in ("cli", "command", "shell", "terminal")):
+        required.add("cli")
+    if any(kw in lower for kw in ("data", "pipeline", "etl", "csv", "analysis")):
+        required.add("data")
+    return required
+
+
+def staffing_l1(dag: list[dict]) -> list[str]:
+    """Deterministic L1 staffing check: catch obvious mismatches.
+
+    For each node, infers required capabilities from the task text and
+    checks whether the assigned agent_config has at least one matching tag.
+
+    Returns:
+        List of failure description strings (empty = all nodes staffed OK).
+    """
+    fails: list[str] = []
+    for s in staffing_view(dag):
+        required = _infer_required_caps(s["node_task"])
+        if required and not (required & set(s["capabilities"])):
+            fails.append(
+                f"{s['node']}: task needs {required} but '{s['agent_config']}' "
+                f"has capabilities {s['capabilities']}"
+            )
+    return fails
+
 
 # ── plan_l2 response schema ─────────────────────────────────────────
 
@@ -41,6 +183,9 @@ Plan goal:
 
 Plan nodes:
 {plan_nodes}
+
+Staffing (assigned agent_config per node with capabilities):
+{staffing}
 
 Rubric:
 {rubric}
@@ -264,6 +409,7 @@ def plan_l2(
             {"id": "deps_correct", "rubric_item": "Are dependencies correct and minimal?", "weight": 1.5},
             {"id": "measurable", "rubric_item": "Does each node have a measurable success criterion?", "weight": 1.0},
             {"id": "checks_scoped", "rubric_item": "Is each node's checks scoped to its task (no irrelevant checks on unrelated nodes)?", "weight": 1.0},
+            {"id": "staffing_capable", "rubric_item": "Is each node staffed by an agent_config actually capable of its task (no strategic-operational mismatch)?", "weight": 2.0},
         ],
     }
 
@@ -286,9 +432,16 @@ def plan_l2(
         for item in rubric["items"]
     )
 
+    staffing = staffing_view(dag)
+    staffing_text = "\n".join(
+        f"  {s['node']}: {s['agent_config']} (caps: {s['capabilities']}, task: {s['node_task'][:100]})"
+        for s in staffing
+    )
+
     prompt = PLAN_JUDGE_PROMPT.format(
         plan_goal=plan_goal or "(not provided)",
         plan_nodes=plan_nodes,
+        staffing=staffing_text or "(none)",
         rubric=rubric_text,
     )
 
@@ -328,7 +481,7 @@ def evaluate_plan(
     plan_goal: str = "",
     l2_threshold: float = 0.7,
 ) -> PlanEvalResult:
-    """Run full plan evaluation (L1 structural + L2 plan rubric).
+    """Run full plan evaluation (L1 structural + staffing + L2 plan rubric).
 
     Args:
         dag: List of node dicts from the plan.
@@ -336,10 +489,26 @@ def evaluate_plan(
         l2_threshold: Minimum L2 score to consider the plan passing.
 
     Returns:
-        ``PlanEvalResult`` with L1 and L2 results and combined verdict.
+        ``PlanEvalResult`` with L1, staffing, and L2 results.
     """
     l1 = run_plan_l1(dag)
     if not l1.passed:
+        return PlanEvalResult(
+            l1=l1, l2=None, plan_goal_review=0.0, passed=False,
+        )
+
+    # Staffing L1 check (deterministic, catches obvious mismatches)
+    staffing_fails = staffing_l1(dag)
+    if staffing_fails:
+        fail_detail = "; ".join(staffing_fails)
+        l1.checks.append({
+            "check": "staffing_l1",
+            "passed": False,
+            "detail": fail_detail,
+            "staffing_failures": staffing_fails,
+        })
+        l1.passed = False
+        l1.note = f"L1 staffing: {len(staffing_fails)} mismatch(es)"
         return PlanEvalResult(
             l1=l1, l2=None, plan_goal_review=0.0, passed=False,
         )
@@ -378,10 +547,22 @@ def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE
     if not result.l1.passed:
         l1_failures = [c for c in result.l1.checks if not c.get("passed", False)]
         fail_details = "; ".join(f"{c.get('check', '?')}: {c.get('detail', '')}" for c in l1_failures)
+
+        # Check if staffing was the reason — give specific guidance
+        staffing_fails = [c for c in l1_failures if c.get("check") == "staffing_l1"]
+        if staffing_fails:
+            feedback_text = (
+                f"Plan L1 staffing check failed: {fail_details}. "
+                "Reassign nodes to capable agent_configs (with matching capabilities) or "
+                "request generation of a new agent_config if none fits."
+            )
+        else:
+            feedback_text = f"Plan L1 structural check failed: {fail_details}"
+
         return PlanGateDecision(
             action="revise",
             reason={"L1": l1_failures},
-            feedback_text=f"Plan L1 structural check failed: {fail_details}",
+            feedback_text=feedback_text,
         )
     if not result.passed:
         score = result.plan_goal_review

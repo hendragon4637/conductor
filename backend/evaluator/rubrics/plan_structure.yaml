@@ -16,3 +16,6 @@ items:
   - id: checks_scoped
     rubric_item: "Is each node's checks scoped to its task (no irrelevant checks on unrelated nodes)?"
     weight: 1.0
+  - id: staffing_capable
+    rubric_item: "Is each node staffed by an agent_config actually capable of its task (no strategic-operational mismatch)?"
+    weight: 2.0
