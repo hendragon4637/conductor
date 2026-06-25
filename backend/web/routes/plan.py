@@ -17,7 +17,7 @@ from backend.planning.schema import Plan, PlanNode
 from backend.planning.store import get_plan as load_persisted_plan, save_plan as persist_plan
 from backend.planning.store import save_run, get_run, list_runs, update_run_state, get_node_sessions
 from backend.planning.meta_planner import decompose, generate_checks, attach_checks_to_dag, formulate
-from backend.planning.meta_planner.goal_formulator import MetaGoal
+from backend.planning.meta_planner.goal_formulator import MetaGoal, enrich_with_conventions
 from backend.planning.meta_planner.clarify import ClarifyPending, formulate_or_clarify
 from backend.planning.meta_planner.split import split_oversized
 
@@ -496,6 +496,13 @@ def _generate_via_meta_planner(
             return []
         meta_goal = mg
 
+    # Convention injection (File 02): enrich meta-goal with domain profile
+    enriched = enrich_with_conventions(meta_goal, goal)
+    if enriched.needs_clarification:
+        logger.warning("Convention enrichment deferred: %s", enriched.questions)
+        # Still proceed — clarification is advisory for internal_drive
+    meta_goal = enriched
+
     # Stage 2: Decompose into DAG (with size_estimate from File 07)
     dag = decompose(
         goal=meta_goal.goal,
@@ -648,6 +655,7 @@ def _persist_plan_clarification(
     if not db_url:
         return
     try:
+        _ensure_project_in_db(db_url, project_id)  # FK: plans.project_id → projects
         with psycopg.connect(db_url) as c:
             with c.cursor() as cur:
                 cur.execute(
