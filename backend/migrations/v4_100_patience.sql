@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE node_sessions ADD COLUMN IF NOT EXISTS best_score REAL;
+ALTER TABLE node_sessions ADD COLUMN IF NOT EXISTS stop_reason TEXT;
+
+COMMIT;

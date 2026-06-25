@@ -1,25 +1,27 @@
-"""Bounded remediation with delta-gated retries.
+"""Bounded remediation with patience-based retries.
 
 When the evaluator gate rejects a node (L1 or L2), this module:
 1. Builds structured feedback (what/why/how + evidence).
-2. Checks whether to continue (delta-gated: improving, not regressing/plateau).
+2. Checks whether to continue using patience-based early stopping.
 3. Builds a fix-forward remediation brief for the agent.
-4. Tracks attempt history for delta-gating.
+4. Tracks attempt history for best-so-far comparison.
 
-Hard cap: MAX_ATTEMPTS = 4.
-Continue while improving: L1 passed-set grows OR L2 score gains >= MIN_IMPROVE (0.05).
-Stop on: regression (lost prior L1 pass / L2 dropped), plateau, or hard cap.
+Hard cap: REMEDIATION_HARD_CAP, default 10.
+Continue until REMEDIATION_PATIENCE consecutive attempts fail to beat best score by REMEDIATION_MIN_DELTA.
+Stop on: pass, patience exhaustion, or hard cap.
 """
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-HARD_CAP = 4
-MIN_IMPROVE = 0.05
+DEFAULT_PATIENCE = 2
+DEFAULT_HARD_CAP = 10
+DEFAULT_MIN_DELTA = 0.02
 
 
 # ── Attempt history for delta-gating ────────────────────────────────────────
@@ -27,47 +29,52 @@ MIN_IMPROVE = 0.05
 
 @dataclass
 class AttemptSnapshot:
-    """Snapshot of a single remediation attempt for delta comparison."""
+    """Snapshot of a single remediation attempt for patience comparison."""
     l1_passed_ids: list[str] = field(default_factory=list)
     l2_score: float | None = None
+    gate_outcome: str | None = None
 
 
 def should_continue(history: list[AttemptSnapshot]) -> tuple[bool, str]:
-    """Delta-gated check: continue while improving, stop on regression/plateau.
+    """Patience-based check against the best score reached so far.
 
     Args:
         history: List of AttemptSnapshots from past gate decisions, in order.
 
     Returns:
-        (continue_bool, reason) — reason is "hard cap", "regression",
-        "plateau", or "improving".
+        (continue_bool, reason) — reason is "passed", "hard_cap",
+        "patience_exhausted", or "within_patience".
     """
-    if len(history) >= HARD_CAP:
-        return False, f"hard cap ({HARD_CAP})"
+    if not history:
+        return True, "within_patience"
 
-    if len(history) < 2:
-        return True, "first attempt"
+    if history[-1].gate_outcome == "done":
+        return False, "passed"
 
-    prev, cur = history[-2], history[-1]
+    hard_cap = int(os.environ.get("REMEDIATION_HARD_CAP", str(DEFAULT_HARD_CAP)))
+    if len(history) >= hard_cap:
+        return False, "hard_cap"
 
-    # L1 regression: lost a prior pass
-    cur_set = set(cur.l1_passed_ids)
-    prev_set = set(prev.l1_passed_ids)
-    l1_regressed = not cur_set >= prev_set
+    patience = int(os.environ.get("REMEDIATION_PATIENCE", str(DEFAULT_PATIENCE)))
+    min_delta = float(os.environ.get("REMEDIATION_MIN_DELTA", str(DEFAULT_MIN_DELTA)))
 
-    # L1 improvement: set grew without losing
-    l1_improved = cur_set >= prev_set and len(cur_set) > len(prev_set)
+    best_before_current = 0.0
+    trailing_non_improving = 0
+    for attempt in history:
+        score = attempt.l2_score or 0.0
+        if score > best_before_current + min_delta:
+            best_before_current = score
+            trailing_non_improving = 0
+        else:
+            trailing_non_improving += 1
 
-    # L2 delta
-    prev_score = prev.l2_score or 0.0
-    cur_score = cur.l2_score or 0.0
-    l2_delta = cur_score - prev_score
+    if trailing_non_improving >= patience:
+        return False, "patience_exhausted"
+    return True, "within_patience"
 
-    if l1_regressed or l2_delta < 0:
-        return False, "regression"
-    if l1_improved or l2_delta >= MIN_IMPROVE:
-        return True, "improving"
-    return False, "plateau"
+
+def best_score(history: list[AttemptSnapshot]) -> float:
+    return max((attempt.l2_score or 0.0) for attempt in history) if history else 0.0
 
 
 # ── Feedback construction ───────────────────────────────────────────────────

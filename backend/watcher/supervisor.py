@@ -26,6 +26,7 @@ from backend.evaluator.gate import GateDecision, evaluate_gate
 from backend.evaluator.l2_judge import JudgeUnavailableError, run_l2
 from backend.evaluator.remediation import (
     AttemptSnapshot,
+    best_score,
     build_feedback,
     build_remediation_brief,
     should_continue,
@@ -377,8 +378,9 @@ class Watcher:
             cur.execute(
                 """INSERT INTO node_sessions
                    (id, run_id, node_id, backend, verdict, l1_pass, goal_review,
-                    l2_passed, l2_score, gate_outcome, commit_tag, finished_at)
-                   VALUES (%s, %s, %s, %s, 'done', %s, %s, %s, %s, 'done', %s, NOW())
+                    l2_passed, l2_score, gate_outcome, best_score, stop_reason,
+                    commit_tag, finished_at)
+                   VALUES (%s, %s, %s, %s, 'done', %s, %s, %s, %s, 'done', %s, 'passed', %s, NOW())
                    ON CONFLICT (id) DO UPDATE SET
                      verdict = 'done',
                      l1_pass = COALESCE(EXCLUDED.l1_pass, node_sessions.l1_pass),
@@ -386,6 +388,8 @@ class Watcher:
                      l2_passed = COALESCE(EXCLUDED.l2_passed, node_sessions.l2_passed),
                      l2_score = COALESCE(EXCLUDED.l2_score, node_sessions.l2_score),
                      gate_outcome = COALESCE(EXCLUDED.gate_outcome, node_sessions.gate_outcome),
+                     best_score = COALESCE(EXCLUDED.best_score, node_sessions.best_score),
+                     stop_reason = COALESCE(EXCLUDED.stop_reason, node_sessions.stop_reason),
                      commit_tag = EXCLUDED.commit_tag,
                      finished_at = NOW()
                 """,
@@ -398,6 +402,7 @@ class Watcher:
                     decision_l2_score,
                     True,   # l2_passed (we only get here if gate passed)
                     decision_l2_score,  # l2_score = goal_review
+                    decision_l2_score,
                     tag,
                 ),
             )
@@ -553,15 +558,17 @@ class Watcher:
         snap = AttemptSnapshot(
             l1_passed_ids=decision.l1_passed_ids,
             l2_score=decision.goal_review,
+            gate_outcome=decision.action,
         )
         history.append(snap)
         cont, reason = should_continue(history)
         if not cont:
+            reached_best = best_score(history)
             logger.warning(
                 "Remediation stop for %s/%s: %s (attempt %d) — setting to failed",
                 st.plan_id, st.node_id, reason, prev_attempt,
             )
-            _set_node_session_failed(prev_ns_id, f"remediation stopped: {reason}")
+            _set_node_session_failed(prev_ns_id, f"remediation stopped: {reason}", reached_best, reason)
             _set_run_failed(run_id)
             return
 
@@ -662,13 +669,32 @@ class Watcher:
                 workspace_root=os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace"),
                 auto_approve=plan.get("auto_approve", True),
             )
-            orch_conv = conv_map.get("orchestrator") or next(iter(conv_map.values()), None)
+            orch_conv = conv_map.get("orchestrator")
+            if not orch_conv:
+                for k, v in conv_map.items():
+                    if not k.startswith("__"):
+                        orch_conv = v
+                        break
+            team_id = conv_map.get("__team_id__")
             st.conversation_id = orch_conv
             print(f"[PRINT {time.strftime('%H:%M:%S')}] _handle_remediation: spawned remediation for {session_id}/{st.node_id} attempt={prev_attempt+1}", flush=True)
             logger.info(
                 "Spawned remediation for %s/%s attempt=%d ns=%s conv=%s",
                 session_id, st.node_id, prev_attempt + 1, st.node_session_id, orch_conv,
             )
+            # Persist aionui IDs to node_sessions
+            if orch_conv and st.node_session_id:
+                try:
+                    with queries.conn() as c, c.cursor() as cur:
+                        cur.execute(
+                            """UPDATE node_sessions
+                                  SET aionui_conversation_id = %s,
+                                      aionui_team_id = COALESCE(%s, aionui_team_id)
+                                WHERE id = %s""",
+                            (orch_conv, team_id, st.node_session_id),
+                        )
+                except Exception:
+                    logger.exception("failed to update node_sessions aionui IDs for %s", st.node_session_id)
         except Exception:
             logger.exception("failed to spawn remediation for %s/%s", session_id, st.node_id)
 
@@ -1003,7 +1029,7 @@ def _record_judge_error(ns_id: str | None, plan_id: str, node_id: str) -> None:
         logger.exception("failed to record judge_error for %s/%s", plan_id, node_id)
 
 
-def _set_node_session_failed(ns_id: str, fail_reason: str) -> None:
+def _set_node_session_failed(ns_id: str, fail_reason: str, best: float | None = None, stop_reason: str | None = None) -> None:
     """Set a node_session verdict to ``failed`` with a reason."""
     try:
         with queries.conn() as c, c.cursor() as cur:
@@ -1011,10 +1037,13 @@ def _set_node_session_failed(ns_id: str, fail_reason: str) -> None:
                 """UPDATE node_sessions
                       SET verdict = 'failed',
                           fail_reason = %s,
+                          best_score = COALESCE(%s, best_score),
+                          stop_reason = COALESCE(%s, stop_reason),
+                          gate_outcome = 'failed',
                           finished_at = NOW()
                     WHERE id = %s
                 """,
-                (fail_reason, ns_id),
+                (fail_reason, best, stop_reason, ns_id),
             )
     except Exception:
         logger.exception("failed to set node_session %s to failed", ns_id)
@@ -1070,7 +1099,7 @@ def _load_attempt_history(run_id: str, node_id: str) -> list[AttemptSnapshot]:
     try:
         with queries.conn() as c, c.cursor() as cur:
             cur.execute(
-                """SELECT l1_passed_ids, l2_score
+                """SELECT l1_passed_ids, l2_score, gate_outcome
                     FROM node_sessions
                    WHERE run_id = %s AND node_id = %s
                      AND verdict IN ('done', 'failed')
@@ -1094,6 +1123,7 @@ def _load_attempt_history(run_id: str, node_id: str) -> list[AttemptSnapshot]:
                 history.append(AttemptSnapshot(
                     l1_passed_ids=l1_ids,
                     l2_score=drow.get("l2_score"),
+                    gate_outcome=drow.get("gate_outcome"),
                 ))
     except Exception:
         logger.exception("failed to load attempt history for %s/%s", run_id, node_id)
