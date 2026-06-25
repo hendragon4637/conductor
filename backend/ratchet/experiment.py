@@ -102,7 +102,7 @@ def _run_task(client: AionUiClient, workspace: Path, intent: str) -> str:
     conv_id = client.create_conversation(
         preset_agent_type="acp",
         workspace=str(workspace),
-        model="nvidia/gpt-oss-120b",
+            model="nvidia/openai/gpt-oss-120b",
     )
     client.send_message(conv_id, intent)
     time.sleep(15)

@@ -33,7 +33,7 @@ def run_task(payload: dict[str, Any]) -> dict[str, Any]:
     conv_id = client.create_conversation(
         preset_agent_type="acp",
         workspace=workspace,
-        model=payload.get("model", "nvidia/gpt-oss-120b"),
+        model=payload.get("model", "nvidia/openai/gpt-oss-120b"),
     )
     client.send_message(conv_id, intent)
 
@@ -49,7 +49,7 @@ def run_task(payload: dict[str, Any]) -> dict[str, Any]:
         plan_id=payload.get("plan_id", "cron-auto"),
         agent_config=payload.get("agent_config", "opencode:backend-executor"),
         engine="opencode",
-        model=payload.get("model", "nvidia/gpt-oss-120b"),
+        model=payload.get("model", "nvidia/openai/gpt-oss-120b"),
         conversation_id=conv_id,
         db_path=DB_PATH,
     )
@@ -85,7 +85,7 @@ def enrich(payload: dict[str, Any]) -> dict[str, Any]:
         result = run_task({
             "intent": intent,
             "agent_config": payload.get("agent_config", "opencode:backend-executor"),
-            "model": payload.get("model", "nvidia/gpt-oss-120b"),
+            "model": payload.get("model", "nvidia/openai/gpt-oss-120b"),
             "success_criterion": payload.get("success_criterion", ""),
         })
         results.append(result)

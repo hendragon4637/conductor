@@ -56,7 +56,7 @@ def write_worktree_config(
     written: dict[str, Any] = {}
 
     if not model and agent_type.startswith("opencode"):
-        model = "nvidia/gpt-oss-120b"
+        model = "nvidia/openai/gpt-oss-120b"
 
     # ── opencode.json ──────────────────────────────────────────────────────
     oc: dict[str, Any] = {
@@ -113,7 +113,7 @@ def write_worktree_config(
         else:
             # Sensible defaults if none provided
             omo["agents"] = {
-                agent_name: {"model": model or "nvidia/gpt-oss-120b"},
+                agent_name: {"model": model or "nvidia/openai/gpt-oss-120b"},
             }
         if omo_categories:
             omo["categories"] = omo_categories

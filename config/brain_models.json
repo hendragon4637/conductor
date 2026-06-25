@@ -23,7 +23,7 @@
   "evaluator": {
     "primary": {
       "provider": "nvidia_nim",
-      "model": "nvidia/gpt-oss-120b",
+      "model": "nvidia/openai/gpt-oss-120b",
       "api_key_env": "NIM_API_KEY",
       "base_url": "https://integrate.api.nvidia.com/v1"
     },
