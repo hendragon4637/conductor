@@ -163,3 +163,27 @@ Decision: When the evaluator gate rejects a node (L1 or L2), `build_feedback()` 
 ## 2026-06-20 — Watcher logger handler fix
 Status: ACTIVE
 Decision: The `backend.watcher` logger in `supervisor.py` had no `StreamHandler`, causing all watcher-level log output to be silently swallowed during normal operation. Added an `if not logger.handlers: logger.addHandler(StreamHandler(sys.stdout))` guard at module init. Critical `[PRINT]`-prefixed print statements added to `_check_session` (verdict transitions) and `_complete_and_advance` (evaluator gate decisions) for debug visibility regardless of logger configuration.
+
+## 2026-06-23 — L1 strict selection from canonical presets (no LLM rewording)
+Status: ACTIVE
+Decision: L1 deterministic checks are selected by ID from `CANONICAL_L1_PRESETS` in `check_generator.py` — never generated, reworded, or invented by the LLM. The CHECKGEN_PROMPT enforces this with explicit correct-ID / wrong-ID examples. L2 checks may be selected unchanged (`preset`), adapted per-node (`preset_adapted`), or created from `quality_intent` (`human_intent`). The `preset_adapted` provenance type was added to `ProvenanceType` in `evaluator/schema.py`.
+
+## 2026-06-23 — `_persist_plan_dag()` preserves LLM-generated checks
+Status: ACTIVE
+Decision: The `_persist_plan_dag()` function in `plan.py` no longer regenerates all checks via heuristic keyword path (`generate_checks()`). The LLM output from the meta-planner (`check_generator.py`) is authoritative for check structure. Heuristic `generate_checks()` in `generate.py` runs only on the legacy path (without `use_meta_planner=true`). `_persist_plan_dag()` converts existing LLM output to `Check` objects directly.
+
+## 2026-06-23 — LLM outputs placeholder `check_cmd`, system resolves it
+Status: ACTIVE
+Decision: The meta-planner LLM sets L1 `check_cmd` to the check's ID string as a placeholder (e.g., `check_cmd="l1-tests-pass"`). `_resolve_l1_checks()` in `check_generator.py` overwrites it with the actual shell command from the preset pool. Unknown/hallucinated L1 IDs are dropped with a warning. This prevents the LLM from hallucinating shell commands while keeping the check structure LLM-driven.
+
+## 2026-06-23 — Plan evaluator validates L1 check IDs against canonical pool
+Status: ACTIVE
+Decision: `run_plan_l1()` check #6 (`l1_no_hallucinations`) in `plan_evaluator.py` detects L1 checks whose IDs don't match any preset in `CANONICAL_L1_PRESETS`. Only active when `use_meta_planner=true`. Hallucinated checks cause the plan evaluation to fail — the `_validate_l1_check_ids()` function cross-references each L1 check ID against `get_valid_l1_ids()`.
+
+## 2026-06-23 — `Check.tier` is a computed `@property`
+Status: ACTIVE
+Decision: `Check.tier` is a `@property` derived from `type`: `type="deterministic"` → `tier="L1"`, `type="rubric"` → `tier="L2"`. Never set directly — causes `AttributeError: property 'tier' has no setter`. Serialization in `plan.py` omits the `tier` field since it's derived. All prior code that assigned `c.tier = ...` was removed.
+
+## 2026-06-23 — Debug logging on Pydantic validation failure in LLM calls
+Status: ACTIVE
+Decision: `call_llm_structured()` in `llm.py` logs the raw LLM text (full length + payload) on Pydantic validation failure. This enables diagnosis of JSON truncation or malformed responses from the LLM, which previously produced opaque `ValidationError` tracebacks.

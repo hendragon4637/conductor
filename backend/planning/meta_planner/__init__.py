@@ -2,8 +2,10 @@
 
 Pipeline:
   1. Goal Formulator  (File 01) — raw input → ``MetaGoal`` with clarifying loop
-  2. Decomposer       (File 02) — ``MetaGoal`` → ``PlanDAG`` with real roster
-  3. Check Generator  (File 02b) — ``PlanDAG`` → per-node L1/L2 checks from rubrics
+  2. Clarify State    (File 06) — multi-turn pause/resume for vague goals
+  3. Decomposer       (File 02) — ``MetaGoal`` → ``PlanDAG`` with size_estimates
+  4. Split Oversized  (File 07) — plan-time node splitting for oversized nodes
+  5. Check Generator  (File 02b) — ``PlanDAG`` → per-node L1/L2 checks from rubrics
 
 All stages share the same config-driven ``meta_planner`` model role.
 """
@@ -15,12 +17,22 @@ from backend.planning.meta_planner.goal_formulator import (
     run_formulation,
 )
 
+from backend.planning.meta_planner.clarify import (
+    ClarifyPending,
+    formulate_or_clarify,
+    condense,
+)
+
 from backend.planning.meta_planner.decomposer import (
     Member,
     PlanNode,
     PlanDAG,
     decompose,
     roster_enum,
+)
+
+from backend.planning.meta_planner.split import (
+    split_oversized,
 )
 
 from backend.planning.meta_planner.check_generator import (
@@ -40,11 +52,15 @@ __all__ = [
     "Deferred",
     "formulate",
     "run_formulation",
+    "ClarifyPending",
+    "formulate_or_clarify",
+    "condense",
     "Member",
     "PlanNode",
     "PlanDAG",
     "decompose",
     "roster_enum",
+    "split_oversized",
     "AllChecks",
     "PerNodeChecks",
     "generate_checks",

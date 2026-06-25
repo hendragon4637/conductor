@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 import uuid
 from typing import Any, Optional
@@ -16,6 +18,8 @@ from backend.planning.store import get_plan as load_persisted_plan, save_plan as
 from backend.planning.store import save_run, get_run, list_runs, update_run_state, get_node_sessions
 from backend.planning.meta_planner import decompose, generate_checks, attach_checks_to_dag, formulate
 from backend.planning.meta_planner.goal_formulator import MetaGoal
+from backend.planning.meta_planner.clarify import ClarifyPending, formulate_or_clarify
+from backend.planning.meta_planner.split import split_oversized
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,13 @@ def _ui_nodes_from_dag(dag: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _ui_plan_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
     user_intent = row.get("user_intent")
     created_at = row.get("created_at")
+    plan_status = row.get("plan_status", "draft")
+    clarify_ctx = row.get("clarify_context") or []
+    clarify_questions = []
+    if clarify_ctx and isinstance(clarify_ctx, list):
+        for r in clarify_ctx:
+            if r.get("answers") is None:
+                clarify_questions.extend(r.get("questions", []))
     return {
         "plan_id": row["plan_id"],
         "title": _title_from_intent(user_intent, row["plan_id"]),
@@ -60,8 +71,10 @@ def _ui_plan_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
         "project_id": row.get("project_id"),
         "ratified": row.get("ratified", False),
         "version": row.get("version", 1),
+        "plan_status": plan_status,
         "nodes": _ui_nodes_from_dag(row.get("dag") or []),
         "created_at": created_at.isoformat() if created_at else None,
+        "clarify_questions": clarify_questions if plan_status == "awaiting_clarification" else [],
         "_source": "db",
     }
 
@@ -220,19 +233,48 @@ async def propose_plan(req: PlanPropose):
             })
     elif req.use_meta_planner:
         try:
+            # File 06: First check if clarification is needed
+            mg = formulate(raw_input=goal, origin="internal_drive")
+            if mg.needs_clarification:
+                # Persist plan in awaiting_clarification state
+                clarify_ctx = json.dumps([{
+                    "round": 1,
+                    "questions": mg.questions,
+                    "answers": None,
+                }])
+                _persist_plan_clarification(
+                    pid=pid, project_id=project_id, goal=goal,
+                    user_intent=goal, plan_status="awaiting_clarification",
+                    clarify_context=clarify_ctx, clarify_rounds=1,
+                    partial_meta_goal=mg.model_dump_json(),
+                )
+                plan = {
+                    "plan_id": pid, "title": req.title or goal[:60],
+                    "description": req.description or goal, "goal": goal,
+                    "project_id": project_id, "ratified": False,
+                    "nodes": [], "created_at": now,
+                    "plan_status": "awaiting_clarification",
+                    "clarify_questions": mg.questions,
+                    "clarify_round": 1,
+                }
+                _plans[pid] = plan
+                return plan
+
+            # Proceed with full meta-planner pipeline (decompose → split → checks)
             mp_nodes = _generate_via_meta_planner(
                 goal=goal,
                 spec=req.spec or "",
                 quality_intent=req.quality_intent or "",
                 plan_id=pid,
+                meta_goal=mg,
             )
             nodes = mp_nodes
             # Override goal/spec with meta-planner output
             if mp_nodes and "meta_goal" in mp_nodes[0]:
-                mg = mp_nodes[0].pop("meta_goal", {})
-                goal = mg.get("goal", goal)
-                req.spec = mg.get("spec", req.spec)
-                req.quality_intent = mg.get("quality_intent", req.quality_intent)
+                mg_dict = mp_nodes[0].pop("meta_goal", {})
+                goal = mg_dict.get("goal", goal)
+                req.spec = mg_dict.get("spec", req.spec)
+                req.quality_intent = mg_dict.get("quality_intent", req.quality_intent)
         except Exception as exc:
             logger.warning("Meta-planner failed, falling back: %s", exc)
             if req.spec and req.quality_intent:
@@ -254,6 +296,10 @@ async def propose_plan(req: PlanPropose):
         "nodes": nodes,
         "created_at": now,
     }
+    if nodes:
+        plan["plan_status"] = "formulated"
+    else:
+        plan["plan_status"] = "draft"
     _plans[pid] = plan
     return plan
 
@@ -290,16 +336,80 @@ async def ratify_plan(plan_id: str, req: RatifyRequest):
                 },
             )
         plan_data["plan_goal_review"] = decision.plan_goal_review
+        plan_data["plan_l2_judgments"] = decision.l2_judgments
+        plan_data["plan_l2_hard_failures"] = decision.hard_failures
+    else:
+        decision = None
 
     plan_data["ratified"] = req.ratified
     if req.comment:
         plan_data["comment"] = req.comment
 
     if req.ratified:
-        from backend.planning.store import set_ratified
+        if decision is None:
+            raise HTTPException(500, "Plan gate decision missing")
+        from backend.planning.store import set_ratified, update_plan_gate_result
+        update_plan_gate_result(
+            plan_id,
+            decision.plan_goal_review,
+            decision.l2_judgments,
+            decision.hard_failures,
+        )
         set_ratified(plan_id)
         # Persist nodes from in-memory plan to DB
         _persist_plan_dag(plan_data)
+
+    return plan_data
+
+
+class ClarifyAnswer(BaseModel):
+    answer: str
+
+
+@router.post("/{plan_id}/clarify")
+async def answer_clarification(plan_id: str, req: ClarifyAnswer):
+    """Answer clarifying questions for a plan awaiting human input.
+
+    File 06: folds the answer into the multi-turn context, re-formulates,
+    and if resolved, automatically proceeds to decompose → split → checks.
+    """
+    plan_data = _get_or_load_plan(plan_id)
+    if not plan_data:
+        raise HTTPException(404, "Plan not found")
+
+    result = formulate_or_clarify(plan_id, new_answer=req.answer)
+
+    if isinstance(result, ClarifyPending):
+        # Still needs more input
+        plan_data["plan_status"] = "awaiting_clarification"
+        plan_data["clarify_questions"] = result.questions
+        plan_data["nodes"] = []
+        _plans[plan_id] = plan_data
+        return plan_data
+
+    if isinstance(result, MetaGoal):
+        # Resolved — run the rest of the meta-planner pipeline
+        goal = plan_data.get("goal") or plan_data.get("description") or ""
+        spec = plan_data.get("spec") or ""
+        quality_intent = plan_data.get("quality_intent") or ""
+        try:
+            mp_nodes = _generate_via_meta_planner(
+                goal=goal,
+                spec=spec,
+                quality_intent=quality_intent,
+                plan_id=plan_id,
+                meta_goal=result,
+            )
+            plan_data["nodes"] = mp_nodes
+            if mp_nodes and "meta_goal" in mp_nodes[0]:
+                mp_nodes[0].pop("meta_goal", None)
+            plan_data["plan_status"] = "formulated"
+            plan_data.pop("clarify_questions", None)
+        except Exception as exc:
+            logger.exception("Meta-planner pipeline failed after clarify")
+            plan_data["plan_status"] = "draft"
+            plan_data["pipeline_error"] = str(exc)
+        _plans[plan_id] = plan_data
 
     return plan_data
 
@@ -358,29 +468,35 @@ def _generate_via_meta_planner(
     spec: str,
     quality_intent: str,
     plan_id: str,
+    meta_goal: MetaGoal | None = None,
 ) -> list[dict[str, Any]]:
-    """Run the full meta-planner pipeline: goal-formula → decompose → check-gen.
+    """Run the full meta-planner pipeline: formulate → decompose → split → check-gen.
 
     Args:
         goal: Raw user goal/description.
         spec: Optional spec/constraints text.
         quality_intent: Quality guidance text.
         plan_id: Target plan ID.
+        meta_goal: Pre-formulated MetaGoal (skip formulate step). Used by
+            the clarify-answer flow (File 06) where formulate was already
+            called via formulate_or_clarify().
 
     Returns:
         List of node dicts compatible with the plan response format.
+        Empty list if the goal needs clarification (caller should handle).
 
     Note:
-        The meta-planner internally handles clarifying loops. If the goal
-        is too vague for autonomous resolution, it defers (returns empty).
+        Pipeline order (File 07):
+          formulate → decompose (with size_estimate) → split_oversized → check-gen
     """
-    mg = formulate(raw_input=goal, origin="internal_drive")
-    if mg.needs_clarification:
-        logger.warning("Meta-planner deferred: %s", mg.questions)
-        return []
-    meta_goal = mg
+    if meta_goal is None:
+        mg = formulate(raw_input=goal, origin="internal_drive")
+        if mg.needs_clarification:
+            logger.warning("Meta-planner deferred: %s", mg.questions)
+            return []
+        meta_goal = mg
 
-    # Stage 2: Decompose into DAG
+    # Stage 2: Decompose into DAG (with size_estimate from File 07)
     dag = decompose(
         goal=meta_goal.goal,
         spec=meta_goal.spec or spec,
@@ -390,6 +506,9 @@ def _generate_via_meta_planner(
     if not dag or not dag.nodes:
         logger.warning("Meta-planner produced empty DAG")
         return []
+
+    # Stage 2b: Split oversized nodes at planning time (File 07)
+    dag = split_oversized(dag, meta_goal)
 
     # Stage 3: Generate checks (separate LLM call)
     all_checks = generate_checks(
@@ -432,6 +551,9 @@ def _generate_via_meta_planner(
             "success_criterion": success_text,
             "checks": checks_list,
             "meta_goal": meta_goal.model_dump(),
+            "size_estimate": getattr(n, "size_estimate", 0),
+            "parent_node_id": getattr(n, "parent_node_id", None),
+            "node_status": getattr(n, "node_status", "active"),
         })
     return node_dicts
 
@@ -511,68 +633,137 @@ def _agent_config_for_backend(backend: str, members: list[str]) -> str:
     return mapping.get(backend, "opencode:backend-executor")
 
 
+def _persist_plan_clarification(
+    pid: str,
+    project_id: str,
+    goal: str,
+    user_intent: str,
+    plan_status: str,
+    clarify_context: str,
+    clarify_rounds: int,
+    partial_meta_goal: str,
+) -> None:
+    """Persist a plan in clarification state (File 06) before ratification."""
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return
+    try:
+        with psycopg.connect(db_url) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO plans
+                       (plan_id, project_id, user_intent, goal, dag, plan_status,
+                        clarify_context, clarify_rounds, partial_meta_goal, ratified, version)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (plan_id) DO UPDATE SET
+                         plan_status = EXCLUDED.plan_status,
+                         clarify_context = EXCLUDED.clarify_context,
+                         clarify_rounds = EXCLUDED.clarify_rounds,
+                         partial_meta_goal = EXCLUDED.partial_meta_goal
+                    """,
+                    (
+                        pid, project_id, user_intent, goal,
+                        json.dumps([]),    # empty dag
+                        plan_status,
+                        clarify_context,
+                        clarify_rounds,
+                        partial_meta_goal,
+                        False,              # not ratified
+                        1,
+                    ),
+                )
+            c.commit()
+    except Exception as exc:
+        logger.warning("Failed to persist clarification state: %s", exc)
+
+
 def _persist_plan_dag(plan_data: dict[str, Any]) -> None:
-    """Ensure the plan's current nodes are saved to the DB (v5.1 canonical)."""
+    """Persist plan nodes to DB (UPSERT). Handles both new plans and
+    clarification-state plans that already exist with an empty DAG."""
     import os
-    from backend.planning.store import get_plan as load_persisted
     from backend.planning.schema import NodeMember, TaskSpec, NodeSuccess, SuccessCriterion
     from backend.evaluator.generate import generate_checks
-    row = load_persisted(plan_data["plan_id"])
-    if not row:
-        raw_nodes = plan_data.get("nodes", [])
-        project_id = plan_data.get("project_id") or "default"
-        quality_intent = plan_data.get("quality_intent")
-        db_url = os.environ.get("DATABASE_URL", "")
-        if db_url:
-            _ensure_project_in_db(db_url, project_id)
 
-        def _to_members(n: dict) -> list[NodeMember]:
-            raw = n.get("members", [])
-            if raw and isinstance(raw[0], dict):
-                return [NodeMember(**m) if isinstance(m, dict) else NodeMember(agent_config=m, backend=n.get("backend", "opencode"), role=n.get("role", "executor")) for m in raw]
-            backend = n.get("backend", "opencode")
-            agent_cfg = n.get("agent_config_id") or "opencode:backend-executor"
-            role = n.get("role", "executor")
-            return [NodeMember(agent_config=agent_cfg, backend=backend, role=role)]
+    raw_nodes = plan_data.get("nodes", [])
+    if not raw_nodes:
+        logger.warning("No nodes to persist for plan %s", plan_data.get("plan_id"))
+        return
 
-        def _task_from_node(n: dict, i: int) -> TaskSpec:
-            task_raw = n.get("task")
-            if isinstance(task_raw, dict):
-                return TaskSpec(
-                    text=task_raw.get("text", n.get("description", n.get("title", ""))),
-                    inputs=task_raw.get("inputs", []),
-                    deliverables=task_raw.get("deliverables", []),
-                )
+    project_id = plan_data.get("project_id") or "default"
+    quality_intent = plan_data.get("quality_intent")
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url:
+        _ensure_project_in_db(db_url, project_id)
+
+    def _to_members(n: dict) -> list[NodeMember]:
+        raw = n.get("members", [])
+        if raw and isinstance(raw[0], dict):
+            return [NodeMember(**m) if isinstance(m, dict) else NodeMember(agent_config=m, backend=n.get("backend", "opencode"), role=n.get("role", "executor")) for m in raw]
+        backend = n.get("backend", "opencode")
+        agent_cfg = n.get("agent_config_id") or "opencode:backend-executor"
+        role = n.get("role", "executor")
+        return [NodeMember(agent_config=agent_cfg, backend=backend, role=role)]
+
+    def _task_from_node(n: dict, i: int) -> TaskSpec:
+        task_raw = n.get("task")
+        if isinstance(task_raw, dict):
             return TaskSpec(
-                text=n.get("description") or n.get("title", f"node-{i}"),
-                inputs=n.get("inputs", []),
-                deliverables=n.get("deliverables", []),
+                text=task_raw.get("text", n.get("description", n.get("title", ""))),
+                inputs=task_raw.get("inputs", []),
+                deliverables=task_raw.get("deliverables", []),
             )
+        return TaskSpec(
+            text=n.get("description") or n.get("title", f"node-{i}"),
+            inputs=n.get("inputs", []),
+            deliverables=n.get("deliverables", []),
+        )
 
-        def _success_from_node(n: dict) -> NodeSuccess:
-            success_raw = n.get("success")
-            if isinstance(success_raw, dict):
-                return NodeSuccess(text=success_raw.get("text", ""))
-            return NodeSuccess(text=n.get("success_criterion") or n.get("success", "Complete the task"))
+    def _success_from_node(n: dict) -> NodeSuccess:
+        success_raw = n.get("success")
+        if isinstance(success_raw, dict):
+            return NodeSuccess(text=success_raw.get("text", ""))
+        return NodeSuccess(text=n.get("success_criterion") or n.get("success", "Complete the task"))
 
-        def _members_list(n: dict) -> list[str]:
-            """Extract flat member strings from node members list for generate_checks."""
-            raw = n.get("members", [])
-            agent_cfg = n.get("agent_config_id") or "opencode:backend-executor"
-            if not raw:
-                return [agent_cfg]
-            if isinstance(raw[0], dict):
-                return [m.get("agent_config", agent_cfg) for m in raw]
-            return raw
+    def _members_list(n: dict) -> list[str]:
+        raw = n.get("members", [])
+        agent_cfg = n.get("agent_config_id") or "opencode:backend-executor"
+        if not raw:
+            return [agent_cfg]
+        if isinstance(raw[0], dict):
+            return [m.get("agent_config", agent_cfg) for m in raw]
+        return raw
 
-        dag: list[PlanNode] = []
-        total = len(raw_nodes)
-        for i, n in enumerate(raw_nodes):
-            nid = n.get("node_id") or n.get("id", f"node-{i}")
-            task_text = _task_from_node(n, i).text
-            success_text = _success_from_node(n).text
-            members_flat = _members_list(n)
+    dag: list[PlanNode] = []
+    total = len(raw_nodes)
+    for i, n in enumerate(raw_nodes):
+        nid = n.get("node_id") or n.get("id", f"node-{i}")
+        task_text = _task_from_node(n, i).text
+        success_text = _success_from_node(n).text
+        members_flat = _members_list(n)
 
+        # Use existing LLM-generated checks from in-memory nodes when available.
+        # The LLM check-generator (check_generator.py) produces per-node checks
+        # with full DAG context. Do NOT regenerate — the heuristic path cannot
+        # match the LLM's per-node scoping.
+        existing_raw = n.get("checks", [])
+        if existing_raw:
+            logger.info(
+                "persist_plan_dag[%s/%s]: using %d existing LLM-generated checks (new flow)",
+                nid, i, len(existing_raw),
+            )
+            from backend.evaluator.schema import Check as CheckSchema
+            checks: list[CheckSchema] = []
+            for c_raw in existing_raw:
+                if isinstance(c_raw, CheckSchema):
+                    checks.append(c_raw)
+                elif isinstance(c_raw, dict):
+                    checks.append(CheckSchema(**c_raw))
+        else:
+            logger.info(
+                "persist_plan_dag[%s/%s]: no existing checks — fallback to heuristic gen (old flow)",
+                nid, i,
+            )
+            # Fallback: no pre-existing checks (legacy path without meta-planner)
             generated = generate_checks(
                 node_id=nid,
                 task=task_text,
@@ -582,28 +773,29 @@ def _persist_plan_dag(plan_data: dict[str, Any]) -> None:
                 members=members_flat,
                 quality_intent=quality_intent,
             )
+            checks = generated.checks
 
-            pn = PlanNode(
-                id=nid,
-                members=_to_members(n),
-                depends_on=n.get("depends_on", []),
-                task=_task_from_node(n, i),
-                success=_success_from_node(n),
-                checks=generated.checks,
-                project_id=project_id,
-            )
-            dag.append(pn)
-
-        plan_obj = Plan(
-            plan_id=plan_data["plan_id"],
+        pn = PlanNode(
+            id=nid,
+            members=_to_members(n),
+            depends_on=n.get("depends_on", []),
+            task=_task_from_node(n, i),
+            success=_success_from_node(n),
+            checks=checks,
             project_id=project_id,
-            user_intent=plan_data.get("description") or plan_data.get("title", ""),
-            goal=plan_data.get("goal", ""),
-            success=SuccessCriterion(text=plan_data.get("success", {}).get("text", "") if isinstance(plan_data.get("success"), dict) else ""),
-            dag=dag,
-            ratified=True,
         )
-        persist_plan(plan_obj, ratified=True)
+        dag.append(pn)
+
+    plan_obj = Plan(
+        plan_id=plan_data["plan_id"],
+        project_id=project_id,
+        user_intent=plan_data.get("description") or plan_data.get("title", ""),
+        goal=plan_data.get("goal", ""),
+        success=SuccessCriterion(text=plan_data.get("success", {}).get("text", "") if isinstance(plan_data.get("success"), dict) else ""),
+        dag=dag,
+        ratified=True,
+    )
+    persist_plan(plan_obj, ratified=True)
 
 
 # ── Run endpoints ─────────────────────────────────────────────────
@@ -710,6 +902,12 @@ async def start_run(run_id: str):
         return {"run_id": run_id, "state": "running", "session_id": session_id}
     except Exception as exc:
         update_run_state(run_id, "failed")
+        # File 08: quarantine failed run
+        try:
+            from backend.worktree.lifecycle import finalize_failure
+            finalize_failure(run_id, reason=str(exc))
+        except Exception as lfe:
+            logger.warning("finalize_failure for run %s: %s", run_id, lfe)
         import traceback
         traceback.print_exc()
         raise HTTPException(500, f"Failed to start run: {exc}")

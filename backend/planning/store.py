@@ -69,6 +69,33 @@ def set_ratified(plan_id: str) -> None:
         c.commit()
 
 
+def update_plan_gate_result(
+    plan_id: str,
+    plan_goal_review: float,
+    l2_judgments: list[dict[str, Any]],
+    hard_failures: list[dict[str, Any]],
+) -> None:
+    """Persist plan-level evaluator score and per-item L2 judgments."""
+    db_url = _get_db()
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE plans
+                      SET plan_goal_review = %s,
+                          plan_l2_judgments = %s::jsonb,
+                          plan_l2_hard_failures = %s::jsonb
+                    WHERE plan_id = %s
+                """,
+                (
+                    plan_goal_review,
+                    json.dumps(l2_judgments),
+                    json.dumps(hard_failures),
+                    plan_id,
+                ),
+            )
+        c.commit()
+
+
 def get_plan(plan_id: str) -> dict[str, Any] | None:
     """Load a plan dict from the database."""
     db_url = _get_db()

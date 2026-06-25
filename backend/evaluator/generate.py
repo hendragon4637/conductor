@@ -27,12 +27,37 @@ _RUBRIC_QI_KEYWORDS = {"must", "should", "must not", "should not", "reject", "co
 
 _QI_CLAUSE_SPLIT = re.compile(r'[,;]\s*|\.(?:\s+|\n)|(?:\s+and\s+)|\n+')
 
+# Stopwords for quality-intent clause-to-task keyword matching
+_QI_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "have",
+    "has", "had", "do", "does", "did", "will", "would", "can", "could",
+    "shall", "should", "may", "might", "must", "need", "to", "of", "in",
+    "on", "at", "for", "with", "by", "from", "as", "into", "through",
+    "during", "before", "after", "above", "below", "between", "out",
+    "off", "over", "under", "again", "further", "then", "once", "here",
+    "there", "when", "where", "why", "how", "all", "each", "every",
+    "both", "few", "more", "most", "other", "some", "such", "no", "nor",
+    "not", "only", "own", "same", "so", "than", "too", "very", "just",
+    "because", "about", "up", "and", "or", "but", "it", "its", "that",
+    "these", "those", "this", "what", "which", "who", "whom",
+})
 
-def _generate_from_quality_intent(quality_intent: str | None) -> list[Check]:
-    """Parse ``quality_intent`` text into candidate checks.
+
+def _significant_keywords(text: str) -> set[str]:
+    """Extract meaningful content words (≥4 chars, non-stopword) from *text*."""
+    return {w.lower() for w in re.findall(r"[A-Za-z]\w{3,}", text) if w.lower() not in _QI_STOPWORDS}
+
+
+def _generate_from_quality_intent(quality_intent: str | None, task_text: str | None = None) -> list[Check]:
+    """Parse ``quality_intent`` text into candidate checks scoped to *task_text*.
 
     Splits on clause boundaries (commas, semicolons, periods, newlines, "and"),
     then classifies each clause as deterministic or rubric based on keywords.
+    Each clause is matched against *task_text* by keyword overlap — clauses
+    whose significant keywords have zero overlap with the task are discarded
+    (they belong to a different node). Generic clauses with no significant
+    keywords are always kept.
+
     All returned checks are tagged with ``provenance="human_intent"`` and
     carry a ``source_hint`` showing the originating clause.
 
@@ -40,6 +65,8 @@ def _generate_from_quality_intent(quality_intent: str | None) -> list[Check]:
         quality_intent: Free-text quality requirements, e.g.
             ``"money must be integer cents, deletes need confirmation"``.
             ``None`` or empty string returns an empty list.
+        task_text: The node's task description. If provided, used to filter
+            clauses that are relevant to this node. ``None`` = no filtering.
 
     Returns:
         List of ``Check`` objects, each with ``provenance="human_intent"``.
@@ -49,10 +76,21 @@ def _generate_from_quality_intent(quality_intent: str | None) -> list[Check]:
         return checks
     clauses = _QI_CLAUSE_SPLIT.split(quality_intent)
 
+    # Precompute task keywords once for all clauses
+    task_keywords = _significant_keywords(task_text) if task_text else None
+
     for clause in clauses:
         clause = clause.strip()
         if not clause:
             continue
+
+        # Scope filter: skip clause if its significant keywords have zero
+        # overlap with the node's task text (unless clause is so generic
+        # it has no significant keywords of its own).
+        if task_keywords is not None:
+            clause_keywords = _significant_keywords(clause)
+            if clause_keywords and not (clause_keywords & task_keywords):
+                continue
 
         cid = "qi-" + hashlib.md5(clause.encode()).hexdigest()[:8]
         lower = clause.lower()
@@ -328,10 +366,10 @@ def generate_checks(
     for c in memory_checks:
         c.provenance = "memory"
 
-    # 5. Quality-intent checks
+    # 5. Quality-intent checks (scoped to this node's task)
     qi_checks: list[Check] = []
     if quality_intent:
-        qi_checks = _generate_from_quality_intent(quality_intent)
+        qi_checks = _generate_from_quality_intent(quality_intent, task_text=task)
 
     # De-duplicate by id (later sources override earlier ones with same id)
     seen_ids: set[str] = set()

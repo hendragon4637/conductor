@@ -335,7 +335,7 @@ class Watcher:
                 "goal_review=NULL, judge_error recorded.",
                 session_id, st.node_id,
             )
-            _record_judge_error(st.plan_id, st.node_id)
+            _record_judge_error(st.node_session_id, st.plan_id, st.node_id)
             return  # do NOT commit — loud failure
         except Exception:
             logger.exception("evaluator gate failed for %s/%s — proceeding with commit", session_id, st.node_id)
@@ -458,6 +458,16 @@ class Watcher:
                     lf.flush()
                 except Exception:
                     pass
+
+            # File 08: finalize success — merge the verified branch to main
+            if run_id:
+                try:
+                    from backend.worktree.lifecycle import finalize_success
+                    ws_root = os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace")
+                    finalize_success(run_id, workspace_root=ws_root)
+                except Exception as exc:
+                    logger.warning("finalize_success for run %s: %s", run_id, exc)
+
             return
 
         try:
@@ -934,7 +944,7 @@ def _update_node_session_score(ns_id: str, score: float) -> None:
         logger.exception("failed to write goal_review for %s", ns_id)
 
 
-def _record_judge_error(plan_id: str, node_id: str) -> None:
+def _record_judge_error(ns_id: str | None, plan_id: str, node_id: str) -> None:
     """Record judge-unavailable error on the node session.
 
     Sets ``goal_review=NULL`` and writes a ``session_signals`` row
@@ -947,25 +957,41 @@ def _record_judge_error(plan_id: str, node_id: str) -> None:
         with queries.conn() as c, c.cursor() as cur:
             cur.execute(
                 """UPDATE node_sessions
-                      SET goal_review = NULL
-                     WHERE run_id IN (SELECT id FROM runs WHERE plan_id = %s)
-                       AND node_id = %s
+                      SET goal_review = NULL,
+                          l2_score = NULL,
+                          l2_passed = FALSE,
+                          gate_outcome = 'judge_error'
+                    WHERE id = %s
                 """,
-                (plan_id, node_id),
+                (ns_id,),
             )
             run_id = _resolve_active_run_id(plan_id)
             if run_id:
                 session_id = f"{run_id}_{node_id}"
-                sig_id = f"judge_err_{session_id}"
+                snapshot = {
+                    "type": "judge_error",
+                    "plan_id": plan_id,
+                    "node_id": node_id,
+                    "node_session_id": ns_id,
+                    "message": "All judge models unreachable, node NOT committed",
+                }
                 cur.execute(
                     """INSERT INTO session_signals
-                       (id, session_id, name, value, type, metadata)
-                       VALUES (%s, %s, 'judge_error', 1, 'judge_error',
-                               jsonb_build_object('plan_id', %s, 'node_id', %s,
-                                                  'message', 'All judge models unreachable, node NOT committed'))
-                       ON CONFLICT (id) DO NOTHING
+                       (session_id, ts, token_rate, last_activity, terminal,
+                        quota_suspected, pid_alive, fs_changed, any_error,
+                        error_codes, watcher_node_id, signal_snapshot,
+                        node_session_id)
+                       VALUES (%s, NOW(), 0, NOW(), FALSE,
+                               TRUE, TRUE, FALSE, TRUE,
+                               %s::jsonb, %s, %s::jsonb, %s)
                     """,
-                    (sig_id, session_id, plan_id, node_id),
+                    (
+                        session_id,
+                        json.dumps(["judge_error"]),
+                        node_id,
+                        json.dumps(snapshot),
+                        ns_id,
+                    ),
                 )
             c.commit()
         logger.error(
@@ -1017,6 +1043,7 @@ def _record_gate_verdicts(ns_id: str, decision: GateDecision) -> None:
                           l1_flagged = %s,
                           l2_passed = %s,
                           l2_score = %s,
+                          goal_review = %s,
                           l2_feedback = %s::jsonb,
                           gate_outcome = %s
                     WHERE id = %s
@@ -1026,7 +1053,8 @@ def _record_gate_verdicts(ns_id: str, decision: GateDecision) -> None:
                     json.dumps(decision.l1_feedback),
                     decision.l1_flagged,
                     decision.l2_passed,
-                    decision.goal_review,
+                    decision.goal_review,    # l2_score
+                    decision.goal_review,    # goal_review (duplicated — GateDecision stores L2 score here)
                     json.dumps(decision.l2_feedback),
                     decision.action,  # gate_outcome = 'done' | 'remediate'
                     ns_id,

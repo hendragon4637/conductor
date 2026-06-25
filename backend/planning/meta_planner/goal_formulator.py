@@ -76,6 +76,9 @@ user did not express.
 Raw input:
 {input}
 
+Previous clarification history (if any):
+{prior}
+
 Recalled memory context:
 {memory}
 
@@ -89,6 +92,7 @@ def formulate(
     raw_input: str,
     origin: str = "human",
     recalled: str = "",
+    prior: str = "",
 ) -> MetaGoal:
     """Single LLM call: raw input → MetaGoal.
 
@@ -96,11 +100,17 @@ def formulate(
         raw_input: The raw user ask (can be vague).
         origin: ``"human"`` (interactive clarify) or ``"internal_drive"`` (autonomous).
         recalled: Optional memory context from Neo4j/product memory.
+        prior: Optional condensed multi-turn Q&A history (File 06 clarification).
 
     Returns:
         A ``MetaGoal`` parsed from the LLM response.
     """
-    prompt = FORMULATE_PROMPT.format(input=raw_input, memory=recalled, origin=origin)
+    prompt = FORMULATE_PROMPT.format(
+        input=raw_input,
+        prior=prior or "(none)",
+        memory=recalled or "(none)",
+        origin=origin,
+    )
     return call_llm_structured(prompt, schema=MetaGoal)
 
 

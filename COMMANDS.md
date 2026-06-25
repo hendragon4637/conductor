@@ -9,11 +9,17 @@ Notes:
 - The FastAPI backend listens on `127.0.0.1:8090`
 - The watcher starts inside `backend.main:app` on startup; do not start a separate `run_watcher.py` process
 
-## Restart (setsid, from start-services.sh pattern)
+## Restart (from load-secrets + .env pattern)
 ```bash
-# Kill existing backend first
-pkill -f "uvicorn backend.main:app" 2>/dev/null || true
+# Free port 8090
+fuser -k 8090/tcp 2>/dev/null || true
 sleep 1
+
+# Load secrets and env
+set -a
+source /opt/aipc/scripts/load-secrets.sh
+source /opt/aipc/conductor/.env
+set +a
 
 # Restart backend (FastAPI on :8090)
 cd /opt/aipc/conductor

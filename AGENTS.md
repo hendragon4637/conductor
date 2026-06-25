@@ -38,6 +38,12 @@
 ## 2026-06-20 — L1 check scope boundaries (no runtime leaks)
 ## 2026-06-20 — Remediation flow with verbal feedback (reflection)
 ## 2026-06-20 — Watcher logger handler fix
+## 2026-06-23 — L1 strict selection from canonical presets (no LLM rewording)
+## 2026-06-23 — `_persist_plan_dag()` preserves LLM-generated checks
+## 2026-06-23 — LLM outputs placeholder `check_cmd`, system resolves it
+## 2026-06-23 — Plan evaluator validates L1 check IDs against canonical pool
+## 2026-06-23 — `Check.tier` is a computed `@property`
+## 2026-06-23 — Debug logging on Pydantic validation failure in LLM calls
 
 ## Glossary
 # Project Glossary
@@ -134,7 +140,15 @@
 ## Evaluator (meta-evaluator)
 - Evaluator sits between watcher "done" verdict and node commit — NEVER modify watcher for evaluation
 - L1 deterministic checks run first (cheap, no LLM); L2 rubric judge only if L1 passes
-- Checks are generated at decompose time via `generate_checks()`, ratified by human at plan approval
+- Checks are generated at decompose time via meta-planner LLM (`check_generator.py`) or legacy `generate_checks()`, ratified by human at plan approval
+- L1 checks are selected by ID from `CANONICAL_L1_PRESETS` only — never generated, reworded, or invented by the LLM
+- L2 checks carry provenance: `preset` (unmodified), `preset_adapted` (adapted per-node), or `human_intent` (created from quality_intent)
+- LLM outputs L1 `check_cmd` as the ID string (placeholder); system resolves to actual command via `_resolve_l1_checks()`
+- Unknown/hallucinated L1 IDs are dropped with warning by `_resolve_l1_checks()`
+- Plan evaluator (`run_plan_l1()` check #6) validates L1 IDs against canonical pool when `use_meta_planner=true`
+- Heuristic `generate_checks()` in `generate.py` runs only on legacy path (without `use_meta_planner=true`) — never regenerates LLM output
+- `_persist_plan_dag()` converts existing LLM output to Check objects directly; does NOT overwrite with heuristic generation
+- `Check.tier` is a computed `@property` (`type=deterministic`→`L1`, `type=rubric`→`L2`), never set directly
 - Remediation nodes reuse `decompose_or_update("append_node")` lifecycle — no new orchestration
 - L1 runs shell commands in the node worktree; exit 0 = pass
 - L1 checks are FORBIDDEN from containing runtime signals (curl, localhost, 127.0.0.1, http://, uvicorn) — these belong to higher layers (L4). `validate_checks()` rejects leaked checks at generation time.
@@ -241,11 +255,17 @@ Notes:
 - The FastAPI backend listens on `127.0.0.1:8090`
 - The watcher starts inside `backend.main:app` on startup; do not start a separate `run_watcher.py` process
 
-## Restart (setsid, from start-services.sh pattern)
+## Restart (from load-secrets + .env pattern)
 ```bash
-# Kill existing backend first
-pkill -f "uvicorn backend.main:app" 2>/dev/null || true
+# Free port 8090
+fuser -k 8090/tcp 2>/dev/null || true
 sleep 1
+
+# Load secrets and env
+set -a
+source /opt/aipc/scripts/load-secrets.sh
+source /opt/aipc/conductor/.env
+set +a
 
 # Restart backend (FastAPI on :8090)
 cd /opt/aipc/conductor

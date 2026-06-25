@@ -32,6 +32,9 @@ JUDGE_TIMEOUT = 120.0
 # L2 input-size guard — oversized artifacts trigger a flag-fail instead of truncation
 L2_MAX_CHARS = int(os.environ.get("L2_MAX_INPUT_CHARS", "24000"))
 
+ARTIFACT_SKIP_PARTS = {".git", ".venv", "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+ARTIFACT_SKIP_SUFFIXES = {".pyc", ".pyo", ".so", ".dll", ".dylib", ".db", ".sqlite", ".sqlite3", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".tar", ".gz"}
+
 # ── Prompt template ─────────────────────────────────────────────────────────
 
 JUDGE_SYSTEM_PROMPT = """You are a strict, impartial quality judge.
@@ -84,7 +87,36 @@ class L2Result:
 
 # ── Artifact collection ──────────────────────────────────────────────────────
 
-def collect_artifact(worktree: str, max_chars: int = 8000) -> str:
+def _artifact_skip_path(path: str) -> bool:
+    p = Path(path)
+    return any(part in ARTIFACT_SKIP_PARTS for part in p.parts) or p.suffix.lower() in ARTIFACT_SKIP_SUFFIXES
+
+
+def _artifact_priority(path: str) -> tuple[int, str]:
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix in {".py", ".js", ".ts", ".tsx", ".jsx"}:
+        return (0, path)
+    if suffix in {".html", ".css"}:
+        return (1, path)
+    if suffix in {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".env", ".example"}:
+        return (2, path)
+    return (3, path)
+
+
+def _read_artifact_text(path: Path, limit: int = 3000) -> str | None:
+    try:
+        if not path.is_file() or path.stat().st_size > 100_000:
+            return None
+        raw = path.read_bytes()[:limit]
+        if b"\x00" in raw:
+            return None
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS) -> str:
     """Collect evidence from the worktree for the judge to evaluate.
 
     Captures working-tree diff, last-commit diff (for committed executor
@@ -107,33 +139,6 @@ def collect_artifact(worktree: str, max_chars: int = 8000) -> str:
         parts.append("[Git diff: unavailable]")
 
     try:
-        rc = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD"],
-            cwd=worktree, capture_output=True, text=True, timeout=15,
-        )
-        commit_count = int(rc.stdout.strip() or 0)
-        if commit_count > 1:
-            result = subprocess.run(
-                ["git", "diff", "HEAD~1..HEAD", "--no-color"],
-                cwd=worktree, capture_output=True, text=True, timeout=30,
-            )
-            committed_diff = result.stdout.strip()
-            if committed_diff:
-                parts.append("[Last commit diff]")
-                parts.append(committed_diff[:max_chars // 2])
-        elif commit_count == 1:
-            result = subprocess.run(
-                ["git", "show", "HEAD", "--no-color"],
-                cwd=worktree, capture_output=True, text=True, timeout=30,
-            )
-            shown = result.stdout.strip()
-            if shown:
-                parts.append("[Full commit diff]")
-                parts.append(shown[:max_chars // 2])
-    except Exception:
-        pass
-
-    try:
         result = subprocess.run(
             ["git", "ls-files"],
             cwd=worktree, capture_output=True, text=True, timeout=15,
@@ -154,16 +159,41 @@ def collect_artifact(worktree: str, max_chars: int = 8000) -> str:
         untracked = result.stdout.strip()
         if untracked:
             parts.append("[New files]")
-            lines = untracked.splitlines()[:20]
+            lines = [f for f in untracked.splitlines() if f.strip() and not _artifact_skip_path(f)]
+            lines = sorted(lines, key=_artifact_priority)[:40]
             for f in lines:
                 fpath = Path(worktree) / f
-                if fpath.is_file() and fpath.stat().st_size < 50000:
-                    try:
-                        content = fpath.read_text(errors="replace")[:2000]
-                        parts.append(f"--- {f} ---")
-                        parts.append(content)
-                    except Exception:
-                        parts.append(f"--- {f} --- (unreadable)")
+                content = _read_artifact_text(fpath)
+                if content is not None:
+                    parts.append(f"--- {f} ---")
+                    parts.append(content)
+    except Exception:
+        pass
+
+    try:
+        rc = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=worktree, capture_output=True, text=True, timeout=15,
+        )
+        commit_count = int(rc.stdout.strip() or 0)
+        if commit_count > 1:
+            result = subprocess.run(
+                ["git", "diff", "HEAD~1..HEAD", "--no-color"],
+                cwd=worktree, capture_output=True, text=True, timeout=30,
+            )
+            committed_diff = result.stdout.strip()
+            if committed_diff:
+                parts.append("[Last commit diff]")
+                parts.append(committed_diff[:max_chars // 3])
+        elif commit_count == 1:
+            result = subprocess.run(
+                ["git", "show", "HEAD", "--no-color", "--stat"],
+                cwd=worktree, capture_output=True, text=True, timeout=30,
+            )
+            shown = result.stdout.strip()
+            if shown:
+                parts.append("[Initial commit summary]")
+                parts.append(shown[:max_chars // 4])
     except Exception:
         pass
 

@@ -8,8 +8,9 @@ Both types flow through the same ``NodeChecks`` container with versioning.
 Every check carries a ``provenance`` tag identifying its origin:
 - ``human_intent`` — derived from the ``quality_intent`` input at plan creation
 - ``memory`` — recalled from Neo4j product memory
-- ``preset`` — from built-in rubric presets or deterministic logic
-- ``agent_default`` — from the agent_config's default_checks
+    - ``preset`` — from built-in rubric presets or deterministic logic
+    - ``preset_adapted`` — from preset, but wording adjusted per-node context (LLM check-generator)
+    - ``agent_default`` — from the agent_config's default_checks
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-ProvenanceType = Literal["human_intent", "memory", "preset", "agent_default"]
+ProvenanceType = Literal["human_intent", "memory", "preset", "preset_adapted", "agent_default"]
 
 
 class OnFailTemplate(BaseModel):
@@ -46,6 +47,7 @@ class Check(BaseModel):
     - ``human_intent`` (from quality_intent input)
     - ``memory`` (from Neo4j recall)
     - ``preset`` (from rubric presets or deterministic heuristics)
+    - ``preset_adapted`` (preset wording adjusted per-node by LLM check-generator)
     - ``agent_default`` (from agent_config default_checks)
     """
     id: str = Field(description="Unique check id within the node, e.g. 'det-1', 'rubric-func-completeness'")

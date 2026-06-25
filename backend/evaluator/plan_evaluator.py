@@ -63,6 +63,7 @@ class PlanL2Result:
     """Result of plan-level L2 rubric evaluation (not the node-level L2)."""
     score: float = 0.0
     judgments: list[dict] = field(default_factory=list)
+    hard_failures: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -72,6 +73,7 @@ class PlanEvalResult:
     l2: PlanL2Result | None = None
     plan_goal_review: float = 0.0
     passed: bool = False
+    hard_failures: list[dict] = field(default_factory=list)
 
 
 def _check_acyclic(dag: list[dict]) -> bool:
@@ -110,6 +112,35 @@ def _check_acyclic(dag: list[dict]) -> bool:
     return True
 
 
+def _validate_l1_check_ids(dag: list[dict]) -> list[dict]:
+    """Validate that every L1 (deterministic) check references a known preset.
+
+    Loads the valid L1 check ID set from ``check_generator`` (canonical pool
+    + agent_config default_checks).  Any L1 check whose ``id`` is not in the
+    set is a hallucination — the LLM invented a check command that doesn't
+    exist in any preset.
+
+    Returns:
+        List of hallucination dicts with ``node_id``, ``check_id``,
+        ``check_cmd`` (truncated).  Empty list = all L1 checks are valid.
+    """
+    from backend.planning.meta_planner.check_generator import get_valid_l1_ids
+    valid_ids = get_valid_l1_ids()
+    hallucinations: list[dict] = []
+    for n in dag:
+        nid = n.get("id", "?")
+        for c in (n.get("checks") or []):
+            if c.get("type") == "deterministic":
+                cid = c.get("id", "")
+                if cid not in valid_ids:
+                    hallucinations.append({
+                        "node_id": nid,
+                        "check_id": cid,
+                        "check_cmd": (c.get("check_cmd") or "")[:120],
+                    })
+    return hallucinations
+
+
 def run_plan_l1(dag: list[dict]) -> PlanL1Result:
     """Run L1 structural checks on the plan DAG.
 
@@ -119,6 +150,7 @@ def run_plan_l1(dag: list[dict]) -> PlanL1Result:
     3. Dependencies reference existing node IDs.
     4. DAG is acyclic.
     5. Every node has at least one check.
+    6. No hallucinated L1 checks (every L1 check id is in the known preset pool).
 
     Args:
         dag: List of node dicts from the plan.
@@ -182,6 +214,24 @@ def run_plan_l1(dag: list[dict]) -> PlanL1Result:
     else:
         checks.append({"check": "acyclic", "passed": True, "detail": "No cycles"})
 
+    # Check 6: no hallucinated L1 checks
+    hallucinations = _validate_l1_check_ids(dag)
+    if hallucinations:
+        all_ok = False
+        hallucinated_ids = ", ".join(f"{h['check_id']} on {h['node_id']}" for h in hallucinations)
+        checks.append({
+            "check": "l1_no_hallucinations",
+            "passed": False,
+            "detail": f"Hallucinated L1 checks (not in known presets): {hallucinated_ids}",
+            "hallucinations": hallucinations,
+        })
+    else:
+        checks.append({
+            "check": "l1_no_hallucinations",
+            "passed": True,
+            "detail": "All L1 checks reference known presets",
+        })
+
     note = ""
     if not all_ok:
         failed = [c for c in checks if not c["passed"]]
@@ -213,6 +263,7 @@ def plan_l2(
             {"id": "right_sized", "rubric_item": "Is each node a bounded, single-responsibility unit?", "weight": 1.5},
             {"id": "deps_correct", "rubric_item": "Are dependencies correct and minimal?", "weight": 1.5},
             {"id": "measurable", "rubric_item": "Does each node have a measurable success criterion?", "weight": 1.0},
+            {"id": "checks_scoped", "rubric_item": "Is each node's checks scoped to its task (no irrelevant checks on unrelated nodes)?", "weight": 1.0},
         ],
     }
 
@@ -222,6 +273,10 @@ def plan_l2(
             "task": n.get("task", {}).get("text", ""),
             "success": n.get("success", {}).get("text", ""),
             "depends_on": n.get("depends_on", []),
+            "checks": [
+                {"id": c.get("id", "?"), "type": c.get("type", "?"), "criterion": c.get("criterion", "")}
+                for c in (n.get("checks") or [])
+            ],
         }, indent=2)
         for n in dag
     )
@@ -244,25 +299,28 @@ def plan_l2(
         logger.warning("Plan L2 LLM call failed: %s — returning score 0", exc)
         return PlanL2Result(score=0.0)
 
+    judgments: list[dict] = []
+    hard_failures: list[dict] = []
+    judged_map = {judged.id: judged for judged in resp.items}
+
     total_weight = 0.0
     met_weight = 0.0
-    judgments: list[dict] = []
-    item_map = {item["id"]: item for item in rubric["items"]}
-
-    for judged in resp.items:
-        rubric_item = item_map.get(judged.id)
-        weight = rubric_item.get("weight", 1.0) if rubric_item else 1.0
+    for item in rubric["items"]:
+        item_id = item["id"]
+        weight = item.get("weight", 1.0)
+        judged = judged_map.get(item_id)
+        met = bool(judged.met) if judged else False
+        detail = "met" if judged else "missing from L2 response"
         total_weight += weight
-        if judged.met:
+        if met:
             met_weight += weight
-        judgments.append({
-            "id": judged.id,
-            "met": judged.met,
-            "weight": weight,
-        })
+        judgment = {"id": item_id, "met": met, "weight": weight, "detail": detail}
+        judgments.append(judgment)
+        if not met:
+            hard_failures.append(judgment)
 
     score = met_weight / total_weight if total_weight > 0 else 0.0
-    return PlanL2Result(score=score, judgments=judgments)
+    return PlanL2Result(score=score, judgments=judgments, hard_failures=hard_failures)
 
 
 def evaluate_plan(
@@ -288,13 +346,14 @@ def evaluate_plan(
 
     l2_result = plan_l2(dag, plan_goal)
     score = l2_result.score
-    passed = score >= l2_threshold
+    passed = score >= l2_threshold and not l2_result.hard_failures
 
     return PlanEvalResult(
         l1=l1,
         l2=l2_result,
         plan_goal_review=round(score, 4),
         passed=passed,
+        hard_failures=l2_result.hard_failures,
     )
 
 
@@ -310,6 +369,8 @@ class PlanGateDecision:
     plan_goal_review: float = 0.0
     reason: dict | None = None
     feedback_text: str = ""
+    l2_judgments: list[dict] = field(default_factory=list)
+    hard_failures: list[dict] = field(default_factory=list)
 
 
 def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE_THRESHOLD) -> PlanGateDecision:
@@ -324,15 +385,26 @@ def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE
         )
     if not result.passed:
         score = result.plan_goal_review
+        l2_judgments = result.l2.judgments if result.l2 else []
+        hard_failures = result.hard_failures
+        if hard_failures:
+            reason = {"L2": "hard gate failed", "score": score, "hard_failures": hard_failures, "judgments": l2_judgments}
+            feedback = "Plan quality hard gate failed: " + "; ".join(f"{f.get('id')}: {f.get('detail', 'not met')}" for f in hard_failures)
+        else:
+            reason = {"L2": "below threshold", "score": score, "judgments": l2_judgments}
+            feedback = f"Plan quality review score ({score:.2f}) is below required threshold ({threshold:.2f}). Review and refine the plan decomposition."
         return PlanGateDecision(
             action="revise",
             plan_goal_review=score,
-            reason={"L2": "below threshold", "score": score},
-            feedback_text=f"Plan quality review score ({score:.2f}) is below required threshold ({threshold:.2f}). Review and refine the plan decomposition.",
+            reason=reason,
+            feedback_text=feedback,
+            l2_judgments=l2_judgments,
+            hard_failures=hard_failures,
         )
     return PlanGateDecision(
         action="ratify",
         plan_goal_review=result.plan_goal_review,
+        l2_judgments=result.l2.judgments if result.l2 else [],
     )
 
 

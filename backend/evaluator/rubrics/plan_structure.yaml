@@ -13,3 +13,6 @@ items:
   - id: measurable
     rubric_item: "Does each node have a measurable success criterion?"
     weight: 1.0
+  - id: checks_scoped
+    rubric_item: "Is each node's checks scoped to its task (no irrelevant checks on unrelated nodes)?"
+    weight: 1.0

@@ -62,6 +62,22 @@ class PlanNode(BaseModel):
     depends_on: list[str] = Field(default_factory=list, description="Node IDs this node depends on")
     task: NodeTask = Field(description="Node-scoped task")
     success: NodeSuccess = Field(description="Prose success criterion")
+    size_estimate: int = Field(
+        default=0,
+        description="Decomposer's estimate of change volume in chars (File 07)",
+    )
+    parent_node_id: str | None = Field(
+        default=None,
+        description="Set when this node was created by splitting an oversized parent (File 07)",
+    )
+    depth: int = Field(
+        default=0,
+        description="Nesting depth: 0 for top-level nodes, incremented on split (File 07)",
+    )
+    node_status: str = Field(
+        default="active",
+        description="'active' | 'superseded' — superseded means this node was split into children",
+    )
 
 
 class PlanDAG(BaseModel):
@@ -147,6 +163,10 @@ CRITICAL RULES — read carefully:
   6. A node's success criterion is a prose statement of what "done" means
      for that node. It will be used later to generate evaluation checks.
   7. Do NOT generate checks here — only structure, members, and success criteria.
+  8. For each node, set `size_estimate` = approximate number of characters of
+     code/content this node will create or change. Be realistic: a node
+     implementing a full module is larger than one adding a single function.
+     Nodes over 24000 chars may be split automatically.
 
 Meta goal:
 {goal}

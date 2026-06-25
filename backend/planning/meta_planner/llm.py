@@ -115,7 +115,17 @@ def call_llm_structured(
                 text = text.rsplit("```", 1)[0] if "```" in text else text
                 text = text.strip()
 
-            return schema.model_validate_json(text)
+            try:
+                return schema.model_validate_json(text)
+            except Exception as parse_err:
+                logger.warning(
+                    "meta_planner LLM call attempt %d — Pydantic validation failed:\n"
+                    "  error=%s\n"
+                    "  raw_len=%d  raw_text=%s",
+                    attempt + 1, parse_err,
+                    len(text), text,
+                )
+                raise
 
         except Exception as exc:
             last_error = str(exc)
