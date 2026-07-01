@@ -54,7 +54,7 @@ def assemble_for_spawn(
     if cli.startswith("opencode"):
         from backend.backends.opencode_config import write_worktree_config
 
-        model = agent_config.get("model_preference") or "nvidia/openai/gpt-oss-120b"
+        model = agent_config.get("model_preference") or "litellm/gptoss-exec"
         agent_config_id = agent_config.get("agent_config_id", "")
         agent_name = agent_config_id.split(":", 1)[-1] if ":" in agent_config_id else "backend-executor"
         sys_prompt = agent_config.get("system_prompt", "")

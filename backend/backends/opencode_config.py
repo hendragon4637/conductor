@@ -35,7 +35,7 @@ def write_worktree_config(
 
     Args:
         worktree: Path to the worktree root.
-        model: Per-worktree model override (e.g. ``"openrouter/deepseek-v4-flash"``).
+        model: Per-worktree model override (e.g. ``"litellm/gptoss-exec"``).
         permissions: Permission dict (e.g. ``{"edit": "allow", "bash": {"*": "allow"}}``).
         appended_prompt: Additional instructions for this node (written to
             ``.conductor/NODE_BRIEF.md`` and referenced via ``{file:}`` syntax).
@@ -56,9 +56,13 @@ def write_worktree_config(
     written: dict[str, Any] = {}
 
     if not model and agent_type.startswith("opencode"):
-        model = "nvidia/openai/gpt-oss-120b"
+        model = "litellm/gptoss-exec"
 
     # ── opencode.json ──────────────────────────────────────────────────────
+    # NOTE: provider config lives in global ~/.config/opencode/opencode.json.
+    # The worktree only overrides model, permissions, agent, and instructions.
+    # Writing a provider block here would REPLACE the global provider config,
+    # losing model definitions (deepseek-planning, gptoss-exec, judge, etc.).
     oc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
     }

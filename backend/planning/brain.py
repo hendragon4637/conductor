@@ -1,83 +1,48 @@
 from __future__ import annotations
 
 import json
-import os
-import urllib.request
 from typing import Any, Callable
 
+from backend.llm.gateway import call as gateway_call
 from backend.planning.schema import Plan, PlanNode, NodeMember, TaskSpec, NodeSuccess, SuccessCriterion
 from backend.planning.spec import validate_plan as validate_plan_spec
-from backend.planning.model_selector import select_brain_model, budget_available
-
-
-# Default brain LLM endpoint — a local OpenAI-compatible server.
-BRAIN_ENDPOINT = os.environ.get(
-    "BRAIN_ENDPOINT",
-    "http://127.0.0.1:11434/v1/chat/completions",
-)
-BRAIN_MODEL = os.environ.get(
-    "BRAIN_MODEL",
-    "Qwen_Qwen3.5-9B-Q4_K_M.gguf",
-)
+from backend.planning.model_selector import budget_available
 
 
 def _call_llm(prompt: str, max_tokens: int = 8192) -> str:
-    """Call the brain LLM and return the raw response text.
+    """Call the brain LLM through the LiteLLM gateway and return the raw response.
 
     Includes budget-aware system prompt and truncation guard:
-    - Raises max_tokens cap to 8192 (was 4096)
     - Tells the model its output budget upfront
     - Detects ``finish_reason == "length"`` and retries with higher cap
     """
-    model_cfg = select_brain_model(task_hint=prompt[:100])
-    endpoint = model_cfg["endpoint"].rstrip("/")
-    if not endpoint.endswith("/chat/completions"):
-        endpoint += "/chat/completions"
-
     budget_prompt = (
         f"You have a maximum of {max_tokens} output tokens. Produce a COMPLETE, valid response within this budget. "
         "If the task is large, prioritize structural completeness (valid JSON / all required fields) over prose. "
         "Never stop mid-structure."
     )
 
-    body = {
-        "model": model_cfg["model"],
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a technical plan decomposition engine. "
-                    "You output ONLY valid JSON matching the requested schema. "
-                    "Never include explanations, markdown fences, or extra text. "
-                ) + budget_prompt,
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.1,
-        "max_tokens": max_tokens,
-    }
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        result = json.loads(resp.read())
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a technical plan decomposition engine. "
+                "You output ONLY valid JSON matching the requested schema. "
+                "Never include explanations, markdown fences, or extra text. "
+            ) + budget_prompt,
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    result = gateway_call("plan_brain", messages, temperature=0.1, max_tokens=max_tokens, timeout=120)
     content = result["choices"][0]["message"]["content"]
 
     finish_reason = result["choices"][0].get("finish_reason", "")
     if finish_reason == "length":
         retry_prompt = prompt + "\n\nYour previous response was truncated. Return a MORE COMPACT response."
-        body["messages"].append({"role": "assistant", "content": content})
-        body["messages"].append({"role": "user", "content": retry_prompt})
-        body["max_tokens"] = max_tokens * 2
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp2:
-            result2 = json.loads(resp2.read())
+        messages.append({"role": "assistant", "content": content})
+        messages.append({"role": "user", "content": retry_prompt})
+        result2 = gateway_call("plan_brain", messages, temperature=0.1, max_tokens=max_tokens * 2, timeout=120)
         content = result2["choices"][0]["message"]["content"]
 
     return content

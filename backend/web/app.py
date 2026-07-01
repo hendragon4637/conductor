@@ -48,6 +48,36 @@ app.add_middleware(
 async def health():
     return {"status": "ok", "service": "conductor-web"}
 
+
+# ── LiteLLM gateway health gate ─────────────────────────────────────────
+@app.on_event("startup")
+async def _check_litellm_gateway():
+    """Fail fast if the LiteLLM gateway is unreachable on startup."""
+    import urllib.request
+    import json
+
+    base = os.environ.get("LITELLM_BASE", "http://litellm:4000/v1")
+    health_url = base.rstrip("/").replace("/v1", "").replace("/v1/", "") + "/health/readiness"
+
+    # Strip any /chat/completions suffix
+    if health_url.endswith("/chat/completions"):
+        health_url = health_url.replace("/chat/completions", "")
+
+    try:
+        req = urllib.request.Request(health_url, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode())
+            if body.get("status") != "healthy":
+                print(f"WARNING: LiteLLM gateway at {health_url} returned: {body}", flush=True)
+            else:
+                print(f"LiteLLM gateway healthy at {health_url}", flush=True)
+    except Exception as exc:
+        print(
+            f"WARNING: LiteLLM gateway at {health_url} unreachable on startup: {exc}. "
+            f"LLM calls will fail until the gateway is available.",
+            flush=True,
+        )
+
 # ── Existing API routers (re-used as-is) ─────────────────────────────────
 app.include_router(projects_api.router)
 app.include_router(sessions_api.router)

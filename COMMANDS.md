@@ -73,13 +73,76 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. New migrat
 docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql
 ```
 
-## E2E test
+## E2E test (monolith)
 ```bash
 cd /opt/aipc/conductor && uv run python scripts/e2e_l2_test.py
 ```
 Cleans state: `bash /opt/aipc/conductor/scripts/clean_e2e_state.sh`
 
+## Microservices (event-driven architecture)
+
+### Restart all 4 microservices
+```bash
+# Load secrets once
+set -a; source /opt/aipc/scripts/load-secrets.sh; set +a
+
+# Each service sources its own .env + starts uvicorn in background
+for svc in executor watcher planner evaluator; do
+  fuser -k "809${svc}/tcp" 2>/dev/null || true
+  sleep 1
+  set -a
+  source /opt/aipc/conductor/services/${svc}/.env
+  set +a
+  cd /opt/aipc/conductor
+  setsid uv run uvicorn services.${svc}.main:app \
+    --host 0.0.0.0 --port 809${svc} \
+    > /tmp/${svc}-svc.log 2>&1 &
+  echo "${svc}-svc started on :809${svc} (PID $!)"
+done
+```
+
+Port mapping: executor=8091, watcher=8092, planner=8093, evaluator=8094.
+
+### Clean state + restart (microservice)
+```bash
+bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
+```
+One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 4 microservices. Health check runs at end.
+
+### Manual E2E cycle
+```bash
+# 1. Submit goal
+curl -s -X POST http://127.0.0.1:8093/goal \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_input":"<goal>","project_id":"default"}'
+
+# 2. Clarify (if goal needs refinement — returns formulated MetaGoal, re-invokes graph)
+curl -s -X POST http://127.0.0.1:8093/clarify/<plan_id> \
+  -H 'Content-Type: application/json' \
+  -d '{"clarification":"<your clarification text>","human_input":"<revised goal or spec>"}'
+
+# 3. Ratify (use plan_id from step 1)
+curl -s -X POST http://127.0.0.1:8093/ratify/<plan_id>
+
+# 4. Monitor cycle
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, run_id, node_id, verdict, gate_outcome, l2_score FROM node_sessions"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM outbox ORDER BY id"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM processed_events ORDER BY processed_at"
+```
+
+### Service logs
+```bash
+tail -f /tmp/executor-svc.log   # executor
+tail -f /tmp/watcher-svc.log    # watcher
+tail -f /tmp/planner-svc.log    # planner
+tail -f /tmp/evaluator-svc.log  # evaluator
+```
+
 ## Environment
 ```bash
-/opt/aipc/conductor/.env           # configuration (DB, Neo4j, LLM provider)
+/opt/aipc/conductor/.env                # monolith configuration (DB, Neo4j, LLM)
+/opt/aipc/conductor/services/*/.env     # per-microservice env overrides
 ```

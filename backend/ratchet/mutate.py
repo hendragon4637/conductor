@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any
 
-from backend.planning.brain import BRAIN_ENDPOINT, BRAIN_MODEL
+from backend.llm.gateway import call as gateway_call
 
 
 def _read_current_artifact(agent_config: str) -> dict[str, str]:
@@ -37,39 +37,25 @@ def _read_current_artifact(agent_config: str) -> dict[str, str]:
 
 
 def _llm_call(prompt: str) -> str:
-    import urllib.request
-
-    body = {
-        "model": BRAIN_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a skill-mutation engineer. "
-                    "Given an agent's current skill config and failing traces, "
-                    "propose a single targeted mutation that would fix the most "
-                    "common failure pattern.\n\n"
-                    "Rules:\n"
-                    "- Target ONE probabilistic artifact: skill, agents_md, or prompt.\n"
-                    "- NEVER change permission_template, engine, or model.\n"
-                    "- Output ONLY valid JSON with keys:\n"
-                    '  target: "skill" | "agents_md" | "prompt"\n'
-                    "  rationale: str\n"
-                    "  candidate: str (the full new content of that artifact)\n"
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 2048,
-    }
-    req = urllib.request.Request(
-        BRAIN_ENDPOINT,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        result = json.loads(resp.read())
+    result = gateway_call("plan_brain", [
+        {
+            "role": "system",
+            "content": (
+                "You are a skill-mutation engineer. "
+                "Given an agent's current skill config and failing traces, "
+                "propose a single targeted mutation that would fix the most "
+                "common failure pattern.\n\n"
+                "Rules:\n"
+                "- Target ONE probabilistic artifact: skill, agents_md, or prompt.\n"
+                "- NEVER change permission_template, engine, or model.\n"
+                "- Output ONLY valid JSON with keys:\n"
+                '  target: "skill" | "agents_md" | "prompt"\n'
+                "  rationale: str\n"
+                "  candidate: str (the full new content of that artifact)\n"
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ], temperature=0.3, max_tokens=2048, timeout=120)
 
     raw = result["choices"][0]["message"]["content"].strip()
     if raw.startswith("```"):

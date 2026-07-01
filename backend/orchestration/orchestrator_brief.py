@@ -123,6 +123,8 @@ def build_single_agent_lead_brief(
         f"- Complete the task directly in the workspace.",
         f"- Satisfy this success criterion exactly: {success}",
         "- Use the existing codebase patterns and keep changes focused.",
+        "- Do NOT ask clarifying questions or request approval. Decide autonomously and execute.",
+        "- You have full authority to create, modify, or delete files in the workspace.",
         "- When the task is complete, report completion succinctly and stop.",
         "",
         "DEPENDENCY CONTEXT (already-completed prior work):",

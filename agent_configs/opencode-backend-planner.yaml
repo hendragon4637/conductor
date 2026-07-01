@@ -44,7 +44,7 @@ allowed_tools:
 permission_policy:
   mode: auto_approve
 
-model_preference: openai/gpt-4o-mini
+model_preference: litellm/deepseek-planning
 
 routing_rules:
   pattern_hint: standalone

@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.request
 from typing import Any
+
+from backend.llm.gateway import call as gateway_call
 
 
 JURY_MODELS_RAW = os.environ.get(
     "JURY_MODELS",
     '["opencode/deepseek-v4-flash-free", "opencode/qwen-2.5-coder-32b"]',
-)
-JURY_ENDPOINT = os.environ.get(
-    "JURY_ENDPOINT",
-    os.environ.get("BRAIN_ENDPOINT", "http://127.0.0.1:8001/v3"),
 )
 JURY_TIMEOUT = 60.0
 
@@ -26,24 +23,12 @@ JUDGE_USER_PROMPT = "Rubric item: {rubric_item}\n\nArtifact:\n{artifact}"
 
 
 def _call_model(model: str, prompt: str) -> dict[str, Any]:
-    """Call a single model and return the parsed response."""
-    body = {
-        "model": model,
-        "messages": [
+    """Call a single model through the LiteLLM gateway and return parsed response."""
+    try:
+        result = gateway_call("l3_jury", [
             {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 256,
-    }
-    try:
-        req = urllib.request.Request(
-            JURY_ENDPOINT,
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=JURY_TIMEOUT) as resp:
-            result = json.loads(resp.read())
+        ], temperature=0.0, max_tokens=256, timeout=JURY_TIMEOUT)
         raw = result["choices"][0]["message"]["content"].strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1]

@@ -1,23 +1,19 @@
 """Shared LLM utility for meta-planner stages.
 
 All three stages (goal-formulator, decomposer, check-generator) use the same
-model role (``meta_planner``) from ``config/brain_models.json``, and the same
+model role (``meta_planner``) from the LiteLLM gateway, and the same
 ``call_llm_structured`` helper that parses JSON into a Pydantic model.
-
-Config-driven so the model is swappable without code changes.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-import urllib.request
 from typing import TypeVar
 
 from pydantic import BaseModel
 
-from backend.planning.model_selector import get_brain_model
+from backend.llm.gateway import call as gateway_call
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +24,8 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def get_meta_planner_model() -> dict:
-    """Resolve the meta_planner model config (primary → fallback).
-
-    Returns:
-        dict with ``provider``, ``model``, ``base_url`` keys.
-    """
-    return dict(get_brain_model("meta_planner"))
+    """Return a marker dict for backward-compatible callers."""
+    return {"provider": "litellm", "model": "deepseek-planning", "base_url": "http://litellm:4000/v1"}
 
 
 def call_llm_structured(
@@ -43,13 +35,12 @@ def call_llm_structured(
     temperature: float = 0.1,
     max_tokens: int = 8192,
 ) -> T:
-    """Call the meta-planner LLM and parse the response as a Pydantic model.
+    """Call the meta-planner LLM through the LiteLLM gateway and parse the response.
 
     Args:
         prompt: The full prompt (system + user instructions).
         schema: The Pydantic model class to parse the response into.
-        model_cfg: Optional model config (from ``get_meta_planner_model()``).
-            If omitted, resolves the model dynamically.
+        model_cfg: Ignored (kept for backward compat). Always uses gateway.
         temperature: LLM temperature (default 0.1 for deterministic output).
         max_tokens: Maximum output tokens.
 
@@ -59,13 +50,6 @@ def call_llm_structured(
     Raises:
         RuntimeError: If the LLM response cannot be parsed after retries.
     """
-    if model_cfg is None:
-        model_cfg = get_meta_planner_model()
-
-    base_url = model_cfg["base_url"].rstrip("/")
-    if not base_url.endswith("/chat/completions"):
-        base_url += "/chat/completions"
-
     schema_desc = _schema_description(schema)
 
     system_msg = (
@@ -75,40 +59,16 @@ def call_llm_structured(
         f"The expected JSON schema is: {schema_desc}"
     )
 
-    body = {
-        "model": model_cfg["model"],
-        "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "conductor-meta-planner/1.0",
-    }
-    api_key_env = model_cfg.get("api_key_env")
-    if api_key_env:
-        api_key = os.environ.get(api_key_env, "")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
     last_error: str | None = None
 
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            req = urllib.request.Request(
-                base_url,
-                data=json.dumps(body).encode(),
-                headers=headers,
-            )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                result = json.loads(resp.read())
+            result = gateway_call("meta_planner", [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ], temperature=temperature, max_tokens=max_tokens)
             raw = result["choices"][0]["message"]["content"]
 
-            # Strip markdown fences if present
             text = raw.strip()
             if text.startswith("```"):
                 text = text.split("\n", 1)[1] if "\n" in text else text[3:]
@@ -134,16 +94,7 @@ def call_llm_structured(
                 attempt + 1, last_error,
             )
             if attempt < _MAX_RETRIES:
-                # Append error context and retry
-                body["messages"].append({
-                    "role": "user",
-                    "content": (
-                        f"Your previous response failed validation: {last_error}. "
-                        "Return ONLY valid JSON matching the schema. "
-                        "No markdown, no explanation."
-                    ),
-                })
-                body["max_tokens"] = max_tokens * 2
+                pass
 
     raise RuntimeError(
         f"meta_planner LLM failed after {_MAX_RETRIES + 1} attempts: {last_error}"

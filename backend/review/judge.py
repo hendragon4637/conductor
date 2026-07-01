@@ -4,16 +4,14 @@ import json
 import os
 from typing import Any, Callable
 
-from backend.planning.brain import BRAIN_ENDPOINT, BRAIN_MODEL
+from backend.llm.gateway import call as gateway_call
 
 VLM_ENABLED = os.environ.get("VLM_ENABLED", "").lower() in ("1", "true", "yes")
 
 
 def _default_llm(prompt: str) -> str:
-    import urllib.request
-    body = {
-        "model": BRAIN_MODEL,
-        "messages": [
+    try:
+        result = gateway_call("l2_judge", [
             {
                 "role": "system",
                 "content": (
@@ -23,23 +21,12 @@ def _default_llm(prompt: str) -> str:
                 ),
             },
             {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 512,
-    }
-    req = urllib.request.Request(
-        BRAIN_ENDPOINT,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read())
+        ], temperature=0.1, max_tokens=512, timeout=60)
     except Exception as exc:
         return json.dumps({
             "score": 0.5,
             "pass": None,
-            "reason": f"LLM judge unavailable: {exc}",
+            "reason": f"LLM judge unavailable via gateway: {exc}",
         })
     raw = result["choices"][0]["message"]["content"].strip()
     if raw.startswith("```"):

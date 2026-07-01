@@ -186,6 +186,7 @@ Valid agent_config_id values (use these EXACT strings, nothing else):
 Recalled memory context:
 {memory}
 
+{revision_block}
 Now produce the PlanDAG JSON."""
 
 
@@ -197,8 +198,14 @@ def decompose(
     quality_intent: str = "",
     memory: str = "",
     domain: str | None = None,
+    feedback: str = "",
+    prior_dag: list | None = None,
 ) -> PlanDAG:
     """Meta-goal → PlanDAG (LLM call #2).
+
+    When called on a revision cycle, ``feedback`` and ``prior_dag`` carry the
+    gate evaluator's failure diagnosis and the previous attempt's DAG, so the
+    LLM can fix specific issues rather than regenerating from scratch.
 
     Args:
         goal: Normalized one-sentence objective from the goal formulator.
@@ -206,6 +213,9 @@ def decompose(
         quality_intent: Quality guidance (passed through to check-gen later).
         memory: Optional recalled memory context.
         domain: Optional domain filter for agent_config roster.
+        feedback: Gate evaluator feedback text from the previous attempt
+            (empty on first call).
+        prior_dag: Previous attempt's DAG node list (None on first call).
 
     Returns:
         A validated ``PlanDAG`` with real agent_config references.
@@ -218,6 +228,29 @@ def decompose(
     roster_str = json.dumps(roster, indent=2) if roster else "(no agent configs available)"
     valid_ids_str = "\n".join(f"  - {r['agent_config_id']}" for r in roster) if roster else "  (none)"
 
+    # Build revision block if this is a re-decompose cycle
+    revision_block = ""
+    if feedback or prior_dag:
+        parts = []
+        if prior_dag:
+            import json as _json
+            parts.append(
+                "PREVIOUS DAG (failed gate evaluation):\n"
+                + _json.dumps(prior_dag, indent=2)
+            )
+        if feedback:
+            parts.append(
+                "GATE FEEDBACK — address these failures:\n"
+                + feedback
+            )
+        parts.append(
+            "Fix each failure above. Keep the node structure that worked; "
+            "only change what needs fixing. Do NOT regenerate from scratch "
+            "— retain good node boundaries, dependencies, and agent assignments "
+            "from the previous DAG where they still satisfy the goal."
+        )
+        revision_block = "\n\n".join(parts)
+
     prompt = DECOMPOSE_PROMPT.format(
         goal=goal,
         spec=spec or "(none specified)",
@@ -225,6 +258,7 @@ def decompose(
         roster=roster_str,
         valid_ids=valid_ids_str,
         memory=memory or "(none)",
+        revision_block=revision_block,
     )
 
     dag = call_llm_structured(prompt, schema=PlanDAG)

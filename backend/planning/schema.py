@@ -58,6 +58,10 @@ class PlanNode(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     task: TaskSpec = Field(default_factory=lambda: TaskSpec(text=""))
     success: NodeSuccess = Field(default_factory=lambda: NodeSuccess(text=""))
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description="Capability names this node requires (populated by capability selector, post-decompose).",
+    )
     checks: list[Check] = Field(
         default_factory=list,
         description="Evaluation checks (L1 deterministic + L2 rubric). Generated at decompose, ratified at approval.",

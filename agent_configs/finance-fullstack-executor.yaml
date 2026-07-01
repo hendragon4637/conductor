@@ -50,7 +50,7 @@ allowed_tools:
 permission_policy:
   mode: auto_approve
 
-model_preference: deepseek/deepseek-chat
+model_preference: litellm/gptoss-exec
 
 routing_rules:
   pattern_hint: standalone

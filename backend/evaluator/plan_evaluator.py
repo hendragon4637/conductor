@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 
 L1_STRUCTURAL_RUBRIC = "plan_structure"
 
-# ── Capability inference for staffing gate (File 03) ──────────────────
+# ── Capability-aware staffing gate (File 03/04) ─────────────────────
 
-# Domain→role→capability mapping (starter, inferred from agent_config fields)
+# Domain→role→capability mapping (retained as fallback for legacy agent_configs)
 _CAPABILITY_MAP: dict[str, dict[str, list[str]]] = {
     "backend": {
         "executor": ["backend", "tests"],
@@ -37,8 +37,8 @@ _CAPABILITY_MAP: dict[str, dict[str, list[str]]] = {
     },
     "finance": {
         "executor": ["fullstack", "backend", "frontend", "tests"],
-        "planner": ["planning", "finance"],
-        "reviewer": ["review", "finance"],
+        "planner": ["planning", "finance", "backend"],
+        "reviewer": ["review", "finance", "backend", "tests"],
     },
     "fullstack": {
         "executor": ["fullstack", "backend", "frontend", "tests"],
@@ -55,112 +55,133 @@ def _get_db_url() -> str:
     return os.environ["DATABASE_URL"]
 
 
-def infer_agent_config_capabilities(agent_config_id: str, domain: str = "", role: str = "") -> list[str]:
-    """Return capability tag list for an agent_config.
+# In-memory fallback for agent config capabilities (mirrors scripts/seed_agent_configs.py)
+_FALLBACK_AC_CAPS: dict[str, list[str]] = {
+    "software-fullstack-executor": ["frontend", "backend_api", "cli_tool", "generic"],
+    "backend-api-executor": ["backend_api", "cli_tool", "generic"],
+    "data-executor": ["data_pipeline", "analytics_assistant", "generic"],
+    "research-writer": ["research_report", "generic"],
+    "code-reviewer": ["backend_api", "frontend", "cli_tool", "research_report", "generic"],
+    "l4-persona": [],
+}
 
-    Tries the database first (``agent_configs.capability_summary`` column if it
-    exists), then falls back to the static ``_CAPABILITY_MAP`` keyed by
-    domain+role.
+_FALLBACK_AC_TOOLS: dict[str, list[str]] = {
+    "software-fullstack-executor": ["write_file", "shell", "browser"],
+    "backend-api-executor": ["write_file", "shell"],
+    "data-executor": ["write_file", "shell", "read_data"],
+    "research-writer": ["read_web", "write_file"],
+    "code-reviewer": ["read_file", "shell", "browser"],
+    "l4-persona": ["browser", "shell", "http", "read_file"],
+}
 
-    Args:
-        agent_config_id: The agent config identifier (used for DB lookup).
-        domain: Domain override (skips DB if provided).
-        role: Role override.
 
-    Returns:
-        List of capability tags (e.g. ``["backend", "tests"]``).
-    """
-    # If domain+role provided directly, use the static map first
-    if domain and role:
-        return _CAPABILITY_MAP.get(domain, {}).get(role, _CAPABILITY_MAP.get("general", {}).get(role, ["general"]))
-
-    # Try DB query for the full row
+def _get_agent_config_capabilities(agent_config_id: str) -> list[str]:
     try:
         dsn = _get_db_url()
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT domain, role FROM agent_configs WHERE agent_config_id = %s AND active = TRUE",
+                "SELECT new_capabilities, domain, role FROM agent_configs WHERE agent_config_id = %s AND active = TRUE",
                 (agent_config_id,),
             )
             row = cur.fetchone()
             if row:
-                domain_val, role_val = row[0], row[1]
-                return _CAPABILITY_MAP.get(domain_val, {}).get(role_val, _CAPABILITY_MAP.get("general", {}).get(role_val, ["general"]))
+                new_caps, domain, role = row[0], row[1], row[2]
+                if new_caps and isinstance(new_caps, (list, str)):
+                    if isinstance(new_caps, str):
+                        import json
+                        new_caps = json.loads(new_caps)
+                    if new_caps:
+                        return new_caps
+                return _CAPABILITY_MAP.get(domain, {}).get(role, _CAPABILITY_MAP.get("general", {}).get(role, ["general"]))
     except Exception:
         logger.debug("Failed to query agent_config '%s' for capabilities", agent_config_id)
+    return _FALLBACK_AC_CAPS.get(agent_config_id, ["general"])
 
-    return ["general"]
+
+def _get_agent_config_tools(agent_config_id: str) -> list[str]:
+    try:
+        dsn = _get_db_url()
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT tools FROM agent_configs WHERE agent_config_id = %s AND active = TRUE",
+                (agent_config_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                tools = row[0]
+                if isinstance(tools, str):
+                    import json
+                    tools = json.loads(tools)
+                if isinstance(tools, list):
+                    return tools
+    except Exception:
+        logger.debug("Failed to query agent_config '%s' for tools", agent_config_id)
+    return _FALLBACK_AC_TOOLS.get(agent_config_id, [])
 
 
-def staffing_view(dag: list[dict]) -> list[dict]:
-    """Build a staffing view of the DAG: node→agent_config→capabilities.
+def staffing_check(node: dict) -> list[str]:
+    """Two set-checks for a single node: realizability + coverage.
 
-    Each entry contains the node id, the assigned agent_config, its role,
-    backend type, inferred capability tags, and the node's task text.
+    1. Realizability: every capability's required_tools ⊆ backend.tools
+    2. Coverage: node.capabilities ⊆ agent_config.new_capabilities
 
-    Args:
-        dag: List of node dicts with ``members``, ``task``.
-
-    Returns:
-        List of dicts, one per (node, member) pair.
+    Returns list of failure strings (empty = node passes staffing).
     """
-    view: list[dict] = []
-    for n in dag:
-        nid = n.get("id", "?")
-        task_text = n.get("task", {}).get("text", "")
-        for m in (n.get("members") or []):
-            ac_id = m.get("agent_config", "")
-            view.append({
-                "node": nid,
-                "agent_config": ac_id,
-                "role": m.get("role", ""),
-                "backend": m.get("backend", ""),
-                "capabilities": infer_agent_config_capabilities(ac_id),
-                "node_task": task_text,
-            })
-    return view
+    from backend.planning.capability.harness_profiles import HARNESS_PROFILES
+    from backend.planning.capability.registry import get_capability
 
+    fails: list[str] = []
+    cap_names = node.get("capabilities", [])
+    if not cap_names:
+        return fails
 
-def _infer_required_caps(task_text: str) -> set[str]:
-    """Infer required capabilities from node task text (keyword-based).
+    backend = "opencode"
+    agent_config_id = "opencode:backend-executor"
+    if node.get("members"):
+        backend = node["members"][0].get("backend", backend)
+        agent_config_id = node["members"][0].get("agent_config", agent_config_id)
 
-    Returns a set of capability tags the task likely needs.
-    """
-    lower = task_text.lower()
-    required: set[str] = set()
-    if any(kw in lower for kw in ("frontend", "ui", "html", "css", "javascript", "react", "vue", "angular", "web page", "user interface", "dashboard")):
-        required.add("frontend")
-    if any(kw in lower for kw in ("backend", "api", "endpoint", "server", "database", "fastapi", "flask", "django")):
-        required.add("backend")
-    if any(kw in lower for kw in ("test", "pytest", "unittest")):
-        required.add("tests")
-    if any(kw in lower for kw in ("fullstack", "full-stack", "full stack")):
-        required.add("fullstack")
-    if any(kw in lower for kw in ("cli", "command", "shell", "terminal")):
-        required.add("cli")
-    if any(kw in lower for kw in ("data", "pipeline", "etl", "csv", "analysis")):
-        required.add("data")
-    return required
+    # Fetch capability definitions to check required_tools
+    caps = [get_capability(n) for n in cap_names]
+    caps = [c for c in caps if c is not None]
+
+    # (1) Realizability: capability required_tools ⊆ backend tools
+    backend_tools = set(HARNESS_PROFILES.get(backend, {}).get("tools", []))
+    for cap in caps:
+        required = set(cap.get("required_tools", []))
+        if not required:
+            continue
+        missing = required - backend_tools
+        if missing:
+            fails.append(
+                f"{node.get('id', '?')}: {cap['name']} needs tools {missing} "
+                f"but backend '{backend}' does not provide them"
+            )
+
+    # (2) Coverage: node capabilities ⊆ agent_config capabilities
+    ac_caps = set(_get_agent_config_capabilities(agent_config_id))
+    node_caps = set(cap_names)
+    uncovered = node_caps - ac_caps
+    if uncovered:
+        fails.append(
+            f"{node.get('id', '?')}: node requires capabilities {uncovered} "
+            f"but '{agent_config_id}' does not declare them"
+        )
+
+    return fails
 
 
 def staffing_l1(dag: list[dict]) -> list[str]:
-    """Deterministic L1 staffing check: catch obvious mismatches.
+    """Run staffing set-checks across all nodes in the DAG.
 
-    For each node, infers required capabilities from the task text and
-    checks whether the assigned agent_config has at least one matching tag.
-
-    Returns:
-        List of failure description strings (empty = all nodes staffed OK).
+    For each node, checks (1) tool realizability and (2) capability coverage.
+    Uses the new capability model when available, falls back to keyword-based
+    inference for legacy nodes.
     """
-    fails: list[str] = []
-    for s in staffing_view(dag):
-        required = _infer_required_caps(s["node_task"])
-        if required and not (required & set(s["capabilities"])):
-            fails.append(
-                f"{s['node']}: task needs {required} but '{s['agent_config']}' "
-                f"has capabilities {s['capabilities']}"
-            )
-    return fails
+    all_fails: list[str] = []
+    for n in dag:
+        all_fails.extend(staffing_check(n))
+    return all_fails
 
 
 # ── plan_l2 response schema ─────────────────────────────────────────
@@ -271,6 +292,14 @@ def _validate_l1_check_ids(dag: list[dict]) -> list[dict]:
     """
     from backend.planning.meta_planner.check_generator import get_valid_l1_ids
     valid_ids = get_valid_l1_ids()
+    try:
+        from backend.planning.capability.registry import all_capabilities
+        for cap in all_capabilities():
+            for dim in cap.get("quality_dimensions") or []:
+                if dim.get("id"):
+                    valid_ids.add(dim["id"])
+    except Exception:
+        pass
     hallucinations: list[dict] = []
     for n in dag:
         nid = n.get("id", "?")
@@ -410,6 +439,7 @@ def plan_l2(
             {"id": "measurable", "rubric_item": "Does each node have a measurable success criterion?", "weight": 1.0},
             {"id": "checks_scoped", "rubric_item": "Is each node's checks scoped to its task (no irrelevant checks on unrelated nodes)?", "weight": 1.0},
             {"id": "staffing_capable", "rubric_item": "Is each node staffed by an agent_config actually capable of its task (no strategic-operational mismatch)?", "weight": 2.0},
+            {"id": "checks_match_capabilities", "rubric_item": "Do each node's checks match its capabilities' dimensions (objective -> L1, subjective -> L2)?", "weight": 1.5},
         ],
     }
 
@@ -432,10 +462,10 @@ def plan_l2(
         for item in rubric["items"]
     )
 
-    staffing = staffing_view(dag)
     staffing_text = "\n".join(
-        f"  {s['node']}: {s['agent_config']} (caps: {s['capabilities']}, task: {s['node_task'][:100]})"
-        for s in staffing
+        f"  {n.get('id', '?')}: member={n.get('members', [{}])[0].get('agent_config', '?')}, "
+        f"node_caps={n.get('capabilities', [])}, task={n.get('task', {}).get('text', '')[:100]}"
+        for n in dag
     )
 
     prompt = PLAN_JUDGE_PROMPT.format(

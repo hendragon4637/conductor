@@ -11,3 +11,5 @@ build/
 .idea/
 .vscode/
 uv.lock.bak
+workspace/
+LITELLM_BUILD_LOG.md

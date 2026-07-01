@@ -19,16 +19,16 @@ from backend.worktree import WorktreeManager, assemble_for_spawn
 
 ORCHESTRATOR_MODEL_PRIMARY = os.environ.get(
     "ORCHESTRATOR_MODEL_PRIMARY",
-    "opencode/deepseek-v4-flash-free",
+    "litellm/deepseek-planning",
 )
 ORCHESTRATOR_MODEL_FALLBACK = os.environ.get(
     "ORCHESTRATOR_MODEL_FALLBACK",
-    "",
+    "litellm/gptoss-exec",
 )
 
 
 def _normalize_model(model: str | None) -> str:
-    return model or "nvidia/openai/gpt-oss-120b"
+    return model or "litellm/gptoss-exec"
 
 
 def _orchestrator_permission_profile() -> dict[str, Any]:
@@ -360,9 +360,10 @@ def _spawn_single_member_team(
     if not cfg:
         raise ValueError(f"Agent config {member_id} not found in DB")
 
+    engine = cfg.get("cli") or (cfg.get("execution") or {}).get("backend", "opencode")
     assemble_for_spawn(
         worktree=wt,
-        cli=cfg["cli"],
+        cli=engine,
         agent_config=cfg,
         project_id=project_id,
         session_id=session_id,
@@ -381,7 +382,7 @@ def _spawn_single_member_team(
         agents=[{
             "name": f"{cfg['agent_config_id']} ({cfg['role']})",
             "role": "lead",
-            "backend": cfg["cli"],
+            "backend": engine,
             "model": _normalize_model(cfg.get("model_preference")),
         }],
     )

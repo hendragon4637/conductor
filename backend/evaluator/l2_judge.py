@@ -16,17 +16,7 @@ from typing import Any, Callable
 
 from backend.evaluator.schema import Check, Judgment
 
-# ── Judge model config (mirrors plan brain selector pattern) ────────────────
-JUDGE_MODEL_PRIMARY = os.environ.get(
-    "JUDGE_MODEL_PRIMARY",
-    "deepseek-v4-flash-free",
-)
-JUDGE_MODEL_FALLBACK = os.environ.get("JUDGE_MODEL_FALLBACK", "nemotron-3-ultra-free")
-JUDGE_ENDPOINT = os.environ.get(
-    "JUDGE_ENDPOINT",
-    os.environ.get("BRAIN_ENDPOINT", "https://opencode.ai/zen/v1/chat/completions"),
-)
-JUDGE_API_KEY_ENV = os.environ.get("JUDGE_API_KEY_ENV", "OPENCODE_ZEN_API_KEY")
+# ── Judge model config (now via LiteLLM gateway) ────────────────────────────
 JUDGE_TIMEOUT = 120.0
 
 # L2 input-size guard — oversized artifacts trigger a flag-fail instead of truncation
@@ -204,61 +194,20 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS) -> str:
 # ── Judge model call ─────────────────────────────────────────────────────────
 
 def _default_judge_llm(prompt: str) -> str:
-    """Call the judge model. Falls back to local model if primary is unreachable."""
-    import urllib.request
+    """Call the judge model through the LiteLLM gateway."""
+    from backend.llm.gateway import call as gateway_call
 
-    api_key = os.environ.get(JUDGE_API_KEY_ENV, "")
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "conductor-l2-judge/1.0",
-    }
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    model = JUDGE_MODEL_PRIMARY
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 2048,
-    }
-
-    print(f"[L2] LLM request: model={model} endpoint={JUDGE_ENDPOINT} prompt_preview={prompt[:300]}", flush=True)
+    print(f"[L2] LLM request via gateway: role=l2_judge prompt_preview={prompt[:300]}", flush=True)
 
     try:
-        req = urllib.request.Request(
-            JUDGE_ENDPOINT,
-            data=json.dumps(body).encode(),
-            headers=headers,
-        )
-        with urllib.request.urlopen(req, timeout=JUDGE_TIMEOUT) as resp:
-            result = json.loads(resp.read())
-    except Exception as primary_exc:
-        if JUDGE_MODEL_FALLBACK:
-            print(f"[L2] Primary model {model} failed, falling back to {JUDGE_MODEL_FALLBACK}: {primary_exc}", flush=True)
-            body["model"] = JUDGE_MODEL_FALLBACK
-            try:
-                req = urllib.request.Request(
-                    JUDGE_ENDPOINT,
-                    data=json.dumps(body).encode(),
-                    headers=headers,
-                )
-                with urllib.request.urlopen(req, timeout=JUDGE_TIMEOUT) as resp:
-                    result = json.loads(resp.read())
-            except Exception as fallback_exc:
-                raise JudgeUnavailableError(
-                    f"All judge models unavailable. "
-                    f"Primary ({JUDGE_MODEL_PRIMARY}): {primary_exc}. "
-                    f"Fallback ({JUDGE_MODEL_FALLBACK}): {fallback_exc}."
-                ) from fallback_exc
-        else:
-            raise JudgeUnavailableError(
-                f"Primary judge model ({JUDGE_MODEL_PRIMARY}) unavailable: {primary_exc}. "
-                f"No fallback configured."
-            ) from primary_exc
+        result = gateway_call("l2_judge", [
+            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ], temperature=0.0, max_tokens=2048, timeout=JUDGE_TIMEOUT)
+    except Exception as exc:
+        raise JudgeUnavailableError(
+            f"Judge model unavailable via LiteLLM gateway: {exc}"
+        ) from exc
 
     msg = result["choices"][0]["message"]
     raw = (msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or "").strip()

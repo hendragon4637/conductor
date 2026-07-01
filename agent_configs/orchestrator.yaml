@@ -67,7 +67,7 @@ allowed_tools:
 permission_policy:
   mode: auto_approve
 
-model_preference: opencode/deepseek-v4-flash-free
+model_preference: litellm/deepseek-planning
 
 routing_rules:
   pattern_hint: standalone

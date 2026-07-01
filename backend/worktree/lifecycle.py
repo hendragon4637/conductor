@@ -52,8 +52,44 @@ def _get_run(run_id: str) -> dict[str, Any] | None:
             return cur.fetchone()
 
 
-def _run_branch(run: dict[str, Any]) -> str:
-    return f"run/{run['plan_id']}/{run['id']}"
+def _get_plan(plan_id: str) -> dict[str, Any] | None:
+    import psycopg
+    from psycopg.rows import dict_row
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT * FROM plans WHERE plan_id = %s", (plan_id,))
+            return cur.fetchone()
+
+
+def _get_active_worktree_root(run_id: str) -> str | None:
+    """Find a worktree path from node_sessions for this run.
+
+    Returns the most recent node session's worktree (highest attempt).
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT worktree FROM node_sessions
+                   WHERE run_id = %s AND worktree IS NOT NULL
+                   ORDER BY attempt DESC LIMIT 1""",
+                (run_id,),
+            )
+            row = cur.fetchone()
+            return row["worktree"] if row else None
+
+
+def _get_worktree_branch(worktree_root: str) -> str:
+    """Read the actual git branch name from an existing worktree."""
+    result = subprocess.run(
+        ["git", "-C", worktree_root, "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, timeout=30,
+    )
+    result.check_returncode()
+    return result.stdout.strip()
 
 
 def _project_main(run: dict[str, Any], workspace_root: str) -> str:
@@ -64,14 +100,9 @@ def _project_main(run: dict[str, Any], workspace_root: str) -> str:
 
 def _git_merge(project_dir: str, branch: str, message: str) -> str:
     """Merge ``branch`` into the current branch of ``project_dir``."""
-    # Fetch the branch reference
+    # Checkout master (or the default branch)
     subprocess.run(
-        ["git", "-C", project_dir, "fetch", ".", f"{branch}:{branch}"],
-        check=True, capture_output=True, timeout=30,
-    )
-    # Checkout main (or the default branch)
-    subprocess.run(
-        ["git", "-C", project_dir, "checkout", "main"],
+        ["git", "-C", project_dir, "checkout", "master"],
         check=True, capture_output=True, timeout=30,
     )
     # Merge
@@ -134,9 +165,16 @@ def finalize_success(run_id: str, workspace_root: str | None = None) -> dict[str
     if not run:
         raise ValueError(f"Run {run_id} not found")
 
-    project_id = run.get("plan_id", "default")
-    branch = _run_branch(run)
+    plan = _get_plan(run["plan_id"])
+    project_id = plan["project_id"] if plan else run.get("plan_id", "default")
     project_dir = str(Path(_wsr) / project_id)
+
+    worktree_root = _get_active_worktree_root(run_id)
+    if not worktree_root:
+        raise ValueError(
+            f"No worktree found for run {run_id} in node_sessions"
+        )
+    branch = _get_worktree_branch(worktree_root)
 
     goal = run.get("note") or f"run {run_id}"
     merge_msg = f"run {run_id}: {goal}"
@@ -179,10 +217,18 @@ def finalize_failure(run_id: str, reason: str, workspace_root: str | None = None
     if not run:
         raise ValueError(f"Run {run_id} not found")
 
-    project_id = run.get("plan_id", "default")
-    branch = _run_branch(run)
-    tag = f"failed/{run['plan_id']}/{run_id}"
+    plan = _get_plan(run["plan_id"])
+    project_id = plan["project_id"] if plan else run.get("plan_id", "default")
     project_dir = str(Path(_wsr) / project_id)
+
+    worktree_root = _get_active_worktree_root(run_id)
+    if worktree_root:
+        branch = _get_worktree_branch(worktree_root)
+    else:
+        logger.warning("No worktree found for run %s in node_sessions", run_id)
+        branch = f"run/{run['plan_id']}/{run_id}"
+
+    tag = f"failed/{run['plan_id']}/{run_id}"
 
     # Tag the failed state (preserves exact state for debugging)
     try:
@@ -192,7 +238,7 @@ def finalize_failure(run_id: str, reason: str, workspace_root: str | None = None
         logger.warning("Failed to tag run %s: %s", run_id, exc)
 
     # Quarantine worktree
-    worktree_root = run.get("worktree_root")
+    worktree_root = worktree_root or run.get("worktree_root")
     if worktree_root and Path(worktree_root).exists():
         try:
             _quarantine_worktree(worktree_root, project_id, run_id)

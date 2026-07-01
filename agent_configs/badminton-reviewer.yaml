@@ -43,7 +43,7 @@ allowed_tools:
 permission_policy:
   mode: auto_approve
 
-model_preference: nvidia/openai/gpt-oss-120b
+model_preference: litellm/judge
 
 routing_rules:
   pattern_hint: standalone

@@ -1,55 +1,8 @@
 # Conductor — assembled context (do not edit; regenerate via .memory/assemble.sh)
 
 ## Locked decisions (ACTIVE only)
-## 2026-06-11 — Three-tier control architecture
-## 2026-06-11 — Deterministic watcher verdict (ratchet model)
-## 2026-06-11 — Thread-scoped settings, DB-persisted chat
-## 2026-06-11 — Dict-based DB row access (dict_row pattern)
-## 2026-06-11 — Plan persistence survives restarts
-## 2026-06-11 — Memory management = files+git (meta), Graphiti (product), Obsidian (human)
-## 2026-06-11 — Memory lifecycle: auto-capture, gated promotion, decay-forget
-## 2026-06-11 — Meta-Evaluator: separation of detection vs evaluation
-## 2026-06-11 — Evaluator: L1 before L2, one generalist judge with preset rubrics
-## 2026-06-11 — Evaluator: candidate checks generated at decompose, ratified at plan approval
-## 2026-06-12 — Ratchet: consumes evaluator score, not watcher verdict
-## 2026-06-12 — Ratchet: frozen-boundary safety (probabilistic-only mutations)
-## 2026-06-12 — Ratchet: scope gating for global vs project mutations
-## 2026-06-12 — Ratchet: held-out validation for generalisation
-## 2026-06-12 — L3 meta-evaluation: golden set anchor + jury calibration
-## 2026-06-12 — L4 persona simulation: black-box usage UX friction detection
-## 2026-06-12 — Memory ↔ Evaluator integration: bidirectional learning loop
-## 2026-06-12 — MCP server topology: AIPC serves, human PC consumes
-## 2026-06-12 — Automated decomposition: memory-grounded check generation at plan time
-## 2026-06-14 — Hermes execution-tier alongside AionUi
-## 2026-06-14 — MCP tool naming: hyphens over dots
-## 2026-06-16 — Nvidia model for opencode backend executor
-## 2026-06-16 — Sequential capstone execution via PLANS_SELECTION
-## 2026-06-14 — MCP auth middleware: app.add_middleware() pattern
-## 2026-06-16 — Node entry point depends on team size
-## 2026-06-16 — Obsidian repomix export is chunked
-## 2026-06-16 — Backend e2e runtime = single backend process on :8090
-## 2026-06-16 — Evaluator config prefers NVIDIA for gpt-oss-120b
-## 2026-06-18 — Multi-node advancement: pre-create node_sessions for all DAG nodes
-## 2026-06-19 — L3 calibration: golden-set anchored jury, periodic drift detection
-## 2026-06-19 — Ratchet: frozen-boundary safety, scope-gated mutations, held-out validation
-## 2026-06-19 — Plan evaluator: structural L1 + plan-rubric L2 for pre-execution gating
-## 2026-06-19 — L4 two-case simulation: standalone + acceptance with common engine
-## 2026-06-20 — L2 judge model: deepseek-v4-flash-free as primary
-## 2026-06-20 — L1 check scope boundaries (no runtime leaks)
-## 2026-06-20 — Remediation flow with verbal feedback (reflection)
-## 2026-06-20 — Watcher logger handler fix
-## 2026-06-23 — L1 strict selection from canonical presets (no LLM rewording)
-## 2026-06-23 — `_persist_plan_dag()` preserves LLM-generated checks
-## 2026-06-23 — LLM outputs placeholder `check_cmd`, system resolves it
-## 2026-06-23 — Plan evaluator validates L1 check IDs against canonical pool
-## 2026-06-23 — `Check.tier` is a computed `@property`
-## 2026-06-23 — Debug logging on Pydantic validation failure in LLM calls
-## 2026-06-25 — Domain profile system (File 01)
-## 2026-06-25 — Convention injection at formulation (File 02)
-## 2026-06-25 — Capability-aware staffing gate (File 03)
-## 2026-06-25 — Agent config generation-on-miss (File 04)
-## 2026-06-25 — Domain profile fallback tiers (seed before generic)
-## 2026-06-25 — `_persist_plan_clarification` ensures project exists
+## 2026-06-30 — Microservice event-driven architecture (RabbitMQ + transactional outbox)
+## 2026-06-30 — Microservice ports and service boundaries
 
 ## Glossary
 # Project Glossary
@@ -111,6 +64,18 @@
 | **ExperimentResult** | Output from `run_experiment()`: agent_config_id, node_type, mutation applied (bool), validated without regression (bool), scope (project/global), winner text, experiment_id, mutation_id, heldout results. |
 | **Mutation** | A candidate agent config edit produced by `propose_mutation()`. Contains the target field, old text, new text, and a rationale string summarizing the failure cluster. |
 | **Pattern** | A mined failure cluster from `mine_failures()`: rubric_item, fail_count, example artifacts (list), and a synthesized pattern description. Input to `propose_mutation()`. |
+| **EventBus** | RabbitMQ topic exchange (`conductor.events`) with per-service durable queues (`planner.q`, `executor.q`, `watcher.q`, `evaluator.q`). Each queue binds to routing keys matching the events its service consumes. |
+| **Transactional outbox** | Reliability pattern: events are written to an `outbox` table atomically with the business DB transaction. A background relay thread (`relay_loop()`) publishes pending outbox rows to RabbitMQ and sets `published_at`. Services deduplicate via `processed_events` on consume. |
+| **Planner-svc** | Microservice on `:8093` — accepts `POST /goal`, `POST /clarify/{id}`, `POST /ratify/{id}`. Runs the planner graph (`formulate → inject → decompose → select_capabilities → generate_checks → gate`). Emits `plan.ratified`. |
+| **Executor-svc** | Microservice on `:8091` — consumes `plan.ratified`, calls monolith's `launch_run()` to create worktrees and spawn AionUi teams. Emits `node.spawned`. Consumes `gate.evaluated` (finalize or advance DAG) and `node.remediate` (fix-forward retry). |
+| **Watcher-svc** | Microservice on `:8092` — consumes `node.spawned`, polls worktrees via `_watch_loop()` (30s interval, 30s settle, 2 stable poll cycles). Sets `verdict=done_no_change` or `failed`. Emits `node.observed`. |
+| **Evaluator-svc** | Microservice on `:8094` — consumes `node.observed`, runs L1 deterministic checks then L2 rubric judge. Emits `gate.evaluated` with outcome `done`/`remediate`/`failed`. Optionally emits `node.remediate` for retry. |
+| **ServiceConfig** | Pydantic model (`shared.config`) loaded from environment per microservice. Fields: `service`, `env`, `rabbit_url`, `database_url`. Each service's `.env` overrides defaults. |
+| **Outbox relay** | Background daemon thread per service that polls the `outbox` table for unpublished rows and publishes them to RabbitMQ. Uses its OWN pika connection — sharing the consumer channel corrupts the AMQP frame stream. |
+| **Planner graph** | The LangGraph-based planning flow: `formulate → inject → decompose → select_capabilities → generate_checks → gate`. Defined in `services/planner/graph.py`. The `formulate` node converts raw goal to MetaGoal; `inject` enriches with domain conventions; `decompose` produces a DAG of nodes; `select_capabilities` assigns agent_configs per node via the capability selector; `generate_checks` creates L1/L2 checks per node; `gate` runs `run_plan_gate()` for L1+L2 plan evaluation. |
+| **Conditional entry point** | `_route_entry()` in the planner graph that checks `state["status"]` to route to `"formulate"` (new plan, `status=="new"`) or `"inject"` (formulated/clarified plan, `status=="formulated"`). Replaces `set_entry_point("formulate")` to enable the clarify→continue flow. |
+| **Clarify → continue flow** | The `/clarify` endpoint in `services/planner/main.py` re-invokes the planner LangGraph after `formulate_or_clarify()` returns a MetaGoal, enabling formulated plans to proceed through `inject → decompose → select_capabilities → generate_checks → gate` without manual re-submission. Previously, `/clarify` returned `formulated` status but never continued the graph. |
+| **Revise loop (planner remediation)** | When the planner gate fails, `_n_decompose()` passes `gate_feedback` and prior `dag` from `PlanState` to `decompose()`, which injects them into the LLM prompt as a `{revision_block}` with fix-forward instructions. The LLM keeps working nodes and only fixes failures, rather than regenerating the entire DAG from scratch. |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -244,6 +209,19 @@
 - Runtime code should resolve PostgreSQL through `DATABASE_URL`; avoid duplicating host/database names in application logic
 - Manual inspection may use `docker exec postgres psql -U aipc -d aipc_conductor`, but the app-side source of truth remains `DATABASE_URL`
 
+## Microservice event bus (services/)
+- Each microservice has its own `.env` in `services/<name>/.env` sourced at startup
+- The outbox relay loop (`EventBus.relay_loop()`) MUST use its own pika `BlockingConnection` — never share the consumer channel. Shared channels between consumer and relay threads corrupt the AMQP frame stream (`frame_too_large` / unexpected frame errors on RabbitMQ).
+- The relay loop MUST reconnect when the channel is closed (RabbitMQ heartbeat timeout closes idle channels). Check `channel.is_closed` each cycle and recreate the connection+channel.
+- Events are emitted via `shared.outbox.emit(session, event)` INSIDE the handler's DB transaction. The relay loop publishes them asynchronously.
+- Consumers deduplicate via `processed_events` table using `dedupe_key()` (event_key = `{run_id|plan_id|node_session_id}:{routing_key}`).
+- RabbitMQ topology: topic exchange `conductor.events`, durable queues per service, bindings in `BINDINGS` dict in `shared/bus.py`.
+- When consuming monolith functions (e.g. `launch_run()`) that use UPSERT, verify all columns are in the `ON CONFLICT ... DO UPDATE SET` clause. The monolith's `save_node_session()` omits `worktree` — patch node_sessions directly after calling `launch_run()`.
+- Gate outcome values: evaluator emits `gate_outcome=done` on pass, but executor's `_handle_gate_evaluated` switches on `pass`/`fail`. Non-match falls through to "advance next node" — no finalize or quarantine fires. Both `done` and `pass`, and `fail` and `failed` are now handled.
+- The monolith watcher (`get_watcher()`) is also initialized inside executor-svc when `launch_run()` calls it. This creates a separate watcher polling in the executor process alongside the microservice watcher-svc — harmless but creates duplicate state.
+- NEVER have multiple pika consumers on the same queue. RabbitMQ round-robins messages across consumers regardless of routing key. Use a SINGLE dispatcher consumer that routes by event type (detected from payload fields).
+- Before calling `finalize_success()`, always auto-commit the worktree via `git add -A && git commit`. The agent writes files to the worktree but never commits them; the merge requires committed changes.
+
 ## Git
 - Atomic commits with clear messages
 - Never commit .env, *.db, node_modules/, __pycache__/
@@ -325,15 +303,78 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. New migrat
 docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql
 ```
 
-## E2E test
+## E2E test (monolith)
 ```bash
 cd /opt/aipc/conductor && uv run python scripts/e2e_l2_test.py
 ```
 Cleans state: `bash /opt/aipc/conductor/scripts/clean_e2e_state.sh`
 
+## Microservices (event-driven architecture)
+
+### Restart all 4 microservices
+```bash
+# Load secrets once
+set -a; source /opt/aipc/scripts/load-secrets.sh; set +a
+
+# Each service sources its own .env + starts uvicorn in background
+for svc in executor watcher planner evaluator; do
+  fuser -k "809${svc}/tcp" 2>/dev/null || true
+  sleep 1
+  set -a
+  source /opt/aipc/conductor/services/${svc}/.env
+  set +a
+  cd /opt/aipc/conductor
+  setsid uv run uvicorn services.${svc}.main:app \
+    --host 0.0.0.0 --port 809${svc} \
+    > /tmp/${svc}-svc.log 2>&1 &
+  echo "${svc}-svc started on :809${svc} (PID $!)"
+done
+```
+
+Port mapping: executor=8091, watcher=8092, planner=8093, evaluator=8094.
+
+### Clean state + restart (microservice)
+```bash
+bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
+```
+One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 4 microservices. Health check runs at end.
+
+### Manual E2E cycle
+```bash
+# 1. Submit goal
+curl -s -X POST http://127.0.0.1:8093/goal \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_input":"<goal>","project_id":"default"}'
+
+# 2. Clarify (if goal needs refinement — returns formulated MetaGoal, re-invokes graph)
+curl -s -X POST http://127.0.0.1:8093/clarify/<plan_id> \
+  -H 'Content-Type: application/json' \
+  -d '{"clarification":"<your clarification text>","human_input":"<revised goal or spec>"}'
+
+# 3. Ratify (use plan_id from step 1)
+curl -s -X POST http://127.0.0.1:8093/ratify/<plan_id>
+
+# 4. Monitor cycle
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, run_id, node_id, verdict, gate_outcome, l2_score FROM node_sessions"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM outbox ORDER BY id"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM processed_events ORDER BY processed_at"
+```
+
+### Service logs
+```bash
+tail -f /tmp/executor-svc.log   # executor
+tail -f /tmp/watcher-svc.log    # watcher
+tail -f /tmp/planner-svc.log    # planner
+tail -f /tmp/evaluator-svc.log  # evaluator
+```
+
 ## Environment
 ```bash
-/opt/aipc/conductor/.env           # configuration (DB, Neo4j, LLM provider)
+/opt/aipc/conductor/.env                # monolith configuration (DB, Neo4j, LLM)
+/opt/aipc/conductor/services/*/.env     # per-microservice env overrides
 ```
 
 ## Repo structure (Repomix snapshot — read before scanning files)

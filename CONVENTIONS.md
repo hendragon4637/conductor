@@ -129,6 +129,19 @@
 - Runtime code should resolve PostgreSQL through `DATABASE_URL`; avoid duplicating host/database names in application logic
 - Manual inspection may use `docker exec postgres psql -U aipc -d aipc_conductor`, but the app-side source of truth remains `DATABASE_URL`
 
+## Microservice event bus (services/)
+- Each microservice has its own `.env` in `services/<name>/.env` sourced at startup
+- The outbox relay loop (`EventBus.relay_loop()`) MUST use its own pika `BlockingConnection` — never share the consumer channel. Shared channels between consumer and relay threads corrupt the AMQP frame stream (`frame_too_large` / unexpected frame errors on RabbitMQ).
+- The relay loop MUST reconnect when the channel is closed (RabbitMQ heartbeat timeout closes idle channels). Check `channel.is_closed` each cycle and recreate the connection+channel.
+- Events are emitted via `shared.outbox.emit(session, event)` INSIDE the handler's DB transaction. The relay loop publishes them asynchronously.
+- Consumers deduplicate via `processed_events` table using `dedupe_key()` (event_key = `{run_id|plan_id|node_session_id}:{routing_key}`).
+- RabbitMQ topology: topic exchange `conductor.events`, durable queues per service, bindings in `BINDINGS` dict in `shared/bus.py`.
+- When consuming monolith functions (e.g. `launch_run()`) that use UPSERT, verify all columns are in the `ON CONFLICT ... DO UPDATE SET` clause. The monolith's `save_node_session()` omits `worktree` — patch node_sessions directly after calling `launch_run()`.
+- Gate outcome values: evaluator emits `gate_outcome=done` on pass, but executor's `_handle_gate_evaluated` switches on `pass`/`fail`. Non-match falls through to "advance next node" — no finalize or quarantine fires. Both `done` and `pass`, and `fail` and `failed` are now handled.
+- The monolith watcher (`get_watcher()`) is also initialized inside executor-svc when `launch_run()` calls it. This creates a separate watcher polling in the executor process alongside the microservice watcher-svc — harmless but creates duplicate state.
+- NEVER have multiple pika consumers on the same queue. RabbitMQ round-robins messages across consumers regardless of routing key. Use a SINGLE dispatcher consumer that routes by event type (detected from payload fields).
+- Before calling `finalize_success()`, always auto-commit the worktree via `git add -A && git commit`. The agent writes files to the worktree but never commits them; the merge requires committed changes.
+
 ## Git
 - Atomic commits with clear messages
 - Never commit .env, *.db, node_modules/, __pycache__/
