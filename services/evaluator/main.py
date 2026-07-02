@@ -12,6 +12,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+import json
+import shutil
+import stat
+import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -432,6 +436,289 @@ def on_ratchet_trigger(s, payload: dict) -> None:
         )
 
 
+L4_RUNTIME_WRITABLE_DIRS = (
+    "l4_scratch",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".pytest_cache",
+    "__pycache__",
+    ".cache",
+    "tmp",
+    "logs",
+)
+
+L4_INSTALL_MARKERS = (
+    "python -m venv",
+    "python3 -m venv",
+    "uv venv",
+    "pip install",
+    "python -m pip install",
+    "python3 -m pip install",
+    ".venv/bin/pip install",
+    "venv/bin/pip install",
+    "uv pip install",
+    "npm install",
+    "npm ci",
+    "pnpm install",
+    "yarn install",
+    "bun install",
+    "poetry install",
+    "go mod download",
+    "cargo fetch",
+)
+
+L4_SOURCE_EXCLUDE_DIRS = {
+    ".git",
+    "l4_scratch",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".pytest_cache",
+    "__pycache__",
+    ".cache",
+    "tmp",
+    "logs",
+}
+L4_SOURCE_EXCLUDE_FILES = {"opencode.json", ".opencode.json"}
+
+
+def _l4_run_root() -> Path:
+    workspace_root = Path(os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace"))
+    return workspace_root / "l4_runs"
+
+
+def _strip_shell_prompt(line: str) -> str:
+    stripped = line.strip()
+    if stripped.startswith(('-', '*')):
+        stripped = stripped[1:].strip()
+    for prefix in ("$ ", "> "):
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return stripped
+
+
+def _is_install_command(candidate: str) -> bool:
+    lowered = candidate.lower().strip()
+    return lowered.startswith((
+        "python -m venv ",
+        "python3 -m venv ",
+        "uv venv",
+        "pip install ",
+        "python -m pip install ",
+        "python3 -m pip install ",
+        ".venv/bin/pip install ",
+        "venv/bin/pip install ",
+        "uv pip install ",
+        "npm install",
+        "npm ci",
+        "pnpm install",
+        "yarn install",
+        "bun install",
+        "poetry install",
+        "go mod download",
+        "cargo fetch",
+    ))
+
+
+def _parse_l4_install_commands(run_md: Path) -> list[str]:
+    if not run_md.exists():
+        return []
+    commands: list[str] = []
+    in_fence = False
+    for raw in run_md.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not line or line.startswith("#"):
+            continue
+        candidate = _strip_shell_prompt(line)
+        lowered = candidate.lower()
+        if _is_install_command(candidate):
+            commands.append(candidate)
+        elif in_fence and any(marker in lowered for marker in L4_INSTALL_MARKERS):
+            commands.append(candidate)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for command in commands:
+        if command not in seen:
+            deduped.append(command)
+            seen.add(command)
+    return deduped
+
+
+def _write_l4_opencode_json(dst: Path) -> None:
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "edit": {"*": "deny", "l4_scratch/**": "allow"},
+            "bash": {
+                "*": "allow",
+                "rm -rf *": "deny",
+                "sudo *": "deny",
+                "git push *": "deny",
+                "git commit *": "deny",
+                "git *": "deny",
+            },
+            "webfetch": "deny",
+            "websearch": "deny",
+        },
+    }
+    (dst / "opencode.json").write_text(json.dumps(config, indent=2) + "\n")
+
+
+def _chmod_tree(root: Path, add_user_write: bool) -> None:
+    for path in [root, *root.rglob("*")]:
+        try:
+            mode = path.stat().st_mode
+            new_mode = mode | stat.S_IWUSR if add_user_write else mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH
+            path.chmod(new_mode)
+        except OSError:
+            continue
+
+
+def _freeze_l4_workspace(dst: Path) -> None:
+    _chmod_tree(dst, add_user_write=False)
+    for rel in L4_RUNTIME_WRITABLE_DIRS:
+        target = dst / rel
+        if target.exists():
+            _chmod_tree(target, add_user_write=True)
+    (dst / "l4_scratch").mkdir(exist_ok=True)
+    _chmod_tree(dst / "l4_scratch", add_user_write=True)
+
+
+def _cleanup_l4_workspace(dst: Path) -> None:
+    if dst.exists():
+        _chmod_tree(dst, add_user_write=True)
+        shutil.rmtree(dst, ignore_errors=True)
+
+
+def _run_l4_install_commands(dst: Path, commands: list[str], timeout_s: int | None = None) -> list[str]:
+    logs: list[str] = []
+    for command in commands:
+        parts = command.split()
+        if len(parts) >= 4 and parts[:3] in (["python", "-m", "venv"], ["python3", "-m", "venv"]):
+            venv_dir = dst / parts[3]
+            if venv_dir.exists():
+                shutil.rmtree(venv_dir, ignore_errors=True)
+        result = subprocess.run(
+            command,
+            cwd=str(dst),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s or int(os.environ.get("L4_INSTALL_TIMEOUT_S", "300")),
+            check=False,
+        )
+        logs.append(f"{command} -> {result.returncode}")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"L4 install failed for {command}: {(result.stderr or result.stdout)[-500:]}"
+            )
+    return logs
+
+
+def _is_l4_source_file(path: Path, root: Path) -> bool:
+    rel = path.relative_to(root)
+    if set(rel.parts) & L4_SOURCE_EXCLUDE_DIRS:
+        return False
+    if path.name in L4_SOURCE_EXCLUDE_FILES:
+        return False
+    if path.suffix in {".pyc", ".pyo"}:
+        return False
+    return path.is_file()
+
+
+def _l4_source_signature(root: Path) -> dict[str, str]:
+    import hashlib
+
+    sig: dict[str, str] = {}
+    for path in sorted(p for p in root.rglob("*") if _is_l4_source_file(p, root)):
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        sig[path.relative_to(root).as_posix()] = h.hexdigest()
+    return sig
+
+
+def _verify_l4_source_unchanged(dst: Path, baseline: dict[str, str]) -> None:
+    current = _l4_source_signature(dst)
+    if current == baseline:
+        return
+    before = set(baseline)
+    after = set(current)
+    changed = sorted(
+        (before ^ after)
+        | {k for k in before & after if baseline[k] != current[k]}
+    )
+    raise RuntimeError(f"L4 source changed in isolated copy: {changed[:20]}")
+
+
+def _is_l4_runnable(product_type: str, needs_usage_sim: bool | None) -> tuple[bool, str]:
+    normalized = (product_type or "").strip().lower()
+    if normalized in {"doc", "docs", "none", "static"}:
+        return False, f"product_type={product_type!r} has no runnable surface"
+    if needs_usage_sim is False and not normalized:
+        return False, "plan.needs_usage_sim is false and no runnable product_type supplied"
+    return True, ""
+
+
+def _l4_goal_brief(run_id: str, case_name: str, product_type: str, plan_success: str) -> str:
+    acceptance = ""
+    if case_name == "acceptance":
+        acceptance = (
+            "\nAcceptance focus:\n"
+            f"- Verify this success criterion as pass/fail: {plan_success or '(none provided)'}\n"
+        )
+    scenario = plan_success or "Use the product exactly as RUN.md documents."
+    return (
+        f"L4 persona simulation — Case: {case_name}\n\n"
+        f"Run ID: {run_id}\n"
+        f"Product type: {product_type or 'unknown'}\n"
+        f"Scenario: {scenario}\n"
+        f"{acceptance}\n"
+        "Instructions (mandatory):\n"
+        "1. Read RUN.md only to learn exact run/verify commands and product access details.\n"
+        "2. Run the product using RUN.md commands; dependencies are already installed by Conductor.\n"
+        "3. Exercise the scenario as a black-box user and report what worked/failed.\n"
+        "4. DO NOT modify, fix, patch, refactor, or edit product source files.\n"
+        "5. DO NOT inspect source code to diagnose bugs; observe behavior through the running product.\n"
+        "6. Write any notes, logs, screenshots, or scratch files only under l4_scratch/.\n"
+        "7. Return a structured L4 report with per-step PASS/FAIL, status/output, and overall friction.\n"
+    )
+
+
+def _prepare_l4_workspace(
+    run_id: str,
+    worktree: str,
+    install_timeout_s: int | None = None,
+) -> tuple[Path, list[str], dict[str, str]]:
+    src = Path(worktree).resolve()
+    if not src.is_dir():
+        raise FileNotFoundError(f"Run worktree not found: {src}")
+    if not (src / "RUN.md").exists():
+        raise FileNotFoundError(f"RUN.md not found in run worktree: {src}")
+    root = _l4_run_root()
+    root.mkdir(parents=True, exist_ok=True)
+    dst = root / run_id
+    if dst.exists():
+        _cleanup_l4_workspace(dst)
+    try:
+        shutil.copytree(src, dst, symlinks=True)
+        (dst / "l4_scratch").mkdir(parents=True, exist_ok=True)
+        _write_l4_opencode_json(dst)
+        install_commands = _parse_l4_install_commands(dst / "RUN.md")
+        install_logs = _run_l4_install_commands(dst, install_commands, timeout_s=install_timeout_s)
+        baseline = _l4_source_signature(dst)
+        _freeze_l4_workspace(dst)
+        return dst, install_logs, baseline
+    except Exception:
+        _cleanup_l4_workspace(dst)
+        raise
+
+
 def _l4_score_from_report(report_text: str) -> float:
     """Derive a 0-1 L4 score from the agent's narrative report.
 
@@ -488,121 +775,115 @@ def on_run_completed(s, payload: dict) -> None:
 
     # Load plan success criteria directly (ORM model is outdated)
     plan_success = ""
+    needs_usage_sim: bool | None = None
+    product_type = str(payload.get("product_type") or "")
     try:
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url:
             with psycopg.connect(db_url) as p_conn:
                 with p_conn.cursor() as cur:
-                    cur.execute("SELECT success->>'text' FROM plans WHERE plan_id = %s", (plan_id,))
+                    cur.execute("SELECT success->>'text', needs_usage_sim FROM plans WHERE plan_id = %s", (plan_id,))
                     row = cur.fetchone()
-                    if row and row[0]:
-                        plan_success = row[0]
+                    if row:
+                        if row[0]:
+                            plan_success = row[0]
+                        needs_usage_sim = bool(row[1]) if row[1] is not None else None
     except Exception:
         logger.debug("Could not load plan success for %s", plan_id)
 
-    # Determine base_url from RUN.md
-    run_md = Path(worktree) / "RUN.md"
-    base_url = "http://127.0.0.1:8000"
-    if run_md.exists():
-        for line in run_md.read_text().splitlines():
-            if "uvicorn" in line or "port" in line.lower():
-                m = re.search(r"--port\s+(\d+)", line)
-                if m:
-                    base_url = f"http://127.0.0.1:{m.group(1)}"
-                    break
+    runnable, skip_reason = _is_l4_runnable(product_type, needs_usage_sim)
+    if not runnable:
+        with db_session() as db:
+            r = db.query(RunModel).filter(RunModel.id == run_id).first()
+            if r:
+                r.l4_status = "skipped_non_runnable"
+                r.l4_reason = skip_reason
+                db.commit()
+        logger.info("L4 skipped for run=%s: %s", run_id, skip_reason)
+        return
 
-    l4_standalone = 0.0
-    l4_acceptance = 0.0
-    cases = []
+    l4_workspace: Path | None = None
+    try:
+        l4_workspace, install_logs, source_baseline = _prepare_l4_workspace(run_id, worktree)
+        logger.info("Prepared isolated L4 workspace for run=%s at %s installs=%s", run_id, l4_workspace, install_logs)
 
-    for case_name, case_goal_suffix in [
-        ("standalone", ""),
-        ("acceptance", f"\n\nYou are explicitly verifying that the plan's success criterion is met: {plan_success}\n\nFocus on confirming the product satisfies its acceptance criteria."),
-    ]:
-        goal_brief = (
-            f"L4 persona simulation — Case: {case_name}\n\n"
-            f"Run ID: {run_id}\n"
-            f"Worktree: {worktree}\n"
-            f"Product URL: {base_url}\n\n"
-            f"Your job:\n"
-            f"1. Read RUN.md at {worktree}/RUN.md to learn how to start the product.\n"
-            f"2. Start the product in the background.\n"
-            f"3. Run these persona behaviors against {base_url}:\n"
-            f"   a) POST /shorten with a valid URL — expect 200/201 and a short_code\n"
-            f"   b) GET /{'code'} with the short code — expect 302 redirect\n"
-            f"   c) POST /shorten with invalid URL — expect 400/422\n"
-            f"   d) GET /nonexistent123 — expect 404\n"
-            f"4. For EACH behavior, report: PASS or FAIL, status code, response.\n"
-            f"5. Provide an overall friction score (0.0 = perfect, 1.0 = broken).\n\n"
-            f"Respond with a structured L4 report including per-behavior outcomes."
-            f"{case_goal_suffix}"
-        )
+        l4_standalone: float | None = None
+        l4_acceptance: float | None = None
+        case_notes: list[str] = []
+        timed_out = False
 
-        try:
-            from backend.aionui.client import AionUiClient
-            aionui = AionUiClient(os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+        from backend.aionui.client import AionUiClient
+        aionui = AionUiClient(os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+
+        for case_name in ("standalone", "acceptance"):
+            goal_brief = _l4_goal_brief(run_id, case_name, product_type, plan_success)
             conv_id = aionui.create_conversation(
                 preset_agent_type="acp",
-                workspace=worktree,
+                workspace=str(l4_workspace),
                 backend="opencode",
             )
             aionui.send_message(conv_id, goal_brief)
-            logger.info("L4 case=%s conv=%s", case_name, conv_id)
+            logger.info("L4 case=%s conv=%s workspace=%s", case_name, conv_id, l4_workspace)
 
-            # Poll for completion (up to 5 min per case)
-            import time as _time
-            deadline = _time.monotonic() + 300
-            l4_text = "L4 agent did not complete within timeout"
-            while _time.monotonic() < deadline:
-                _time.sleep(10)
+            deadline = time.monotonic() + int(os.environ.get("L4_CASE_TIMEOUT_S", "300"))
+            l4_text = "L4 agent timed out"
+            while time.monotonic() < deadline:
+                time.sleep(10)
                 try:
                     msgs = aionui.get_messages(conv_id)
                     assistant_responses = [
                         m for m in (msgs or [])
                         if m.get("type") == "text" and m.get("position") == "left"
                     ]
-                    if assistant_responses:
-                        last = assistant_responses[-1]
-                        raw_content = last.get("content", "{}")
-                        try:
-                            parsed = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
-                            l4_text = parsed.get("content", str(raw_content)) if isinstance(parsed, dict) else str(raw_content)
-                        except (json.JSONDecodeError, TypeError):
-                            l4_text = str(raw_content)
-                        score = _l4_score_from_report(l4_text)
-                        print(f"[PRINT] L4 case={case_name} score={score} conv={conv_id}", flush=True)
-                        cases.append((case_name, score, l4_text))
-                        break
-                except Exception:
-                    pass
+                    if not assistant_responses:
+                        continue
+                    raw_content = assistant_responses[-1].get("content", "{}")
+                    try:
+                        parsed = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+                        l4_text = parsed.get("content", str(raw_content)) if isinstance(parsed, dict) else str(raw_content)
+                    except (json.JSONDecodeError, TypeError):
+                        l4_text = str(raw_content)
+                    score = _l4_score_from_report(l4_text)
+                    if case_name == "standalone":
+                        l4_standalone = score
+                    else:
+                        l4_acceptance = score
+                    case_notes.append(f"{case_name}: conv={conv_id} score={score}")
+                    print(f"[PRINT] L4 case={case_name} score={score} conv={conv_id}", flush=True)
+                    break
+                except Exception as exc:
+                    logger.debug("L4 poll failed for conv=%s: %s", conv_id, exc)
             else:
-                cases.append((case_name, 0.0, "L4 agent timed out"))
-        except Exception as exc:
-            logger.warning("L4 case=%s failed: %s", case_name, exc)
-            cases.append((case_name, 0.0, str(exc)))
+                timed_out = True
+                case_notes.append(f"{case_name}: conv={conv_id} timeout")
+                break
 
-    # Assign standalone/acceptance from cases
-    for name, score, text in cases:
-        if name == "standalone":
-            l4_standalone = score
-        elif name == "acceptance":
-            l4_acceptance = score
-        print(f"[PRINT] L4 {name}: score={score}", flush=True)
+        _verify_l4_source_unchanged(l4_workspace, source_baseline)
 
-    # Record on the run
-    with db_session() as db:
-        r = db.query(RunModel).filter(RunModel.id == run_id).first()
-        if r:
-            r.l4_standalone = l4_standalone
-            r.l4_acceptance = l4_acceptance
-            r.l4_status = "scored"
-            r.l4_reason = f"standalone={l4_standalone} acceptance={l4_acceptance}"
-            db.commit()
+        with db_session() as db:
+            r = db.query(RunModel).filter(RunModel.id == run_id).first()
+            if r:
+                r.l4_standalone = l4_standalone
+                r.l4_acceptance = l4_acceptance
+                r.l4_status = "run_failed" if timed_out else "scored"
+                r.l4_reason = "; ".join(case_notes)
+                db.commit()
 
-    logger.info(
-        "L4 done for run=%s: standalone=%.4f acceptance=%.4f",
-        run_id, l4_standalone, l4_acceptance,
-    )
+        logger.info(
+            "L4 done for run=%s status=%s standalone=%s acceptance=%s",
+            run_id, "run_failed" if timed_out else "scored", l4_standalone, l4_acceptance,
+        )
+    except Exception as exc:
+        logger.exception("L4 isolated execution failed for run=%s", run_id)
+        with db_session() as db:
+            r = db.query(RunModel).filter(RunModel.id == run_id).first()
+            if r:
+                r.l4_status = "run_failed"
+                r.l4_reason = str(exc)[:500]
+                db.commit()
+    finally:
+        if l4_workspace is not None:
+            _cleanup_l4_workspace(l4_workspace)
 
 
 def on_calibration_trigger(s, payload: dict) -> None:

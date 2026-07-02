@@ -190,8 +190,9 @@ def finalize_success(run_id: str, workspace_root: str | None = None) -> dict[str
         _sched_cleanup(run_id, SUCCESS_TTL_DAYS)
         logger.info("Run %s merged to main at %s", run_id, merge_commit)
 
-        if plan and plan.get("needs_usage_sim"):
-            _run_l4(run_id, plan, run)
+        # L4 is event-driven in evaluator-svc via run.completed.  Do not run
+        # the legacy in-process scripted L4 here, or a successful run can get
+        # double-scored with different isolation semantics.
     except RuntimeError as exc:
         logger.warning("Merge conflict for run %s: %s", run_id, exc)
         _update_run(run_id, worktree_status="active")  # leave active for human
