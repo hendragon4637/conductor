@@ -174,6 +174,14 @@ curl -s http://127.0.0.1:40937/api/conversations/<conv_id> | python3 -m json.too
 # Query AionUi SQLite for conversation messages
 sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db \
   "SELECT type, position, status, substr(content,1,80) FROM messages WHERE conversation_id='<conv_id>' ORDER BY created_at"
+
+# Inspect isolated L4 workspace residue/report
+ls -la /opt/aipc/conductor/workspace/l4_runs/<run_id>/
+cat /opt/aipc/conductor/workspace/l4_runs/<run_id>/l4_scratch/l4_report.md
+
+# Verify isolated L4 real run result
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id='<run_id>'"
 ```
 
 ## Ratchet experiment

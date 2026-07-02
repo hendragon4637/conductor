@@ -86,6 +86,27 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 
 **Trade-offs**: Single-threaded consumer blocks for up to 10 minutes during L4 polling; other events queue up. The keyword scoring heuristic is fragile (false positives from "pass" in non-score contexts). Agent may refuse due to system instruction conflicts.
 
+## 2026-07-02 — L4 isolated execution workspace
+
+**Status**: ACTIVE
+
+**Context**: The first event-driven L4 implementation spawned the persona directly in the completed run worktree. In the whole-stack proof this allowed the L4 agent to inspect and attempt edits to product source, violating the L4 contract: persona uses the product as a black-box user and must not mutate the artifact under evaluation.
+
+**Decision**:
+- Evaluator-svc prepares a per-run isolated copy at `workspace/l4_runs/<run_id>/` before spawning L4.
+- The copy is made from the run worktree and must contain `RUN.md`.
+- Conductor parses deterministic install/setup commands from `RUN.md` and runs them before freezing the copy.
+- Evaluator writes a local `opencode.json` in the copy that denies edits globally, allows edits only under `l4_scratch/**`, denies git/destructive/sudo commands, and denies webfetch/websearch.
+- Evaluator freezes product source via chmod after dependency installation, then re-opens runtime dirs (`l4_scratch`, `.venv`, `node_modules`, caches/log dirs) for execution.
+- AionUi ACP L4 conversations are spawned with `workspace=<isolated copy>`, not the original run worktree.
+- L4 prompt is observational-only: read `RUN.md`, run the product, exercise the scenario, do not inspect/edit/fix source, write notes only to `l4_scratch/`.
+- Source immutability is verified inside the isolated copy after L4. Mutation fails the run as `l4_status='run_failed'`.
+- Current operational behavior keeps `workspace/l4_runs/<run_id>/l4_scratch/l4_report.md` residue after a real L4 run so humans can inspect the persona output. Product source remains isolated from the original run worktree.
+
+**Rationale**: Full `cp -r` isolation plus chmod and local OpenCode permissions absorb L4 non-determinism while preserving the evaluated artifact. Keeping the scratch report is useful during P0/P1 debugging.
+
+**Trade-offs**: Evaluator still polls AionUi synchronously for now, which is architecturally less clean than delegating completion detection to watcher. A future refinement should make L4 a first-class watched session/event rather than blocking the evaluator consumer.
+
 ## 2026-07-02 — Ratchet trigger event flow
 
 **Status**: ACTIVE

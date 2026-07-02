@@ -143,6 +143,13 @@
 - L4 persona YAML files go in `backend/evaluator/l4_persona/personas/` with short names matching product type
 - L4 agent config goes in `agent_configs/l4-persona.yaml` with `acp-browser` backend
 - The `RUN.md` file in the worktree determines base URL for L4 HTTP testing (parsed from `--port` flag)
+- Event-driven L4 MUST run in an isolated copy under `workspace/l4_runs/<run_id>/`, never directly in the run worktree
+- Evaluator prepares the isolated L4 copy by copying the worktree, running deterministic install commands parsed from `RUN.md`, writing scoped `opencode.json`, then freezing product source with chmod
+- L4 local `opencode.json` denies edits except `l4_scratch/**`, denies git/destructive/sudo commands, and denies webfetch/websearch
+- L4 persona prompt must be observational-only: use the product, do not inspect/edit/fix source, write only to `l4_scratch/`
+- L4 source immutability must be checked in the isolated copy after the persona run; source mutation records `l4_status='run_failed'`
+- During P0/P1, retain `l4_scratch/l4_report.md` residue under `workspace/l4_runs/<run_id>/` for human inspection; original product worktree must remain untouched
+- Future architecture target: L4 completion should become watcher-observed rather than evaluator polling; until then evaluator polling is an accepted transitional implementation
 
 ## L3 calibration
 - `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
@@ -417,6 +424,14 @@ curl -s http://127.0.0.1:40937/api/conversations/<conv_id> | python3 -m json.too
 # Query AionUi SQLite for conversation messages
 sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db \
   "SELECT type, position, status, substr(content,1,80) FROM messages WHERE conversation_id='<conv_id>' ORDER BY created_at"
+
+# Inspect isolated L4 workspace residue/report
+ls -la /opt/aipc/conductor/workspace/l4_runs/<run_id>/
+cat /opt/aipc/conductor/workspace/l4_runs/<run_id>/l4_scratch/l4_report.md
+
+# Verify isolated L4 real run result
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id='<run_id>'"
 ```
 
 ## Ratchet experiment
