@@ -9,12 +9,14 @@ probabilistic config (system_prompt / skill).  Gated on
 References File 03 of the eval-starter spec.
 """
 
+import hashlib
 import json
 import logging
 import os
 import statistics
+import subprocess
+import time
 import uuid
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -166,13 +168,17 @@ def _recent_scores(agent_config_id: str, limit: int = 20) -> list[float]:
 def mine_failures(agent_config_id: str, node_type: str = "executor") -> list[Pattern]:
     """Cluster recurring low-scoring rubric items from recent runs.
 
-    Loads the recent L2 judgment details (from Langfuse or node_sessions)
-    and groups failures by rubric_item.  Returns patterns sorted by
-    fail_rate descending.
+    Queries ``node_sessions`` for L2 sessions with low ``goal_review``
+    scores, extracts the ``l2_feedback`` JSONB column (per-rubric-item
+    judgments from the L2 judge), and groups FAIL items by check_id.
+
+    Returns patterns sorted by fail_rate descending — the most dominant
+    failure mode first.  Only returns patterns that appear more than once
+    (recurring, not one-offs).
 
     Args:
         agent_config_id: Which agent config to mine.
-        node_type: Node type for rubric matching.
+        node_type: Node type for rubric matching (used as informational).
 
     Returns:
         List of ``Pattern`` sorted by fail_rate descending.
@@ -188,13 +194,13 @@ def mine_failures(agent_config_id: str, node_type: str = "executor") -> list[Pat
 
         with psycopg.connect(url, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
-                # Load L2 judgment data from traces or session_signals
                 cur.execute(
-                    """SELECT ns.id, ns.goal_review, ns.finished_at
+                    """SELECT ns.id, ns.goal_review, ns.l2_feedback, ns.finished_at
                        FROM node_sessions ns
                        JOIN runs r ON ns.run_id = r.id
                       WHERE ns.goal_review IS NOT NULL
                         AND ns.goal_review < %s
+                        AND ns.l2_feedback IS NOT NULL
                         AND ns.members::text LIKE %s
                       ORDER BY ns.finished_at DESC
                       LIMIT 20""",
@@ -208,27 +214,59 @@ def mine_failures(agent_config_id: str, node_type: str = "executor") -> list[Pat
     if not low_sessions:
         return []
 
-    rubric_counts: Counter = Counter()
+    # Track failures per check_id: map check_id -> list of (session_id, explanation)
+    failure_map: dict[str, list[tuple[str, str]]] = {}
     total = len(low_sessions)
 
     for sess in low_sessions:
         sid = sess.get("id", "")
-        for label, _ in [("validation", True), ("integer_cents", True), ("tested", True)]:
-            pass
-        rubric_counts["validation (negative/empty rejection)"] = max(
-            rubric_counts["validation (negative/empty rejection)"],
-            int(3 if sid else 0),
-        )
+        l2_feedback = sess.get("l2_feedback")
+        if not l2_feedback:
+            continue
 
+        # l2_feedback is JSONB — a list of judgment dicts
+        # Each entry: {"check_id": str, "criteria_met": bool, "explanation": str}
+        if isinstance(l2_feedback, str):
+            try:
+                l2_feedback = json.loads(l2_feedback)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        if not isinstance(l2_feedback, list):
+            continue
+
+        for fb_item in l2_feedback:
+            check_id = fb_item.get("check_id", "") if isinstance(fb_item, dict) else ""
+            criteria_met = fb_item.get("criteria_met", True) if isinstance(fb_item, dict) else True
+            explanation = fb_item.get("explanation", "") if isinstance(fb_item, dict) else ""
+
+            if not check_id:
+                continue
+            if criteria_met:
+                continue  # skip passes, only count failures
+
+            if check_id not in failure_map:
+                failure_map[check_id] = []
+            failure_map[check_id].append((sid, explanation))
+
+    # Build patterns sorted by fail count descending
     patterns: list[Pattern] = []
-    for rubric_item, count in rubric_counts.most_common():
+    for check_id, entries in failure_map.items():
+        fail_count = len(entries)
+        # Skip one-offs — only recurring patterns
+        if fail_count < 2:
+            continue
+
+        recent = [f"{e[0]}: {e[1][:200]}" for e in entries[:3]]
         patterns.append(Pattern(
-            rubric_item=rubric_item,
-            fail_count=count,
+            rubric_item=check_id,
+            fail_count=fail_count,
             total_count=total,
-            fail_rate=round(count / max(total, 1), 4),
+            fail_rate=round(fail_count / max(total, 1), 4),
+            recent_examples=recent,
         ))
 
+    patterns.sort(key=lambda p: p.fail_rate, reverse=True)
     return patterns
 
 
@@ -336,22 +374,198 @@ def _load_heldout_tasks(node_type: str) -> list[dict]:
         return []
 
 
-def _actually_run_agent(agent_config_id: str, task: str) -> str:
-    """Simulate a real agent run in a throwaway worktree.
+def _git_signature(wt_path: str) -> str | None:
+    """SHA1 of ``git status --porcelain`` for a worktree path."""
+    if not wt_path:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=wt_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return hashlib.sha1(result.stdout.encode("utf-8", errors="ignore")).hexdigest()
+    except Exception:
+        return None
 
-    For starter: simulates by running the L2 judge on the task text as a
-    proxy.  In production this would spawn an actual agent in an isolated
-    worktree + venv.
+
+def _remove_worktree(wt_path: str, project_id: str) -> None:
+    """Safely remove a worktree by invoking git worktree remove."""
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt_path)],
+            capture_output=True, timeout=60,
+        )
+    except Exception:
+        pass
+    # Also try removing via the project dir (if it's a managed worktree)
+    workspace_root = os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace")
+    project_dir = Path(workspace_root) / project_id
+    if project_dir.exists():
+        try:
+            subprocess.run(
+                ["git", "-C", str(project_dir), "worktree", "remove", "--force", str(wt_path)],
+                check=False, capture_output=True, timeout=60,
+            )
+        except Exception:
+            pass
+
+
+def _actually_run_agent(
+    task_text: str,
+    worktree_root: str,
+    agent_config_id: str,
+    plan_id: str,
+    node_type: str,
+) -> str:
+    """Run the agent on *task_text* in a throwaway worktree.
+
+    Creates a git worktree under *worktree_root*, assembles the agent
+    config, spawns an AionUi conversation with the task, waits for
+    completion (git-state settling), and returns the worktree **path**
+    so the caller can pass it to ``run_l2()``.
+
+    The caller is responsible for cleaning up the worktree via
+    ``_remove_worktree()``.
 
     Returns:
-        A string representing the "artifact" (stub for starter).
+        Absolute path to the worktree where the agent produced its artifact.
+
+    Raises:
+        RuntimeError: if the agent infrastructure (AionUi, WorktreeManager)
+            is unavailable.
     """
-    stub = (
-        f"# Stub artifact for agent_config={agent_config_id}\n"
-        f"# Task: {task}\n"
-        f"# (In production this would be a real agent run in an isolated worktree.)\n"
-    )
-    return stub
+    try:
+        from backend.worktree import WorktreeManager
+        from backend.worktree.assemble import assemble_for_spawn
+        from backend.aionui import AionUiClient
+        from backend.db.queries import get_agent_config
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Agent infrastructure unavailable from evaluator module: {exc}. "
+            f"Cannot run _actually_run_agent() — need WorktreeManager, AionUiClient, "
+            f"and get_agent_config."
+        ) from exc
+
+    _db_url = os.environ.get("DATABASE_URL", "")
+    _aionui_host = os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937")
+
+    # 1. Ensure a ratchet project exists and create a throwaway worktree
+    wm = WorktreeManager(worktree_root)
+    project_id = f"ratchet-{agent_config_id}"
+    wm.ensure_project(project_id)
+
+    branch = f"ratchet-{uuid.uuid4().hex[:12]}"
+    wt_path = wm.create(project_id, branch)
+    wt = Path(wt_path)
+
+    print(f"[ratchet] Created worktree {wt_path} for agent_config={agent_config_id}", flush=True)
+
+    try:
+        # 2. Load agent config and assemble into worktree
+        cfg = get_agent_config(agent_config_id)
+        if cfg:
+            try:
+                assemble_for_spawn(
+                    worktree=wt,
+                    cli=cfg.get("cli", "opencode"),
+                    agent_config=cfg,
+                    project_id=project_id,
+                    session_id=f"ratchet-{uuid.uuid4().hex[:8]}",
+                    db_url=_db_url,
+                    auto_approve=True,
+                )
+            except Exception as exc:
+                logger.warning("assemble_for_spawn failed, writing basic config: %s", exc)
+                _write_minimal_config(wt, cfg, task_text)
+        else:
+            logger.warning("No agent_config found for %s, using task_text only", agent_config_id)
+            from backend.backends.opencode_config import write_worktree_config
+            write_worktree_config(worktree=wt, appended_prompt=task_text)
+
+        # 3. Create AionUi conversation and send task
+        aionui = AionUiClient(_aionui_host)
+        conv_id = aionui.create_conversation(
+            preset_agent_type="acp",
+            workspace=str(wt),
+        )
+        aionui.send_message(conv_id, task_text)
+        print(f"[ratchet] Spawned AionUi conversation {conv_id} in {wt_path}", flush=True)
+
+        # 4. Wait for completion via git-state settling heuristic
+        settle_seconds = 30.0
+        stall_timeout = 180.0
+        poll_interval = 3.0
+        timeout = 600.0
+
+        elapsed = 0.0
+        saw_change = False
+        last_change_at = 0.0
+        last_sig = _git_signature(wt_path)
+
+        while elapsed < timeout:
+            try:
+                conv = aionui.get_conversation(conv_id)
+                if conv.get("status") == "error":
+                    logger.warning("AionUi conversation %s entered error state", conv_id)
+                    break
+            except Exception:
+                pass  # continue polling via git signature
+
+            current_sig = _git_signature(wt_path)
+            if current_sig is not None and current_sig != last_sig:
+                saw_change = True
+                last_change_at = elapsed
+                last_sig = current_sig
+            elif saw_change and (elapsed - last_change_at) >= settle_seconds:
+                print(f"[ratchet] Agent settled after {(elapsed):.0f}s for {wt_path}", flush=True)
+                break
+            elif not saw_change and elapsed >= stall_timeout:
+                logger.warning(
+                    "Agent stalled after %.0fs for task: %.60s",
+                    elapsed, task_text,
+                )
+                break
+
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        if elapsed >= timeout:
+            logger.warning("Agent timed out after %.0fs for task: %.60s", elapsed, task_text)
+
+    except Exception:
+        # If anything fails mid-flight, still return the worktree path so the
+        # caller can inspect or clean up — don't leave dangling worktrees.
+        logger.exception("Error during agent execution in %s", wt_path)
+        # Re-raise so the caller knows the experiment should be marked failed
+        raise
+
+    # Return the worktree path — the caller (validate_on_heldout) will use it
+    # for L2 evaluation and then clean it up.
+    return wt_path
+
+
+def _write_minimal_config(
+    wt: Path,
+    cfg: dict[str, Any] | None,
+    task_text: str,
+) -> None:
+    """Write a minimal OpenCode config into the worktree as fallback."""
+    try:
+        from backend.backends.opencode_config import write_worktree_config
+        write_worktree_config(
+            worktree=wt,
+            model=cfg.get("model_preference") if cfg else None,
+            appended_prompt=task_text,
+        )
+    except Exception:
+        # Last resort: create a bare .opencode.json so the agent can start
+        config = {"permissions": {"edit": "allow", "bash": "allow"}}
+        config_path = wt / ".opencode.json"
+        config_path.write_text(json.dumps(config))
 
 
 def validate_on_heldout(
@@ -362,7 +576,8 @@ def validate_on_heldout(
     """Validate a mutation by running the mutated agent on held-out tasks.
 
     Unlike L3 (which re-scores frozen artifacts), this function actually
-    EXECUTES the agent (simulated for starter) to get new output.
+    EXECUTES the agent in an isolated worktree to get new output, then
+    evaluates it with the L2 judge.
 
     Args:
         agent_config_id: The agent config to test.
@@ -385,21 +600,35 @@ def validate_on_heldout(
         weight=1.0,
     )
 
+    worktree_root = os.environ.get(
+        "WORKSPACE_ROOT",
+        "/opt/aipc/conductor/workspace",
+    )
+    plan_id = f"ratchet-{uuid.uuid4().hex[:12]}"
+
     scores: list[float] = []
     details: list[dict] = []
 
     for task_item in tasks:
-        artifact = _actually_run_agent(agent_config_id, task_item["task"])
+        wt_path = _actually_run_agent(
+            task_text=task_item["task"],
+            worktree_root=worktree_root,
+            agent_config_id=agent_config_id,
+            plan_id=plan_id,
+            node_type=node_type,
+        )
         try:
             result: L2Result = run_l2(
                 checks=[rubric_check],
-                worktree="",
+                worktree=wt_path,
                 trace_id=None,
             )
             score = result.score
         except Exception as exc:
             logger.warning("L2 judge failed during held-out validation: %s", exc)
             score = 0.0
+        finally:
+            _remove_worktree(wt_path, f"ratchet-{agent_config_id}")
 
         scores.append(score)
         details.append({

@@ -100,6 +100,12 @@ class RatchetTrigger(BaseModel):
     ts: float
 
 
+class CalibrateTrigger(BaseModel):
+    node_type: str
+    env: str
+    ts: float
+
+
 # ── Routing key map ─────────────────────────────────────────────────────────
 
 ROUTING: dict[type[BaseModel], str] = {
@@ -113,4 +119,5 @@ ROUTING: dict[type[BaseModel], str] = {
     RunFailed: "run.failed",
     PlanAwaitingClarification: "plan.awaiting_clarification",
     RatchetTrigger: "ratchet.trigger",
+    CalibrateTrigger: "calibrate.trigger",
 }

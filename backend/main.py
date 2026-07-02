@@ -26,6 +26,7 @@ from backend.web.routes import chat as chat_routes
 from backend.web.routes import ratchet as ratchet_routes
 from backend.web.routes import worktrees as worktrees_routes
 from backend.web.routes import settings as settings_routes
+from backend.web.routes import calibrate as calibrate_routes
 from backend.watcher.supervisor import get_watcher, bootstrap_from_db
 
 app = FastAPI(title="AIPC Conductor", version="0.0.1")
@@ -74,3 +75,4 @@ app.include_router(chat_routes.router)
 app.include_router(ratchet_routes.router)
 app.include_router(worktrees_routes.router)
 app.include_router(settings_routes.router)
+app.include_router(calibrate_routes.router)

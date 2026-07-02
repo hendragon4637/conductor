@@ -9,13 +9,14 @@ import psycopg
 from psycopg.rows import dict_row
 
 from backend.triggers.guardrails import with_guardrails
-from backend.triggers.jobs import run_task, enrich, ratchet_sweep
+from backend.triggers.jobs import run_task, enrich, ratchet_sweep, calibrate_sweep
 
 
 _JOB_REGISTRY: dict[str, Callable] = {
     "run_task": run_task,
     "enrich": enrich,
     "ratchet_sweep": ratchet_sweep,
+    "calibrate_sweep": calibrate_sweep,
 }
 
 

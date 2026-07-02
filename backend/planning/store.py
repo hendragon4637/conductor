@@ -29,19 +29,21 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
     project_id = plan.project_id or (plan.dag[0].project_id if plan.dag else "default")
     success_json = plan.success.model_dump() if hasattr(plan.success, 'model_dump') else {"text": str(plan.success)}
 
+    needs_usage_sim = getattr(plan, "needs_usage_sim", False)
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
             cur.execute(
                 """INSERT INTO plans
-                   (plan_id, project_id, user_intent, goal, success, dag, ratified, version)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   (plan_id, project_id, user_intent, goal, success, dag, ratified, version, needs_usage_sim)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (plan_id) DO UPDATE SET
                      project_id = EXCLUDED.project_id,
                      user_intent = EXCLUDED.user_intent,
                      goal = EXCLUDED.goal,
                      success = EXCLUDED.success,
                      dag = EXCLUDED.dag,
-                     ratified = EXCLUDED.ratified
+                     ratified = EXCLUDED.ratified,
+                     needs_usage_sim = EXCLUDED.needs_usage_sim
                 """,
                 (
                     plan.plan_id,
@@ -52,6 +54,7 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
                     dag_json,
                     ratified,
                     plan.version,
+                    needs_usage_sim,
                 ),
             )
         c.commit()
@@ -121,14 +124,20 @@ def save_run(run: dict[str, Any]) -> None:
         with c.cursor() as cur:
             cur.execute(
                 """INSERT INTO runs
-                   (id, plan_id, state, worktree_root, note, approved_at, finished_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   (id, plan_id, state, worktree_root, note, approved_at, finished_at,
+                    l4_standalone, l4_acceptance, l4_status, l4_reason, run_md_present)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (id) DO UPDATE SET
                      state = EXCLUDED.state,
                      worktree_root = COALESCE(EXCLUDED.worktree_root, runs.worktree_root),
                      approved_at = COALESCE(EXCLUDED.approved_at, runs.approved_at),
                      finished_at = COALESCE(EXCLUDED.finished_at, runs.finished_at),
-                     note = COALESCE(EXCLUDED.note, runs.note)
+                     note = COALESCE(EXCLUDED.note, runs.note),
+                     l4_standalone = COALESCE(EXCLUDED.l4_standalone, runs.l4_standalone),
+                     l4_acceptance = COALESCE(EXCLUDED.l4_acceptance, runs.l4_acceptance),
+                     l4_status = COALESCE(EXCLUDED.l4_status, runs.l4_status),
+                     l4_reason = COALESCE(EXCLUDED.l4_reason, runs.l4_reason),
+                     run_md_present = COALESCE(EXCLUDED.run_md_present, runs.run_md_present)
                 """,
                 (
                     run.get("id"),
@@ -138,6 +147,11 @@ def save_run(run: dict[str, Any]) -> None:
                     run.get("note"),
                     run.get("approved_at"),
                     run.get("finished_at"),
+                    run.get("l4_standalone"),
+                    run.get("l4_acceptance"),
+                    run.get("l4_status"),
+                    run.get("l4_reason"),
+                    run.get("run_md_present"),
                 ),
             )
         c.commit()

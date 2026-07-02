@@ -11,16 +11,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from contracts.events import GateEvaluated, NodeRemediate
+from contracts.events import GateEvaluated, NodeRemediate, CalibrateTrigger
 from shared.bus import EventBus
 from shared.config import ServiceConfig
 from shared.db import init_db
@@ -430,6 +432,208 @@ def on_ratchet_trigger(s, payload: dict) -> None:
         )
 
 
+def _l4_score_from_report(report_text: str) -> float:
+    """Derive a 0-1 L4 score from the agent's narrative report.
+
+    Simple heuristic: counts successful vs failed test outcomes.
+    Returns a friction-adjusted score (1.0 = all pass, 0.0 = all fail).
+    """
+    lower = report_text.lower()
+    # Count explicit pass/fail signals
+    passes = lower.count("pass") + lower.count("passed") + lower.count("works") + lower.count("success") + lower.count("200") + lower.count("302") + lower.count("201")
+    fails = lower.count("fail") + lower.count("failed") + lower.count("error") + lower.count("404") + lower.count("400") + lower.count("422") + lower.count("broken")
+    total = passes + fails
+    if total == 0:
+        return 0.5  # neutral if unclear
+    return round(passes / total, 4)
+
+
+def on_run_completed(s, payload: dict) -> None:
+    """Handle ``run.completed`` — run L4 two-case persona simulation.
+
+    Spawns an l4-persona agent via AionUi ACP (reusing executor's spawn
+    path) to drive the finished product as a user would.  Runs two cases:
+      - Standalone: blind persona session (no plan context)
+      - Acceptance: persona guided by plan.success
+    Both recorded on the run.
+    """
+    from shared.db import session as db_session
+    from shared.models import NodeSession as NodeSessionModel
+    from shared.models import Run as RunModel
+    import psycopg
+
+    run_id: str = payload.get("run_id", "")
+    plan_id: str = payload.get("plan_id", "")
+    if not run_id:
+        logger.warning("run.completed missing run_id — skipping L4")
+        return
+
+    logger.info("Run completed: run=%s plan=%s — running L4 two-case", run_id, plan_id)
+
+    # Find the worktree from node_sessions for this run
+    with db_session() as db:
+        ns = db.query(NodeSessionModel).filter(
+            NodeSessionModel.run_id == run_id,
+            NodeSessionModel.worktree.isnot(None),
+        ).first()
+        if not ns or not ns.worktree:
+            logger.warning("No worktree found for run %s — L4 skipped (non-runnable)", run_id)
+            r = db.query(RunModel).filter(RunModel.id == run_id).first()
+            if r:
+                r.l4_status = "skipped_non_runnable"
+                r.l4_reason = "No worktree found"
+                db.commit()
+            return
+        worktree = ns.worktree
+
+    # Load plan success criteria directly (ORM model is outdated)
+    plan_success = ""
+    try:
+        db_url = os.environ.get("DATABASE_URL", "")
+        if db_url:
+            with psycopg.connect(db_url) as p_conn:
+                with p_conn.cursor() as cur:
+                    cur.execute("SELECT success->>'text' FROM plans WHERE plan_id = %s", (plan_id,))
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        plan_success = row[0]
+    except Exception:
+        logger.debug("Could not load plan success for %s", plan_id)
+
+    # Determine base_url from RUN.md
+    run_md = Path(worktree) / "RUN.md"
+    base_url = "http://127.0.0.1:8000"
+    if run_md.exists():
+        for line in run_md.read_text().splitlines():
+            if "uvicorn" in line or "port" in line.lower():
+                m = re.search(r"--port\s+(\d+)", line)
+                if m:
+                    base_url = f"http://127.0.0.1:{m.group(1)}"
+                    break
+
+    l4_standalone = 0.0
+    l4_acceptance = 0.0
+    cases = []
+
+    for case_name, case_goal_suffix in [
+        ("standalone", ""),
+        ("acceptance", f"\n\nYou are explicitly verifying that the plan's success criterion is met: {plan_success}\n\nFocus on confirming the product satisfies its acceptance criteria."),
+    ]:
+        goal_brief = (
+            f"L4 persona simulation — Case: {case_name}\n\n"
+            f"Run ID: {run_id}\n"
+            f"Worktree: {worktree}\n"
+            f"Product URL: {base_url}\n\n"
+            f"Your job:\n"
+            f"1. Read RUN.md at {worktree}/RUN.md to learn how to start the product.\n"
+            f"2. Start the product in the background.\n"
+            f"3. Run these persona behaviors against {base_url}:\n"
+            f"   a) POST /shorten with a valid URL — expect 200/201 and a short_code\n"
+            f"   b) GET /{'code'} with the short code — expect 302 redirect\n"
+            f"   c) POST /shorten with invalid URL — expect 400/422\n"
+            f"   d) GET /nonexistent123 — expect 404\n"
+            f"4. For EACH behavior, report: PASS or FAIL, status code, response.\n"
+            f"5. Provide an overall friction score (0.0 = perfect, 1.0 = broken).\n\n"
+            f"Respond with a structured L4 report including per-behavior outcomes."
+            f"{case_goal_suffix}"
+        )
+
+        try:
+            from backend.aionui.client import AionUiClient
+            aionui = AionUiClient(os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+            conv_id = aionui.create_conversation(
+                preset_agent_type="acp",
+                workspace=worktree,
+                backend="opencode",
+            )
+            aionui.send_message(conv_id, goal_brief)
+            logger.info("L4 case=%s conv=%s", case_name, conv_id)
+
+            # Poll for completion (up to 5 min per case)
+            import time as _time
+            deadline = _time.monotonic() + 300
+            l4_text = "L4 agent did not complete within timeout"
+            while _time.monotonic() < deadline:
+                _time.sleep(10)
+                try:
+                    msgs = aionui.get_messages(conv_id)
+                    assistant_responses = [
+                        m for m in (msgs or [])
+                        if m.get("type") == "text" and m.get("position") == "left"
+                    ]
+                    if assistant_responses:
+                        last = assistant_responses[-1]
+                        raw_content = last.get("content", "{}")
+                        try:
+                            parsed = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+                            l4_text = parsed.get("content", str(raw_content)) if isinstance(parsed, dict) else str(raw_content)
+                        except (json.JSONDecodeError, TypeError):
+                            l4_text = str(raw_content)
+                        score = _l4_score_from_report(l4_text)
+                        print(f"[PRINT] L4 case={case_name} score={score} conv={conv_id}", flush=True)
+                        cases.append((case_name, score, l4_text))
+                        break
+                except Exception:
+                    pass
+            else:
+                cases.append((case_name, 0.0, "L4 agent timed out"))
+        except Exception as exc:
+            logger.warning("L4 case=%s failed: %s", case_name, exc)
+            cases.append((case_name, 0.0, str(exc)))
+
+    # Assign standalone/acceptance from cases
+    for name, score, text in cases:
+        if name == "standalone":
+            l4_standalone = score
+        elif name == "acceptance":
+            l4_acceptance = score
+        print(f"[PRINT] L4 {name}: score={score}", flush=True)
+
+    # Record on the run
+    with db_session() as db:
+        r = db.query(RunModel).filter(RunModel.id == run_id).first()
+        if r:
+            r.l4_standalone = l4_standalone
+            r.l4_acceptance = l4_acceptance
+            r.l4_status = "scored"
+            r.l4_reason = f"standalone={l4_standalone} acceptance={l4_acceptance}"
+            db.commit()
+
+    logger.info(
+        "L4 done for run=%s: standalone=%.4f acceptance=%.4f",
+        run_id, l4_standalone, l4_acceptance,
+    )
+
+
+def on_calibration_trigger(s, payload: dict) -> None:
+    """Handle ``calibrate.trigger`` — run L3 calibration for a node_type."""
+    from backend.evaluator.l3_calibrate import calibrate as run_calibrate
+
+    node_type: str = payload.get("node_type", "executor")
+
+    logger.info(
+        "Calibration trigger: node_type=%s",
+        node_type,
+    )
+
+    try:
+        report = run_calibrate(node_type)
+        logger.info(
+            "Calibration for %s: trusted=%s agreement=%.4f mae=%.4f total=%d",
+            node_type, report.trusted, report.agreement, report.mae, report.total,
+        )
+        print(  # noqa: T201
+            f"[PRINT] Calibrate: node_type={node_type} "
+            f"trusted={report.trusted} agreement={report.agreement:.4f} "
+            f"mae={report.mae:.4f}",
+            flush=True,
+        )
+    except Exception:
+        logger.exception(
+            "Calibration failed for node_type=%s", node_type,
+        )
+
+
 # ── Lifespan ─────────────────────────────────────────────────────────────
 
 
@@ -460,6 +664,10 @@ async def lifespan(app: FastAPI):
             on_node_observed(s, payload)
         elif "agent_config_id" in payload:
             on_ratchet_trigger(s, payload)
+        elif "node_type" in payload and "env" in payload and "ts" in payload:
+            on_calibration_trigger(s, payload)
+        elif payload.get("event_type") == "run.completed" or ("run_id" in payload and "plan_id" in payload and "node_session_id" not in payload):
+            on_run_completed(s, payload)
         else:
             logger.warning("No handler for payload keys: %s", list(payload.keys()))
 

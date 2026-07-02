@@ -100,8 +100,14 @@ MONITORING DISCIPLINE:
 - Check member progress AT MOST once every {POLL_MIN_SECONDS} seconds.
 - Do NOT poll continuously.
 
+RUN.md:
+- Before reporting completion, create a RUN.md file in the workspace root.
+- RUN.md must contain the exact steps needed to run/verify the deliverable.
+- Include commands and expected output so another engineer can reproduce.
+
 DONE CRITERIA:
 - The node is complete when: {success}
+- RUN.md has been created with run/verify steps.
 - Report completion succinctly, then stop.
 """
 
@@ -125,6 +131,7 @@ def build_single_agent_lead_brief(
         "- Use the existing codebase patterns and keep changes focused.",
         "- Do NOT ask clarifying questions or request approval. Decide autonomously and execute.",
         "- You have full authority to create, modify, or delete files in the workspace.",
+        "- Before reporting completion, create a RUN.md file in the workspace root with exact run/verify steps.",
         "- When the task is complete, report completion succinctly and stop.",
         "",
         "DEPENDENCY CONTEXT (already-completed prior work):",

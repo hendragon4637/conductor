@@ -65,6 +65,11 @@ class Run(Base):
     merge_commit = Column(String, nullable=True)
     quarantine_tag = Column(String, nullable=True)
     worktree_expires_at = Column(DateTime(timezone=True), nullable=True)
+    l4_standalone = Column(Real, nullable=True)
+    l4_acceptance = Column(Real, nullable=True)
+    l4_status = Column(String, nullable=True)
+    l4_reason = Column(Text, nullable=True)
+    run_md_present = Column(Boolean, nullable=True)
 
 
 # ── Node Sessions — WRITER: executor-svc (spawn), watcher-svc (verdict), evaluator-svc (gate) ──

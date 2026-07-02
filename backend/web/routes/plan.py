@@ -127,6 +127,7 @@ class NodeSpec(BaseModel):
     task: NodeTaskSpec = NodeTaskSpec()
     success: NodeSuccessSpec = NodeSuccessSpec()
     success_criterion: Optional[str] = None  # legacy compat
+    capabilities: list[str] = []  # pre-set capabilities for BYO-DAG; skips capability selector
 
 
 class PlanPropose(BaseModel):

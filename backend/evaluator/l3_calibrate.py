@@ -15,7 +15,9 @@ import json
 import logging
 import os
 import statistics
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from backend.evaluator.l2_judge import run_l2
@@ -184,12 +186,21 @@ def calibrate(
         human_met = item.get("human_label", False)
 
         # Re-score frozen artifact with L2 judge -- NO real run
+        # Write artifact_blob to a temp directory so collect_artifact() can read it
+        tmpdir = None
         try:
-            result = run_l2(checks=[check], worktree="", trace_id=None)
+            tmpdir = tempfile.mkdtemp(prefix=f"cal-{item['id'][:12]}-")
+            artifact_path = Path(tmpdir) / "artifact.py"
+            artifact_path.write_text(artifact_blob or "", encoding="utf-8")
+            result = run_l2(checks=[check], worktree=tmpdir, trace_id=None)
             judge_score = result.score
         except Exception as exc:
             logger.warning("Judge call failed for golden item %s: %s", item["id"], exc)
             judge_score = 0.0
+        finally:
+            if tmpdir:
+                import shutil
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
         judge_met = _score_to_binary(judge_score)
         abs_err = abs(judge_score - human_score)
@@ -227,6 +238,30 @@ def calibrate(
     )
 
     _upsert_judge_trust(node_type, report.agreement, report.mae, report.trusted)
+
+    # Log calibration metrics to Langfuse (non-blocking)
+    try:
+        from backend.observability.langfuse_client import get_langfuse
+        lf = get_langfuse()
+        trace = lf.trace(
+            name=f"l3_calibrate_{node_type}",
+            metadata={"node_type": node_type, "source": "l3_calibrate"},
+        )
+        trace.score(
+            name="l3_agreement",
+            value=report.agreement,
+            data_type="NUMERIC",
+            comment=f"Agreement rate for {node_type} calibration",
+        )
+        trace.score(
+            name="l3_mae",
+            value=report.mae,
+            data_type="NUMERIC",
+            comment=f"Mean absolute error for {node_type} calibration",
+        )
+        lf.flush()
+    except Exception:
+        pass
 
     if not trusted:
         logger.info(

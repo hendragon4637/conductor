@@ -144,7 +144,8 @@ def _handle_gate_evaluated(session, payload):
             _commit_worktree(run_id)
             finalize_success(run_id, workspace_root=_WORKSPACE_ROOT)
             _update_run(run_id, state="done")
-            print(f"[PRINT] Run {run_id} finalized and marked done", flush=True)
+            emit(s, {"event_type": "run.completed", "run_id": run_id, "plan_id": payload.get("plan_id", ""), "product_type": "api"})
+            print(f"[PRINT] Run {run_id} finalized and marked done — run.completed emitted", flush=True)
         except Exception as exc:
             logger.error("Failed to finalize run %s: %s", run_id, exc)
             print(f"[PRINT] FAILED to finalize run {run_id}: {exc}", flush=True)
@@ -158,6 +159,11 @@ def _handle_gate_evaluated(session, payload):
         except Exception as exc:
             logger.error("Failed to quarantine run %s: %s", run_id, exc)
             print(f"[PRINT] FAILED to quarantine run {run_id}: {exc}", flush=True)
+    elif gate_outcome == "remediate":
+        logger.info(
+            "Gate outcome: remediate — remediation dispatched for run %s",
+            run_id,
+        )
     else:
         logger.info(
             "Gate outcome %s for run %s -- dispatching next node",
@@ -169,20 +175,28 @@ def _handle_gate_evaluated(session, payload):
 def _handle_node_remediate(session, payload):
     """Attempt fix-forward by re-spawning the node with feedback.
 
-    Loads the full plan from DB, finds the failed node, and creates
-    a remediation session with the same worktree (fix-forward).
+    Creates a new node_session with correct attempt tracking,
+    remediation_of linking, remediation brief, and feedback passing.
+    Closes the previous session row with gate_outcome='remediate'.
     """
     from backend.orchestration.spawn import spawn_node_team
     from backend.planning.store import get_plan
+    from backend.evaluator.remediation import build_remediation_brief
 
     from services.executor.aionui_client import AionUiClient
     from services.executor.worktree_manager import WorktreeManager
+    from shared.db import session as db_session
+    from shared.models import NodeSession as NodeSessionModel
+    from sqlalchemy.sql import func
+    import uuid
 
     run_id = payload["run_id"]
     node_id = payload["node_id"]
     plan_id = payload.get("plan_id", run_id)
     prev_session_id = payload.get("prev_session_id", "")
     attempt_next = payload.get("attempt_next", 1)
+    feedback_ref = payload.get("feedback_ref", prev_session_id)
+    worktree = payload.get("worktree", "")
 
     logger.info(
         "Remediating node %s run %s attempt %d (prev session %s)",
@@ -202,15 +216,115 @@ def _handle_node_remediate(session, payload):
         logger.error("Node %s not found in plan %s", node_id, plan_id)
         return
 
+    # 1. Close previous session with gate_outcome='remediate'
+    with db_session() as s:
+        updated = (
+            s.query(NodeSessionModel)
+            .filter(NodeSessionModel.id == prev_session_id)
+            .update({
+                NodeSessionModel.gate_outcome: "remediate",
+                NodeSessionModel.finished_at: func.now(),
+            })
+        )
+        s.commit()
+        if updated:
+            logger.info("Closed previous session %s with gate_outcome=remediate", prev_session_id)
+        else:
+            logger.warning("Previous session %s not found — proceeding without close", prev_session_id)
+
+    # 2. Load feedback from feedback_ref node_session
+    feedback = {}
+    with db_session() as s:
+        fb_ns = s.query(NodeSessionModel).filter(NodeSessionModel.id == feedback_ref).first()
+        if fb_ns is not None and fb_ns.feedback is not None:
+            raw = fb_ns.feedback
+            if isinstance(raw, dict):
+                feedback = raw
+            logger.info(
+                "Loaded feedback from session %s (%d failed checks)",
+                feedback_ref, len(feedback.get("failed_checks", [])),
+            )
+        else:
+            logger.warning("No feedback found for feedback_ref %s", feedback_ref)
+
+    # 3. Build remediation brief (original goal + failed checks + fix-forward instruction)
+    original_task = (node_data.get("task") or {}).get("text", "")
+    success_criterion = (node_data.get("success") or {}).get("text", "")
+    brief = build_remediation_brief(original_task, success_criterion, feedback)
+    logger.info("Built remediation brief for node %s (attempt %d)", node_id, attempt_next)
+
+    # 4. Create new node_session for this remediation attempt
+    new_ns_id = f"ns_{uuid.uuid4().hex[:8]}"
+    backend = node_data.get("backend", "opencode")
+
+    with db_session() as s:
+        new_ns = NodeSessionModel(
+            id=new_ns_id,
+            run_id=run_id,
+            node_id=node_id,
+            backend=backend,
+            verdict="running",
+            worktree=worktree,
+            attempt=attempt_next,
+            remediation_of=prev_session_id,
+            feedback=feedback,
+        )
+        s.add(new_ns)
+        s.commit()
+        logger.info(
+            "Created remediation session %s for node %s attempt %d remediation_of=%s",
+            new_ns_id, node_id, attempt_next, prev_session_id,
+        )
+
+    # 5. Override node task with remediation brief (same members, same config)
+    node_with_brief = dict(node_data)
+    node_with_brief["task"] = {"text": brief}
+
     aionui = AionUiClient(_AIONUI_HOST)
     wm = WorktreeManager(_WORKSPACE_ROOT)
 
-    spawn_node_team(
-        node=node_data,
-        plan=plan_data,
-        session_id=run_id,
-        aionui=aionui,
-        wm=wm,
+    # Ensure spawn reuses existing worktree (fix-forward, do NOT create new)
+    plan_data["worktree_path"] = worktree
+
+    # 6. Spawn fix-forward remediation team
+    try:
+        conv_map = spawn_node_team(
+            node=node_with_brief,
+            plan=plan_data,
+            session_id=run_id,
+            aionui=aionui,
+            wm=wm,
+        )
+    except Exception:
+        logger.exception("Failed to spawn remediation for node %s run %s", node_id, run_id)
+        return
+
+    # 7. Update new session with aionui IDs from spawn
+    orch_conv = conv_map.get("orchestrator")
+    if not orch_conv:
+        for k, v in conv_map.items():
+            if not k.startswith("__"):
+                orch_conv = v
+                break
+    team_id = conv_map.get("__team_id__")
+
+    if orch_conv and new_ns_id:
+        with db_session() as s:
+            s.query(NodeSessionModel).filter(NodeSessionModel.id == new_ns_id).update({
+                NodeSessionModel.aionui_conversation_id: orch_conv,
+                NodeSessionModel.aionui_team_id: team_id,
+            })
+            s.commit()
+            logger.info(
+                "Updated session %s with aionui conv=%s team=%s",
+                new_ns_id, orch_conv, team_id,
+            )
+    else:
+        logger.warning("No conversation_id from spawn — session %s not updated with aionui IDs", new_ns_id)
+
+    logger.info(
+        "Remediation complete for node %s run %s attempt %d — session %s",
+        node_id, run_id, attempt_next, new_ns_id,
     )
 
 

@@ -69,6 +69,10 @@ class MetaGoal(BaseModel):
         default="",
         description="Seeded success criteria from the domain profile's acceptance block",
     )
+    needs_usage_sim: bool = Field(
+        default=False,
+        description="True when the product has a user-facing surface that warrants L4 persona simulation",
+    )
 
 
 @dataclass
@@ -218,6 +222,8 @@ def enrich_with_conventions(meta_goal: MetaGoal, raw_input: str) -> MetaGoal:
                 seed_parts.append(val)
     if seed_parts:
         meta_goal.success_seed = "; ".join(seed_parts)
+
+    meta_goal.needs_usage_sim = domain in ("software_app", "api_service", "cli_script")
 
     return meta_goal
 

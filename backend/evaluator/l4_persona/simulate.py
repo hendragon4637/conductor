@@ -180,6 +180,7 @@ def _execute_behavior(
     behavior: dict[str, Any],
     base_url: str,
     refs: dict[str, Any],
+    driver: str = "http",
 ) -> BehaviorResult:
     """Execute all steps of a single behavior and return the result."""
     result = BehaviorResult(
@@ -194,7 +195,12 @@ def _execute_behavior(
         action = step.get("action", "request")
 
         if action == "request":
-            obs = _execute_http_step(step, base_url, refs)
+            if driver == "http":
+                obs = _execute_http_step(step, base_url, refs)
+            else:
+                # Non-HTTP drivers not fully implemented: fall back to HTTP
+                logger.debug("Driver '%s' step fallback to HTTP for %s %s", driver, step.get("method", "GET"), step.get("path", "/"))
+                obs = _execute_http_step(step, base_url, refs)
             obs.expectations_met = _check_expectations(step, obs)
             if not obs.expectations_met:
                 all_met = False
@@ -329,6 +335,8 @@ def _log_to_langfuse(report: L4Report) -> None:
 def run_l4(
     persona_name: str = "casual_user",
     base_url: str = "http://127.0.0.1:8000",
+    goal_override: str = "",
+    driver: str = "http",
 ) -> L4Report:
     """Run an L4 persona usage simulation against a running product.
 
@@ -348,6 +356,12 @@ def run_l4(
         FileNotFoundError: If the persona YAML does not exist.
         ConnectionError: If the product is unreachable on the first behavior.
     """
+    if driver not in ("http", "browser", "shell"):
+        logger.warning("Unknown L4 driver '%s' — falling back to http", driver)
+        driver = "http"
+    if driver in ("browser", "shell"):
+        logger.warning("L4 driver '%s' is not fully implemented — using HTTP fallback", driver)
+
     persona = load_persona(persona_name)
     refs: dict[str, Any] = {}
     behavior_results: list[BehaviorResult] = []
@@ -356,18 +370,30 @@ def run_l4(
         # Check dependencies
         depends = behavior.get("depends_on")
         if depends:
+            behavior_id = behavior.get("id", "?")
             dep_result = next(
                 (r for r in behavior_results if r.behavior_id == depends),
                 None,
             )
-            if dep_result and not dep_result.success:
-                logger.info(
-                    "Skipping %s — dependency %s failed",
-                    behavior.get("id"), depends,
+            if dep_result is None:
+                logger.warning(
+                    "Non-runnable L4 behavior '%s' — dependency '%s' not found "
+                    + "in executed behaviors. Skipping. "
+                    + "(hint: ensure the persona YAML declares the dependency "
+                    + "behavior before the dependent one)",
+                    behavior_id, depends,
+                )
+                continue
+            if not dep_result.success:
+                logger.warning(
+                    "Non-runnable L4 behavior '%s' — dependency '%s' failed "
+                    + "(friction_score=%.4f). Skipping. "
+                    + "(hint: fix the '%s' behavior so this item can be evaluated)",
+                    behavior_id, depends, dep_result.friction_score, depends,
                 )
                 continue
 
-        result = _execute_behavior(behavior, base_url, refs)
+        result = _execute_behavior(behavior, base_url, refs, driver=driver)
         behavior_results.append(result)
 
     # Raise on first behavior failure due to connection issues
@@ -393,9 +419,10 @@ def run_l4(
         4,
     )
 
+    persona_goal = goal_override or persona.get("goal", "")
     report = L4Report(
         persona_name=persona.get("name", persona_name),
-        goal=persona.get("goal", ""),
+        goal=persona_goal,
         behaviors=behavior_results,
         dimensions=dimensions,
         overall_friction=overall,
@@ -474,6 +501,7 @@ def run_l4_plan(
     run: dict,
     product_type: str = "web",
     base_url: str = "http://127.0.0.1:8000",
+    driver_override: str = "",
 ) -> dict:
     """Run L4 in two cases on a finished plan run.
 
@@ -496,17 +524,29 @@ def run_l4_plan(
         ``l4_standalone``, ``l4_acceptance``, ``driver``, ``scenario``.
         If driver is ``"none"``, returns None-values.
     """
-    driver = pick_driver(product_type)
+    driver = driver_override or pick_driver(product_type)
     if driver == "none":
-        logger.info("L4 skipped — product_type=%s has no meaningful usage surface", product_type)
+        logger.warning(
+            "L4 gate skipped for product_type='%s' — no meaningful usage surface. "
+            + "(hint: set product_type to 'web', 'cli', or 'api' to enable L4 "
+            + "evaluation, or set driver_override to force a driver)",
+            product_type,
+        )
         return {"l4_standalone": None, "l4_acceptance": None, "driver": driver}
 
     plan_success = (plan.get("success") or {}).get("text", "")
     scenario = scenario_from_plan_success(plan_success)
 
-    # Both cases use the same casual_user persona against the product
-    case1 = run_l4(persona_name="casual_user", base_url=base_url)
-    case2 = run_l4(persona_name="casual_user", base_url=base_url)
+    # Case 1 — Standalone: blind persona session with no plan context
+    case1 = run_l4(persona_name="casual_user", base_url=base_url, driver=driver)
+
+    # Case 2 — Acceptance: persona guided by the plan's success criterion
+    case2 = run_l4(
+        persona_name="casual_user",
+        base_url=base_url,
+        goal_override=scenario,
+        driver=driver,
+    )
 
     l4_score_standalone = 1.0 - case1.overall_friction
     l4_score_acceptance = 1.0 - case2.overall_friction

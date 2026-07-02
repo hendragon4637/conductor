@@ -56,6 +56,13 @@
 - Remediation attempt cap is 2 (1 original + 1 retry); `remediation_of` links retry to its predecessor
 - L4 produces structured friction scores per dimension; report is surfaced for human review — NEVER auto-decides feature direction
 - L4 `L4Report` has no `auto_apply` or `decision` field — it carries observations only
+- L4 handler (`on_run_completed`) spawns AionUi ACP conversations via `aionui.create_conversation(preset_agent_type="acp")`
+- L4 polls AionUi for `type="text"` / `position="left"` messages at 10s intervals, 300s timeout per case
+- L4 scoring is heuristic: counts pass/fail/status-code keywords in agent narrative report — fragile, not semantic
+- L4 handler **must `db.commit()`** after writing `l4_standalone`/`l4_acceptance`/`l4_status`/`l4_reason` — missing commit is the #1 bug
+- L4 persona YAML files go in `backend/evaluator/l4_persona/personas/` with short names matching product type
+- L4 agent config goes in `agent_configs/l4-persona.yaml` with `acp-browser` backend
+- The `RUN.md` file in the worktree determines base URL for L4 HTTP testing (parsed from `--port` flag)
 
 ## L3 calibration
 - `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
@@ -141,6 +148,12 @@
 - The monolith watcher (`get_watcher()`) is also initialized inside executor-svc when `launch_run()` calls it. This creates a separate watcher polling in the executor process alongside the microservice watcher-svc — harmless but creates duplicate state.
 - NEVER have multiple pika consumers on the same queue. RabbitMQ round-robins messages across consumers regardless of routing key. Use a SINGLE dispatcher consumer that routes by event type (detected from payload fields).
 - Before calling `finalize_success()`, always auto-commit the worktree via `git add -A && git commit`. The agent writes files to the worktree but never commits them; the merge requires committed changes.
+- L4 handler consumes `run.completed` events — the `BINDINGS` dict in `shared/bus.py` must have `"run.completed"` in `evaluator.q` list
+- Ratchet handler consumes `ratchet.trigger` events — same binding list addition pattern
+- When adding new event consumers, add the routing key to BOTH the `BINDINGS` dict AND the microservice's dispatcher routing logic — RabbitMQ bindings alone don't route to handlers
+- The evaluator dispatcher routes by inspecting payload fields (e.g., `event_type`), not by routing key — maintain this pattern for new consumers
+- RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
+- A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
 
 ## Git
 - Atomic commits with clear messages

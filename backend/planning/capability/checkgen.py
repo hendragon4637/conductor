@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any
 
+from backend.evaluator.l3_meta.golden import count_golden
 from backend.planning.capability.registry import get_capability, objective_dims, subjective_dims
 from backend.planning.meta_planner.llm import call_llm_structured, get_meta_planner_model
 
@@ -45,12 +46,26 @@ Return a JSON array of check objects, each with:
 {{"id": "unique-id", "type": "rubric", "criterion": "...", "rubric_item": "yes/no question", "weight": 1.0}}"""
 
 
+def _has_executor_role(node: dict[str, Any]) -> bool:
+    members = node.get("members", [])
+    return any(m.get("role") == "executor" for m in members)
+
+
+def validate_checks_l1(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Public boundary validation for L1 checks.
+
+    Validates that L1 checks don't contain runtime signals and meet
+    other boundary constraints. Drops invalid checks with warnings.
+    """
+    return [c for c in checks if _validate_l1_scope(c)]
+
+
 def generate_capability_checks(node: dict[str, Any]) -> list[dict[str, Any]]:
     """Generate checks for a single node from its capabilities' quality_dimensions.
 
     Objective dims -> L1 (deterministic shell/file checks)
     Subjective dims -> L2 (rubric items for the judge)
-    Low golden_ref_count -> L2 items flagged provisional.
+    Live golden_set count per capability -> L2 items flagged provisional.
     """
     cap_names = node.get("capabilities", [])
     if not cap_names:
@@ -71,12 +86,21 @@ def generate_capability_checks(node: dict[str, Any]) -> list[dict[str, Any]]:
     for cap in caps:
         l1_dims_raw.extend(objective_dims(cap))
         l2_seed.extend(subjective_dims(cap))
-        g = cap.get("golden_ref_count", 0)
+        g = count_golden(node_type=cap["name"], split="calibration")
         if g < min_golden:
             min_golden = g
 
     l1_checks = _generate_l1(l1_dims_raw, task, deliverables)
     l2_checks = _generate_l2(l2_seed, task, deliverables)
+
+    l1_checks = validate_checks_l1(l1_checks)
+    if _has_executor_role(node):
+        l1_checks.insert(0, {
+            "id": "l1-run-md-present",
+            "type": "deterministic",
+            "criterion": "RUN.md exists in worktree documenting run steps",
+            "check_cmd": "test -f RUN.md",
+        })
 
     confidence = "calibrated" if min_golden >= MIN_GOLDEN_FOR_CALIBRATED else "provisional"
     for item in l2_checks:

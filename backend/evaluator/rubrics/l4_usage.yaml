@@ -1,0 +1,12 @@
+name: l4_usage
+applies_to: ["l4_persona"]
+items:
+  - id: l4_discoverability
+    rubric_item: "Can a new user figure out the product's primary features without external docs or guidance?"
+    weight: 1.5
+  - id: l4_error_feedback
+    rubric_item: "When the user makes a mistake or hits an error, does the product return clear, actionable feedback?"
+    weight: 1.5
+  - id: l4_friction
+    rubric_item: "Do the primary user flows complete without unexpected failures, confusing responses, or broken steps?"
+    weight: 2.0

@@ -82,3 +82,4 @@ class Plan(BaseModel):
     dag: list[PlanNode] = Field(default_factory=list, description="Plan DAG: list of canonical nodes")
     ratified: bool = False
     version: int = 1
+    needs_usage_sim: bool = False

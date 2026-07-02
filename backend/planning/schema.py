@@ -83,6 +83,7 @@ class Plan(BaseModel):
     dag: list[PlanNode] = Field(default_factory=list, description="Plan DAG: list of canonical nodes")
     ratified: bool = False
     version: int = 1
+    needs_usage_sim: bool = False
 
 
 # ── Run (execution instance) ──────────────────────────────────────
@@ -96,6 +97,11 @@ class Run(BaseModel):
     finished_at: str | None = None
     worktree_root: str | None = None
     note: str | None = None
+    l4_standalone: float | None = None
+    l4_acceptance: float | None = None
+    l4_status: str | None = None
+    l4_reason: str | None = None
+    run_md_present: bool | None = None
 
 
 # ── NodeSession (per-node execution record) ───────────────────────

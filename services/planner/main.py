@@ -94,6 +94,148 @@ def health():
     return {"status": "ok", "service": "planner"}
 
 
+# ── BYO-DAG helpers ─────────────────────────────────────────────────
+
+
+def _validate_supplied_dag_dict(nodes: list[dict]) -> None:
+    """Validate a pre-decomposed DAG provided via ``nodes`` (BYO-DAG path).
+
+    Checks: unique IDs, at least one member per node with backend,
+    all dependencies resolve within the DAG, graph is acyclic.
+    Raises ``ValueError`` on the first failure.
+    """
+    node_ids: set[str] = set()
+    for i, n in enumerate(nodes):
+        nid = n.get("id") or n.get("node_id") or f"node-{i + 1}"
+        if nid in node_ids:
+            raise ValueError(f"Duplicate node id: {nid}")
+        node_ids.add(nid)
+
+        members = n.get("members") or []
+        if not members:
+            raise ValueError(f"Node {nid}: must have at least one member with backend")
+        for m in members:
+            if not m.get("backend"):
+                raise ValueError(
+                    f"Node {nid}: member {m.get('agent_config', '?')} missing backend"
+                )
+
+    def _nid(n: dict, idx: int) -> str:
+        return n.get("id") or n.get("node_id") or f"node-{idx + 1}"
+
+    all_ids = {_nid(n, i) for i, n in enumerate(nodes)}
+
+    # Dependencies must reference existing nodes
+    for i, n in enumerate(nodes):
+        nid = _nid(n, i)
+        for dep in n.get("depends_on") or []:
+            if dep not in all_ids:
+                raise ValueError(f"Node {nid}: depends_on '{dep}' not found in DAG")
+
+    # Acyclicity check via DFS
+    adj: dict[str, list[str]] = {nid: [] for nid in all_ids}
+    for i, n in enumerate(nodes):
+        nid = _nid(n, i)
+        for dep in n.get("depends_on") or []:
+            adj.setdefault(dep, []).append(nid)
+
+    visited: set[str] = set()
+    stack: set[str] = set()
+
+    def _dfs(nid: str) -> None:
+        if nid in stack:
+            raise ValueError(f"Cycle detected in DAG involving node {nid}")
+        if nid in visited:
+            return
+        visited.add(nid)
+        stack.add(nid)
+        for neighbor in adj.get(nid, []):
+            _dfs(neighbor)
+        stack.remove(nid)
+
+    for nid in all_ids:
+        if nid not in visited:
+            _dfs(nid)
+
+
+def _handle_byo_dag(body: GoalRequest, nodes: list[dict]) -> dict:
+    """Process a BYO-DAG request: validate, generate checks, gate, persist."""
+    from backend.evaluator.schema import Check as CheckSchema
+    from backend.planning.store import save_plan
+    from backend.planning.capability.checkgen import generate_capability_checks
+    from backend.evaluator.plan_evaluator import gate_plan
+    from shared.schema import (
+        PlanNode as SharedPlanNode,
+        TaskSpec, NodeSuccess, NodeMember,
+        SuccessCriterion, Plan as SharedPlan,
+    )
+
+    plan_id = f"plan_{uuid4().hex[:8]}"
+
+    # 1. Validate the supplied DAG
+    _validate_supplied_dag_dict(nodes)
+
+    # 2. Generate checks for nodes that don't already have them
+    for n in nodes:
+        if not (n.get("checks") or []):
+            n["checks"] = generate_capability_checks(n)
+
+    # 3. Normalise node_id → id for gate_plan compatibility
+    for n in nodes:
+        if "id" not in n and "node_id" in n:
+            n["id"] = n["node_id"]
+
+    # 4. Run plan-evaluator gate (L1 structural + L2 rubric)
+    dec = gate_plan(nodes, plan_goal=body.raw_input)
+
+    # 5. Convert to SharedPlanNode and persist
+    dag_nodes: list[SharedPlanNode] = []
+    for n in nodes:
+        members = [NodeMember(**m) for m in (n.get("members") or [])]
+        t = n.get("task") or {}
+        task_obj = TaskSpec(
+            text=t.get("text", "") if isinstance(t, dict) else str(t),
+            inputs=t.get("inputs", []) if isinstance(t, dict) else [],
+            deliverables=t.get("deliverables", []) if isinstance(t, dict) else [],
+        )
+        s = n.get("success") or {}
+        success_obj = NodeSuccess(
+            text=s.get("text", "") if isinstance(s, dict) else str(s),
+        )
+        checks = [
+            CheckSchema(**c) if isinstance(c, dict) else c
+            for c in (n.get("checks") or [])
+        ]
+        dag_nodes.append(SharedPlanNode(
+            id=n.get("id", f"node-{len(dag_nodes) + 1}"),
+            members=members,
+            depends_on=n.get("depends_on") or [],
+            task=task_obj,
+            success=success_obj,
+            checks=checks,
+            capabilities=n.get("capabilities", []),
+            project_id=n.get("project_id", body.project_id),
+        ))
+
+    save_plan(plan=SharedPlan(
+        plan_id=plan_id,
+        project_id=body.project_id,
+        user_intent=body.raw_input,
+        goal=body.raw_input,
+        success=SuccessCriterion(text=""),
+        dag=dag_nodes,
+        version=1,
+        needs_usage_sim=False,
+    ))
+
+    return {
+        "status": "gated_ok" if dec.action == "ratify" else "formulated",
+        "plan_id": plan_id,
+        "plan_goal_review": dec.plan_goal_review,
+        "error": None if dec.action == "ratify" else dec.feedback_text,
+    }
+
+
 @app.post("/goal")
 def submit_goal(body: GoalRequest):
     """Submit a raw goal for planning.
@@ -104,6 +246,10 @@ def submit_goal(body: GoalRequest):
     ``awaiting_clarification`` so the human can answer via
     ``/clarify/{plan_id}``.
     """
+    # ── BYO-DAG path: skip LangGraph entirely when nodes are supplied ──
+    if body.nodes:
+        return _handle_byo_dag(body, body.nodes)
+
     from backend.planning.schema import (
         Plan, PlanNode, TaskSpec, NodeSuccess, SuccessCriterion, NodeMember,
     )
@@ -183,6 +329,7 @@ def submit_goal(body: GoalRequest):
         ))
 
     mg = state.get("meta_goal") or {}
+    needs_usage_sim = mg.get("needs_usage_sim", False) if isinstance(mg, dict) else False
     from backend.planning.store import save_plan
     save_plan(plan=SharedPlan(
         plan_id=plan_id,
@@ -192,6 +339,7 @@ def submit_goal(body: GoalRequest):
         success=SuccessCriterion(text=""),
         dag=dag_nodes,
         version=1,
+        needs_usage_sim=needs_usage_sim,
     ))
 
     return {
@@ -297,6 +445,7 @@ def answer_clarification(plan_id: str, body: ClarifyRequest):
         ))
 
     mg = state.get("meta_goal") or {}
+    needs_usage_sim = mg.get("needs_usage_sim", False) if isinstance(mg, dict) else False
     from backend.planning.store import save_plan
     save_plan(plan=SharedPlan(
         plan_id=plan_id,
@@ -306,6 +455,7 @@ def answer_clarification(plan_id: str, body: ClarifyRequest):
         success=SuccessCriterion(text=""),
         dag=dag_nodes,
         version=1,
+        needs_usage_sim=needs_usage_sim,
     ))
 
     return {

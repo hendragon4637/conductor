@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS golden_set (
   task          TEXT NOT NULL,
   artifact_ref  TEXT NOT NULL,
   artifact_blob TEXT,
-  human_label   JSONB NOT NULL,
+  human_label   BOOLEAN NOT NULL,
   labeled_by    TEXT NOT NULL,
   labeled_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   frozen        BOOLEAN NOT NULL DEFAULT TRUE,

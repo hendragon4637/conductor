@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import time
 from typing import Any
+
+import psycopg
+
+import logging
 
 from backend.aionui import AionUiClient, AionUiReader
 from backend.observability.ingest import ingest_run
@@ -11,6 +17,10 @@ from backend.ratchet.mutate import propose_mutation
 from backend.ratchet.experiment import run_experiment
 from backend.ratchet.decide import decide
 from backend.review import score_node, gather_evidence
+from backend.evaluator.l3_calibrate import calibrate as run_calibrate
+from contracts.version import CONTRACTS_VERSION
+
+logger = logging.getLogger(__name__)
 
 HOST = os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937")
 DB_PATH = os.environ.get(
@@ -97,8 +107,49 @@ def enrich(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _emit_ratchet_trigger(
+    agent_config_id: str,
+    node_type: str = "executor",
+) -> None:
+    """Write a ``RatchetTrigger`` event to the transactional outbox.
+
+    The outbox relay in evaluator-svc picks this up, publishes it to
+    RabbitMQ on the ``ratchet.trigger`` routing key, and evaluator-svc's
+    ``on_ratchet_trigger`` handler runs ``backend.evaluator.ratchet.run_experiment()``.
+
+    This bridges the monolith ``ratchet_sweep`` job into the microservice
+    event-driven ratchet pipeline.
+    """
+    db = os.environ.get("DATABASE_URL", "")
+    if not db:
+        return
+    payload = json.dumps({
+        "agent_config_id": agent_config_id,
+        "node_type": node_type,
+        "env": "staging",
+        "ts": time.time(),
+    })
+    with psycopg.connect(db) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO outbox (routing_key, payload, contracts_version) "
+                "VALUES (%s, %s, %s)",
+                ("ratchet.trigger", payload, CONTRACTS_VERSION),
+            )
+        c.commit()
+
+
 def ratchet_sweep(payload: dict[str, Any]) -> dict[str, Any]:
-    """Detect weak configs, propose mutation, experiment, decide (propose-only by default)."""  # noqa: E501
+    """Detect weak configs, propose mutation, emit trigger or run experiment.
+
+    When ``propose_only=True`` (the default), the function emits a
+    ``RatchetTrigger`` to the outbox for each weak config instead of
+    running the experiment inline.  The evaluator-svc consumes these
+    events and runs ``backend.evaluator.ratchet.run_experiment()``.
+
+    When ``propose_only=False``, the legacy inline path runs the full
+    experiment+decide cycle directly.
+    """  # noqa: E501
     threshold = payload.get("threshold", 0.7)
     min_runs = payload.get("min_runs", 5)
     propose_only = payload.get("propose_only", True)
@@ -118,11 +169,13 @@ def ratchet_sweep(payload: dict[str, Any]) -> dict[str, Any]:
             continue
 
         if propose_only:
+            # Emit RatchetTrigger — evaluator-svc runs the experiment asynchronously
+            _emit_ratchet_trigger(agent_cfg)
             results.append({
                 "agent_config": agent_cfg,
                 "mutation": mutation,
                 "applied": False,
-                "reason": "propose_only mode — human approval required for global scope",
+                "reason": "propose_only mode — RatchetTrigger emitted for async experiment",
             })
         else:
             exp = run_experiment(
@@ -146,3 +199,57 @@ def ratchet_sweep(payload: dict[str, Any]) -> dict[str, Any]:
             })
 
     return {"status": "ok", "sweep_count": len(results), "results": results}
+
+
+def calibrate_sweep(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run L3 calibration for all active node types with golden data.
+
+    Loads distinct node_types from the ``golden_set`` table and runs
+    ``calibrate()`` for each.  Results are persisted to ``judge_trust``
+    and logged to Langfuse inside ``calibrate()``.
+    """
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return {"status": "error", "message": "no DATABASE_URL"}
+
+    node_types: list[str] = []
+    try:
+        import psycopg
+
+        with psycopg.connect(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT node_type FROM golden_set WHERE frozen = TRUE ORDER BY node_type"
+                )
+                node_types = [row[0] for row in cur.fetchall()]
+    except Exception as exc:
+        logger.exception("Failed to load node_types from golden_set: %s", exc)
+        return {"status": "error", "message": str(exc)[:200]}
+
+    if not node_types:
+        return {"status": "ok", "message": "no frozen golden items found", "calibrated": []}
+
+    results = []
+    for node_type in node_types:
+        try:
+            report = run_calibrate(node_type)
+            results.append({
+                "node_type": node_type,
+                "trusted": report.trusted,
+                "agreement": report.agreement,
+                "mae": report.mae,
+                "total": report.total,
+                "note": report.note,
+            })
+            logger.info(
+                "Calibrated %s: agreement=%.4f mae=%.4f trusted=%s total=%d",
+                node_type, report.agreement, report.mae, report.trusted, report.total,
+            )
+        except Exception as exc:
+            logger.exception("Calibration failed for node_type=%s: %s", node_type, exc)
+            results.append({
+                "node_type": node_type,
+                "error": str(exc)[:200],
+            })
+
+    return {"status": "ok", "calibrated": results}

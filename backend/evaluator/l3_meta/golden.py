@@ -117,8 +117,17 @@ def add_golden(
     return item_id
 
 
-def count_golden(node_type: str | None = None) -> int:
-    """Count frozen golden items, optionally filtered by node_type."""
+def count_golden(node_type: str | None = None, split: str | None = None) -> int:
+    """Count frozen golden items, optionally filtered by node_type and split.
+
+    Args:
+        node_type: If provided, only count items for this node type.
+        split: If provided, only count items with this split value
+               (e.g. 'calibration' or 'heldout'). Ignored when node_type is None.
+
+    Returns:
+        Item count, or 0 on error / no DB.
+    """
     url = _db_url()
     if not url:
         return 0
@@ -128,10 +137,16 @@ def count_golden(node_type: str | None = None) -> int:
         with psycopg.connect(url) as c:
             with c.cursor() as cur:
                 if node_type:
-                    cur.execute(
-                        "SELECT COUNT(*) FROM golden_set WHERE node_type = %s AND frozen = TRUE",
-                        (node_type,),
-                    )
+                    if split:
+                        cur.execute(
+                            "SELECT COUNT(*) FROM golden_set WHERE node_type = %s AND split = %s AND frozen = TRUE",
+                            (node_type, split),
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT COUNT(*) FROM golden_set WHERE node_type = %s AND frozen = TRUE",
+                            (node_type,),
+                        )
                 else:
                     cur.execute(
                         "SELECT COUNT(*) FROM golden_set WHERE frozen = TRUE"

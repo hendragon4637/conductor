@@ -104,13 +104,26 @@ def _n_decompose(state: PlanState) -> PlanState:
 
 
 def _n_select_capabilities(state: PlanState) -> PlanState:
-    """Resolve capabilities for every DAG node via the capability selector."""
-    from backend.planning.capability.selector import resolve_dag_capabilities
+    """Resolve capabilities for every DAG node via the capability selector.
 
+    Skips nodes that already have non-empty ``capabilities`` pre-set
+    (BYO-DAG path).  Nodes without capabilities get them resolved by the LLM
+    capability selector as usual.
+    """
     dag_list = state["dag"]
     if isinstance(dag_list, dict):
         dag_list = dag_list.get("nodes", [dag_list])
-    dag_list = resolve_dag_capabilities(dag_list)
+
+    if not dag_list:
+        return PlanState(**{**state, "dag": dag_list})
+
+    # Only call the LLM selector for nodes without pre-set capabilities.
+    need_resolve = [n for n in dag_list if not (n.get("capabilities") or [])]
+    if need_resolve:
+        from backend.planning.capability.selector import resolve_dag_capabilities
+        # resolve_dag_capabilities mutates dicts in-place
+        resolve_dag_capabilities(need_resolve)
+
     return PlanState(**{**state, "dag": dag_list})
 
 

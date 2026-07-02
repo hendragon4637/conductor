@@ -1,0 +1,72 @@
+# L4 Persona: URL Shortener User
+# Tests the URL-shortener API: shorten, redirect, bad URL, 404 handling
+name: shorten_user
+goal: "shorten a long URL and use the short code to redirect"
+behaviors:
+  - id: shorten_url
+    description: "Shorten a valid URL"
+    steps:
+      - action: request
+        method: POST
+        path: "/shorten"
+        json:
+          url: "https://example.com/very/long/path"
+        expect:
+          status_in: [200, 201]
+          body_not_empty: true
+      - action: extract
+        ref_key: short_code
+        json_path: "short_code"
+      - action: extract
+        ref_key: code
+        json_path: "code"
+
+  - id: redirect_short_url
+    description: "Follow the short URL and get redirected"
+    depends_on: shorten_url
+    steps:
+      - action: request
+        method: GET
+        path: "/{code}"
+        expect:
+          status_in: [302, 307]
+
+  - id: bad_url_rejected
+    description: "Try shortening an invalid URL — expect 400"
+    steps:
+      - action: request
+        method: POST
+        path: "/shorten"
+        json:
+          url: "not-a-valid-url"
+        expect:
+          status_in: [400, 422]
+          body_not_empty: true
+    friction_severity: medium
+
+  - id: nonexistent_code
+    description: "Fetch a non-existent short code — expect 404"
+    steps:
+      - action: request
+        method: GET
+        path: "/nonexistent123"
+        expect:
+          status_in: [404]
+    friction_severity: low
+
+  - id: empty_url_rejected
+    description: "Try with empty URL — expect 400"
+    steps:
+      - action: request
+        method: POST
+        path: "/shorten"
+        json:
+          url: ""
+        expect:
+          status_in: [400, 422]
+    friction_severity: low
+
+report_dimensions:
+  - discoverability
+  - error_feedback
+  - friction

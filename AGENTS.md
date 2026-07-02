@@ -136,6 +136,13 @@
 - Remediation attempt cap is 2 (1 original + 1 retry); `remediation_of` links retry to its predecessor
 - L4 produces structured friction scores per dimension; report is surfaced for human review — NEVER auto-decides feature direction
 - L4 `L4Report` has no `auto_apply` or `decision` field — it carries observations only
+- L4 handler (`on_run_completed`) spawns AionUi ACP conversations via `aionui.create_conversation(preset_agent_type="acp")`
+- L4 polls AionUi for `type="text"` / `position="left"` messages at 10s intervals, 300s timeout per case
+- L4 scoring is heuristic: counts pass/fail/status-code keywords in agent narrative report — fragile, not semantic
+- L4 handler **must `db.commit()`** after writing `l4_standalone`/`l4_acceptance`/`l4_status`/`l4_reason` — missing commit is the #1 bug
+- L4 persona YAML files go in `backend/evaluator/l4_persona/personas/` with short names matching product type
+- L4 agent config goes in `agent_configs/l4-persona.yaml` with `acp-browser` backend
+- The `RUN.md` file in the worktree determines base URL for L4 HTTP testing (parsed from `--port` flag)
 
 ## L3 calibration
 - `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
@@ -221,6 +228,12 @@
 - The monolith watcher (`get_watcher()`) is also initialized inside executor-svc when `launch_run()` calls it. This creates a separate watcher polling in the executor process alongside the microservice watcher-svc — harmless but creates duplicate state.
 - NEVER have multiple pika consumers on the same queue. RabbitMQ round-robins messages across consumers regardless of routing key. Use a SINGLE dispatcher consumer that routes by event type (detected from payload fields).
 - Before calling `finalize_success()`, always auto-commit the worktree via `git add -A && git commit`. The agent writes files to the worktree but never commits them; the merge requires committed changes.
+- L4 handler consumes `run.completed` events — the `BINDINGS` dict in `shared/bus.py` must have `"run.completed"` in `evaluator.q` list
+- Ratchet handler consumes `ratchet.trigger` events — same binding list addition pattern
+- When adding new event consumers, add the routing key to BOTH the `BINDINGS` dict AND the microservice's dispatcher routing logic — RabbitMQ bindings alone don't route to handlers
+- The evaluator dispatcher routes by inspecting payload fields (e.g., `event_type`), not by routing key — maintain this pattern for new consumers
+- RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
+- A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
 
 ## Git
 - Atomic commits with clear messages
@@ -370,6 +383,107 @@ tail -f /tmp/watcher-svc.log    # watcher
 tail -f /tmp/planner-svc.log    # planner
 tail -f /tmp/evaluator-svc.log  # evaluator
 ```
+
+## L3 calibration
+```bash
+# Seed golden set for a node type (example-generated data)
+cd /opt/aipc/conductor && uv run python scripts/seed_golden_backend_api.py
+
+# Trigger calibration (via evaluator-svc)
+curl -s -X POST http://127.0.0.1:8094/calibrate/backend_api
+
+# Check judge trust
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT node_type, agreement, mae, trusted, calibrated_at FROM judge_trust"
+```
+
+## L4 persona simulation
+```bash
+# Check L4 scores on a run
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id = '<run_id>'"
+
+# Re-emit run.completed event (for L4 retry)
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM processed_events WHERE event_key LIKE '%<run_id>:run.completed%'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "UPDATE runs SET l4_status = NULL, l4_standalone = NULL, l4_acceptance = NULL, l4_reason = NULL WHERE id = '<run_id>'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('run.completed', '{\"event_type\": \"run.completed\", \"run_id\": \"<run_id>\", \"plan_id\": \"<plan_id>\", \"product_type\": \"api\"}', '1.0', NOW())"
+
+# Check AionUi conversation status
+curl -s http://127.0.0.1:40937/api/conversations/<conv_id> | python3 -m json.tool
+
+# Query AionUi SQLite for conversation messages
+sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db \
+  "SELECT type, position, status, substr(content,1,80) FROM messages WHERE conversation_id='<conv_id>' ORDER BY created_at"
+```
+
+## Ratchet experiment
+```bash
+# Fire ratchet.trigger event
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('ratchet.trigger', '{\"event_type\": \"ratchet.trigger\", \"agent_config_id\": \"<agent_config_id>\", \"node_type\": \"executor\"}', '1.0', NOW())"
+
+# Check experiments and skill_mutations tables
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM experiments ORDER BY created_at"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM skill_mutations ORDER BY created_at"
+```
+
+## Whole-stack DB trace
+```bash
+# Trace a complete run end-to-end
+RUN_ID="run_0422fd60"
+PLAN_ID="plan_2b419edc"
+
+echo "=== Plan ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT plan_id, plan_status, ratified FROM plans WHERE plan_id='$PLAN_ID'"
+
+echo "=== Run ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, plan_id, l4_status, l4_standalone, l4_acceptance FROM runs WHERE id='$RUN_ID'"
+
+echo "=== Node Session ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, verdict, gate_outcome, l1_pass, l2_score FROM node_sessions WHERE run_id='$RUN_ID'"
+
+echo "=== Judge Trust ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM judge_trust"
+
+echo "=== Golden Set ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT COUNT(*), split FROM golden_set GROUP BY split"
+
+echo "=== Outbox Events ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, routing_key, published_at IS NOT NULL as published FROM outbox ORDER BY id"
+
+echo "=== Processed Events ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT event_key, processed_at FROM processed_events ORDER BY processed_at"
+
+echo "=== Experiments ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT COUNT(*) FROM experiments"
+
+echo "=== Skill Mutations ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT COUNT(*) FROM skill_mutations"
+```
+
+## Whole-stack reset (clean state)
+```bash
+bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
+```
+
+## Migrations
+Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration files:
+- `v6_030_l4.sql` — adds L4 columns (`l4_status`, `l4_standalone`, `l4_acceptance`, `l4_reason`) to `runs` table and `needs_usage_sim` to `plans`
+- Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
 
 ## Environment
 ```bash

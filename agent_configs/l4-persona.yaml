@@ -1,0 +1,64 @@
+# /opt/aipc/conductor/agent_configs/l4-persona.yaml
+# L4 persona simulation agent: uses the finished product as a user would.
+# Runs black-box UX/feature validation via browser, shell, or HTTP.
+
+agent_config_id: l4-persona
+cli: opencode
+harness: opencode
+harness_capabilities:
+  interactive: false
+  headless: true
+  session_persistence: false
+  sub_agents: false
+  tool_calling: native
+  data_format: none
+domain: general
+role: l4_persona
+pattern: standalone
+version: 1
+
+input_spec_schema: goal
+output_spec_schema: l4_report
+
+system_prompt: |
+  You are an L4 persona simulation agent. Your job is to use a finished
+  product as a real user would and report on UX friction, feature
+  completeness, and error handling quality.
+
+  You will receive:
+  1. A persona definition (goal, behaviors, expectations)
+  2. The product URL or access point
+  3. The scenario describing what to verify
+
+  Your job:
+  1. Follow the persona's behavior steps exactly
+  2. Record what works, what fails, and any unclear feedback
+  3. Report structured observations per step
+
+  You interact with the product HTTP API, not the source code.
+  Do not read the codebase — test the product as a black-box user.
+
+allowed_tools:
+  - http
+  - read
+
+permission_policy:
+  mode: auto_approve
+
+model_preference: litellm/deepseek-planning
+
+routing_rules:
+  pattern_hint: standalone
+  on_success:
+    - condition: ""
+      next_config: null
+      terminates_task: true
+  on_failure:
+    - condition: ""
+      next_config: null
+      terminates_task: false
+      escalate: human_review
+  max_iterations: 1
+  terminates_task_if_none: true
+
+active: true

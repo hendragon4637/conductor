@@ -19,3 +19,6 @@ items:
   - id: staffing_capable
     rubric_item: "Is each node staffed by an agent_config actually capable of its task (no strategic-operational mismatch)?"
     weight: 2.0
+  - id: checks_match_capabilities
+    rubric_item: "Do the generated checks cover the node's capability quality dimensions (objective->L1, subjective->L2)?"
+    weight: 1.5

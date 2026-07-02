@@ -33,7 +33,7 @@ BINDINGS: dict[str, list[str]] = {
     "planner.q": ["run.completed", "run.failed"],
     "executor.q": ["plan.ratified", "node.remediate", "gate.evaluated"],
     "watcher.q": ["node.spawned"],
-    "evaluator.q": ["node.observed", "ratchet.trigger"],
+    "evaluator.q": ["node.observed", "ratchet.trigger", "calibrate.trigger", "run.completed"],
 }
 
 

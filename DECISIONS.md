@@ -65,3 +65,70 @@ Decision: Four microservices run on consecutive ports:
 - Watcher-svc (:8092) — consumes `node.spawned`, polls worktrees for stability (30s interval, 30s settle, 2 stable polls). Emits `node.observed`.
 - Evaluator-svc (:8094) — consumes `node.observed`, runs L1 deterministic + L2 rubric judge. Emits `gate.evaluated` and optionally `node.remediate`.
 Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` sourcing its own `.env` from `services/<name>/.env`.
+
+## 2026-07-02 — L4 persona simulation handler (on_run_completed)
+
+**Status**: ACTIVE
+
+**Context**: L4 (persona simulation) ran conditionally for user-facing products but had no event-driven trigger. The `run.completed` binding was added to evaluator queue's BINDINGS but the handler that consumed it lacked `db.commit()` — L4 scores were computed but never persisted.
+
+**Decision**:
+- Evaluator-svc consumes `run.completed` via `on_run_completed()` handler
+- Handler spawns two AionUi ACP conversations (standalone + acceptance) via `aionui.create_conversation(preset_agent_type="acp")`
+- Polls each for completion with 300s timeout (10s interval), looks for `type="text"` / `position="left"` messages
+- Scores via keyword heuristic from agent's narrative report (counts pass/fail/status-code mentions)
+- **Must call `db.commit()`** after writing `l4_standalone`, `l4_acceptance`, `l4_status`, `l4_reason` to the `runs` table
+- Persona definitions are YAML files in `backend/evaluator/l4_persona/personas/`
+- Agent config at `agent_configs/l4-persona.yaml` with `acp-browser` backend and `openmode`
+- `RUN.md` in the worktree determines the product's base URL and start command
+
+**Rationale**: AionUi ACP conversations are the standard spawn path (same mechanism as executor spawns node agents). This reuses existing infra — no new agent orchestration.
+
+**Trade-offs**: Single-threaded consumer blocks for up to 10 minutes during L4 polling; other events queue up. The keyword scoring heuristic is fragile (false positives from "pass" in non-score contexts). Agent may refuse due to system instruction conflicts.
+
+## 2026-07-02 — Ratchet trigger event flow
+
+**Status**: ACTIVE
+
+**Context**: The ratchet (mine → mutate → validate → keep/revert cycle) had no event trigger. The `backend/evaluator/ratchet.py` module existed with full implementation but was never wired to an event consumer.
+
+**Decision**:
+- `ratchet.trigger` routing key added to evaluator queue's BINDINGS in `shared/bus.py`
+- `on_ratchet_trigger()` handler in evaluator-svc calls `run_experiment(agent_config_id, node_type)`
+- Pre-flight `assert_ready()` blocks if judge not trusted, heldout < 5, or no recent scores
+- `run_experiment()` flow: mine failures → propose mutation → validate on heldout → record in `experiments` + `skill_mutations` tables
+- Global-scope mutations (domain=backend/general) queued for human approval; project-scope auto-applied
+
+**Rationale**: Event-driven ratchet enables isolated experiments without blocking the hot path. Pre-flight guard ensures experiments run only when calibration data is trustworthy.
+
+**Trade-offs**: Ratchet is fully blocked until L3 calibration produces `trusted=true`. Real golden data is required — example-generated data produces random judge/human score alignment.
+
+## 2026-07-02 — Golden set seeding (example-generated data)
+
+**Status**: ACTIVE
+
+**Context**: L3 calibration and ratchet validation require a frozen golden set of labeled artifacts, but no real human-labeled data exists. Development and testing need example data to prove the pipe flows.
+
+**Decision**:
+- `scripts/seed_golden_backend_api.py` inserts example-generated golden items for a node type
+- Each row has `source='example-generated'` to distinguish from real human-labeled data
+- Split into `calibration` (for L3 agreement computation) and `heldout` (for ratchet validation) — minimum 5 heldout required
+- Scores are randomized (judge_score independent of human_score) — sufficient for pipe proof, not for real trust
+- L3 calibration endpoint `POST /calibrate/{node_type}` in `backend/web/routes/calibrate.py` triggers scoring and writes `judge_trust`
+- `seed_all.sh` orchestrates multi-agent-config seeding
+
+**Rationale**: Generated data proves the pipe flows end-to-end without requiring human annotation. The `source` column enables filtering in production when real data arrives.
+
+**Trade-offs**: Not real data — `MAE ≈ 0.5` and `agreement ≈ 0.15` typical. `judge_trust.trusted=false` until real calibrated data replaces it. Ratchet cannot run until judge is trusted.
+
+## 2026-07-02 — Example-generated data marking convention
+
+**Status**: ACTIVE
+
+**Context**: Throughout development and testing, we create data (projects, plans, agent configs, golden set items) to prove pipe flows. Production systems must distinguish real data from example-generated test data.
+
+**Decision**:
+- All example-generated rows must set `source = 'example-generated'` where the column exists
+- Tables with `source` column: `agent_configs`, `golden_set`, `experiments`, `skill_mutations`
+- Real human-labeled data uses `source = 'human'`; auto-generated production data uses appropriate source tag
+- No example-generated data survives to production; the pipe is proven and then the data is replaced

@@ -70,6 +70,14 @@ CANONICAL_L1_PRESETS: list[dict[str, Any]] = [
             'echo "Regression: previous node commits should still pass their tests" && exit 0'
         ),
     },
+    {
+        "id": "l1-run-md-present",
+        "criterion": "RUN.md exists documenting run steps",
+        "check_cmd": (
+            "test -f RUN.md || "
+            "(echo 'L1 det-RUN.md missing: RUN.md not found in worktree.' && exit 1)"
+        ),
+    },
 ]
 
 # L1 check IDs that are valid (canonical + loaded from agent_configs below)

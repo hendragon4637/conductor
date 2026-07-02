@@ -1,0 +1,28 @@
+{
+  "raw_input": "Tiny URL-shortener backend (FastAPI, in-memory, tested, venv)",
+  "spec": "POST /shorten {url}->code; GET /{code}->302 redirect; in-memory store; pytest; runs from .venv",
+  "quality_intent": "valid URLs only (reject bad input); codes unique; tests cover create+redirect+bad-input",
+  "project_id": "wholestack-proof",
+  "nodes": [
+    {
+      "id": "node-1",
+      "capabilities": ["backend_api"],
+      "members": [
+        {
+          "agent_config": "backend-api-executor",
+          "backend": "opencode",
+          "role": "executor"
+        }
+      ],
+      "depends_on": [],
+      "task": {
+        "text": "Create .venv; pip install fastapi uvicorn pytest httpx INTO .venv; implement POST /shorten + GET /{code} (302), in-memory store, input validation; pytest; RUN.md",
+        "inputs": [],
+        "deliverables": ["app/", "tests/", ".venv/", "RUN.md"]
+      },
+      "success": {
+        "text": "App runs from .venv; /shorten returns a code; /{code} 302-redirects; bad URLs rejected; tests pass"
+      }
+    }
+  ]
+}

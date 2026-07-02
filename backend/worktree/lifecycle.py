@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
+from backend.config import L4_GATES
 from backend.worktree.manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -188,12 +189,52 @@ def finalize_success(run_id: str, workspace_root: str | None = None) -> dict[str
         )
         _sched_cleanup(run_id, SUCCESS_TTL_DAYS)
         logger.info("Run %s merged to main at %s", run_id, merge_commit)
+
+        if plan and plan.get("needs_usage_sim"):
+            _run_l4(run_id, plan, run)
     except RuntimeError as exc:
         logger.warning("Merge conflict for run %s: %s", run_id, exc)
         _update_run(run_id, worktree_status="active")  # leave active for human
         raise
 
     return _get_run(run_id) or {}
+
+
+def _run_l4(run_id: str, plan: dict[str, Any], run: dict[str, Any]) -> None:
+    if not L4_GATES:
+        logger.info(
+            "L4_GATES disabled — skipping L4 evaluation for run %s "
+            + "(set L4_GATES=true to enable)",
+            run_id,
+        )
+        _update_run(run_id, l4_status="skipped", l4_reason="L4_GATES disabled")
+        return
+
+    try:
+        from backend.evaluator.l4_persona.simulate import run_l4_plan
+
+        base_url = os.environ.get("L4_BASE_URL", "http://127.0.0.1:8000")
+        product_type = os.environ.get("L4_PRODUCT_TYPE", "api")
+        l4_result = run_l4_plan(
+            plan=plan, run=run,
+            product_type=product_type, base_url=base_url,
+        )
+
+        _update_run(
+            run_id,
+            l4_standalone=l4_result.get("l4_standalone"),
+            l4_acceptance=l4_result.get("l4_acceptance"),
+            l4_status="done",
+            l4_reason="",
+        )
+        logger.info(
+            "L4 for run %s: standalone=%s acceptance=%s driver=%s",
+            run_id, l4_result.get("l4_standalone"),
+            l4_result.get("l4_acceptance"), l4_result.get("driver"),
+        )
+    except Exception as exc:
+        logger.warning("L4 simulation failed for run %s: %s", run_id, exc)
+        _update_run(run_id, l4_status="failed", l4_reason=str(exc)[:500])
 
 
 def finalize_failure(run_id: str, reason: str, workspace_root: str | None = None) -> dict[str, Any]:

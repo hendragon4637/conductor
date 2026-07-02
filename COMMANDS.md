@@ -141,6 +141,107 @@ tail -f /tmp/planner-svc.log    # planner
 tail -f /tmp/evaluator-svc.log  # evaluator
 ```
 
+## L3 calibration
+```bash
+# Seed golden set for a node type (example-generated data)
+cd /opt/aipc/conductor && uv run python scripts/seed_golden_backend_api.py
+
+# Trigger calibration (via evaluator-svc)
+curl -s -X POST http://127.0.0.1:8094/calibrate/backend_api
+
+# Check judge trust
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT node_type, agreement, mae, trusted, calibrated_at FROM judge_trust"
+```
+
+## L4 persona simulation
+```bash
+# Check L4 scores on a run
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id = '<run_id>'"
+
+# Re-emit run.completed event (for L4 retry)
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM processed_events WHERE event_key LIKE '%<run_id>:run.completed%'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "UPDATE runs SET l4_status = NULL, l4_standalone = NULL, l4_acceptance = NULL, l4_reason = NULL WHERE id = '<run_id>'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('run.completed', '{\"event_type\": \"run.completed\", \"run_id\": \"<run_id>\", \"plan_id\": \"<plan_id>\", \"product_type\": \"api\"}', '1.0', NOW())"
+
+# Check AionUi conversation status
+curl -s http://127.0.0.1:40937/api/conversations/<conv_id> | python3 -m json.tool
+
+# Query AionUi SQLite for conversation messages
+sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db \
+  "SELECT type, position, status, substr(content,1,80) FROM messages WHERE conversation_id='<conv_id>' ORDER BY created_at"
+```
+
+## Ratchet experiment
+```bash
+# Fire ratchet.trigger event
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('ratchet.trigger', '{\"event_type\": \"ratchet.trigger\", \"agent_config_id\": \"<agent_config_id>\", \"node_type\": \"executor\"}', '1.0', NOW())"
+
+# Check experiments and skill_mutations tables
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM experiments ORDER BY created_at"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM skill_mutations ORDER BY created_at"
+```
+
+## Whole-stack DB trace
+```bash
+# Trace a complete run end-to-end
+RUN_ID="run_0422fd60"
+PLAN_ID="plan_2b419edc"
+
+echo "=== Plan ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT plan_id, plan_status, ratified FROM plans WHERE plan_id='$PLAN_ID'"
+
+echo "=== Run ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, plan_id, l4_status, l4_standalone, l4_acceptance FROM runs WHERE id='$RUN_ID'"
+
+echo "=== Node Session ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, verdict, gate_outcome, l1_pass, l2_score FROM node_sessions WHERE run_id='$RUN_ID'"
+
+echo "=== Judge Trust ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM judge_trust"
+
+echo "=== Golden Set ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT COUNT(*), split FROM golden_set GROUP BY split"
+
+echo "=== Outbox Events ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, routing_key, published_at IS NOT NULL as published FROM outbox ORDER BY id"
+
+echo "=== Processed Events ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT event_key, processed_at FROM processed_events ORDER BY processed_at"
+
+echo "=== Experiments ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT COUNT(*) FROM experiments"
+
+echo "=== Skill Mutations ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT COUNT(*) FROM skill_mutations"
+```
+
+## Whole-stack reset (clean state)
+```bash
+bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
+```
+
+## Migrations
+Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration files:
+- `v6_030_l4.sql` — adds L4 columns (`l4_status`, `l4_standalone`, `l4_acceptance`, `l4_reason`) to `runs` table and `needs_usage_sim` to `plans`
+- Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
+
 ## Environment
 ```bash
 /opt/aipc/conductor/.env                # monolith configuration (DB, Neo4j, LLM)
