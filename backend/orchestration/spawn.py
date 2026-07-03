@@ -451,6 +451,13 @@ def spawn_node_team(
 
     # ── Class-a (self-orchestrating) short-circuit ──────────────────────────
     backend_key = node.get("backend", "opencode")
+    # Prefer member-level backend when present (LLM sometimes puts
+    # backend on the member rather than the node).
+    if raw_members:
+        for m in raw_members:
+            if isinstance(m, dict) and m.get("backend"):
+                backend_key = str(m["backend"])
+                break
     if is_self_orchestrating(backend_key):
         return _spawn_self_orchestrating(
             node=node,
@@ -591,18 +598,17 @@ def _spawn_self_orchestrating(
 ) -> dict[str, str]:
     """Spawn a self-orchestrating (class-a) backend — no Conductor orchestrator.
 
-    Class-a backends (Hermes, opencode_omo) are their own leader.  This
-    helper creates the worktree, writes per-worktree config, creates an
-    AionUi conversation for display / record-keeping, and sends the
-    goal-only brief.
+    Class-a backends (Hermes, opencode_omo) are their own leader.
 
-    For Hermes, it also creates a run via the Hermes HTTP API and stores
-    the run ID in the returned conv_map (key ``__run_id__``) so the runner
-    can poll Hermes run status.
+    - **Hermes (direct HTTP):** Calls the Hermes HTTP API directly to create
+      a run — no AionUi conversation.  The Hermes run_id is returned in
+      ``conv_map["hermes"]`` and ``conv_map["__run_id__"]``.
+    - **opencode_omo:** Creates an AionUi conversation with the OpenCode
+      preset, writes per-worktree config, and sends the goal-only brief.
 
     Returns:
         conv_map with NO ``"orchestrator"`` key — only the member entry
-        (and optionally ``__run_id__`` for Hermes).
+        (and ``__run_id__`` for Hermes).
     """
     _db_url = db_url or os.environ.get("DATABASE_URL", "")
     wsr = workspace_root or os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace")
@@ -618,47 +624,54 @@ def _spawn_self_orchestrating(
         wt = Path(wt_path)
         plan["worktree_path"] = str(wt)
 
-    # 2. Write per-worktree config
-    agent_type = "opencode_omo" if backend_key == "opencode_omo" else "opencode"
-    write_worktree_config(
-        worktree=wt,
-        agent_type=agent_type,
-        appended_prompt=str(node.get("task", "")),
-    )
-
     # 3. Ensure plan exists in DB
     _ensure_plan_in_db(_db_url, plan, project_id, session_id)
 
-    # 4. Create AionUi conversation + send goal-only brief
     goal_brief = f"Goal: {plan.get('user_intent', '')}\n\nTask: {node.get('task', '')}\n\nSuccess criterion: {node.get('success', '')}"
     conv_map: dict[str, str] = {}
     conv_id = ""
 
     if backend_key == "hermes":
-        # Hermes via AionUi ACP protocol — no orchestrator, single Hermes agent.
-        # AionUi launches `hermes acp` (registered in ACP_BACKENDS_ALL).
-        preset_type = "acp"
-        conv_id = aionui.create_conversation(
-            preset_agent_type=preset_type,
-            workspace=str(wt),
-            backend="hermes",
-        )
-        conv_map[backend_key] = conv_id
-        aionui.send_message(conv_id, goal_brief)
-
-        # Create Hermes HTTP run for watcher tracking
+        # Hermes runs in Docker: /workspace on the container maps to the
+        # workspace root on the host.  The Conductor worktree is a subdir
+        # of the workspace root — compute the container-relative path.
+        _ws_root = Path("/opt/aipc/conductor/workspace")
         try:
-            from backend.hermes_adapter import HermesClient
+            _wt_rel = str(wt.relative_to(_ws_root))
+        except ValueError:
+            _wt_rel = ""
+        _container_wt = f"/workspace/{_wt_rel}" if _wt_rel else ""
+        goal_brief = (
+            f"Goal: {plan.get('user_intent', '')}\n\n"
+            f"Task: {node.get('task', '')}\n"
+            f"IMPORTANT: Write ALL deliverables inside {_container_wt}/ "
+            f"and use absolute paths like {_container_wt}/your_file\n\n"
+            f"Success criterion: {node.get('success', '')}"
+        ) if _wt_rel else (
+            f"Goal: {plan.get('user_intent', '')}\n\n"
+            f"Task: {node.get('task', '')}\n\n"
+            f"Success criterion: {node.get('success', '')}"
+        )
+        print(f"[PRINT] Hermes spawn: session_id={session_id} wt={wt} _wt_rel={_wt_rel} _container_wt={_container_wt}", flush=True)
+        print(f"[PRINT] Hermes spawn: goal_brief (first 200 chars): {goal_brief[:200]}", flush=True)
+        from backend.hermes_adapter import HermesClient
 
-            hermes = HermesClient()
-            run_resp = hermes.create_run(goal=goal_brief, worktree=str(wt))
-            run_id = run_resp.get("run_id", "")
-            if run_id:
-                conv_map["__run_id__"] = str(run_id)
-        except RuntimeError as exc:
-            print(f"  [spawn] Failed to create Hermes run for node {node.get('id')}: {exc}")
+        hermes = HermesClient()
+        print(f"[PRINT] Hermes spawn: calling create_run(goal=..., worktree={_container_wt or str(wt)})", flush=True)
+        run_resp = hermes.create_run(goal=goal_brief, worktree=_container_wt or str(wt))
+        print(f"[PRINT] Hermes spawn: create_run response={run_resp}", flush=True)
+        run_id = run_resp.get("run_id", "")
+        if not run_id:
+            raise RuntimeError(f"Hermes API did not return a run_id: {run_resp}")
+        conv_map["hermes"] = run_id
+        conv_map["__run_id__"] = run_id
     else:
-        # opencode_omo — use standard AionUi OpenCode preset
+        # opencode_omo — write per-worktree config, create AionUi conversation
+        write_worktree_config(
+            worktree=wt,
+            agent_type="opencode_omo",
+            appended_prompt=str(node.get("task", "")),
+        )
         preset_type = "acp"
         adapter = None
         try:

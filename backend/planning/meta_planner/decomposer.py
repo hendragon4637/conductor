@@ -123,7 +123,8 @@ def roster_enum(domain: str | None = None) -> list[dict[str, Any]]:
         with psycopg.connect(db_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT agent_config_id, domain, role, harness "
+                    "SELECT agent_config_id, domain, role, harness, "
+                    "  COALESCE(execution->>'backend', harness, 'opencode') AS effective_backend "
                     "FROM agent_configs WHERE active = true ORDER BY agent_config_id"
                 )
                 rows = cur.fetchall()
@@ -134,7 +135,7 @@ def roster_enum(domain: str | None = None) -> list[dict[str, Any]]:
                 "domain": r[1],
                 "role": r[2],
                 "harness": r[3],
-                "backend": "opencode",
+                "backend": r[4],
                 "description": f"{r[1]} / {r[2]} / {r[3]}",
             })
         return result

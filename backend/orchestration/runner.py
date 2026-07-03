@@ -26,6 +26,21 @@ ORCHESTRATOR_MODEL_PRIMARY = os.environ.get(
 )
 
 
+def _resolve_backend(node: dict[str, Any]) -> str:
+    """Resolve effective backend from node, preferring member-level.
+
+    The LLM sometimes sets ``backend`` on the member dict rather than the
+    node.  This helper checks members first, falls back to the node-level
+    field, then to the global default ``"opencode"``.
+    """
+    members = node.get("members")
+    if isinstance(members, list):
+        for m in members:
+            if isinstance(m, dict) and m.get("backend"):
+                return m["backend"]
+    return node.get("backend", "opencode")
+
+
 def launch_run(
     run_id: str,
     run_row: dict[str, Any],
@@ -51,7 +66,9 @@ def launch_run(
         raise RuntimeError("No root node available to launch")
 
     import uuid
-    session_id = str(uuid.uuid4())
+    # Use run_id as session_id so it's consistent across all spawn calls.
+    # _finalize_or_advance() in the executor also uses session_id=run_id.
+    session_id = run_id
 
     # Ensure prerequisite DB rows exist before spawning
     project_id = plan_data.get("project_id", "default")
@@ -69,13 +86,14 @@ def launch_run(
     # can find each node's session by run_id + node_id during advancement.
     first_id = first.get("id") or first.get("node_id")
     ns_map: dict[str, str] = {}
+    node_backend = "opencode"  # default, overridden per-node below
     for node in nodes:
         nid = node.get("id") or node.get("node_id")
         if not nid:
             continue
         is_first = nid == first_id
         new_ns_id = f"ns_{uuid.uuid4().hex[:8]}"
-        node_backend = node.get("backend", "opencode")
+        node_backend = _resolve_backend(node)
         node_members = node.get("members", [node.get("agent_config", "opencode:backend-executor")])
         save_node_session({
             "id": new_ns_id,
@@ -105,6 +123,11 @@ def launch_run(
     )
     orch_conv_id = _find_orch_conv(conv_map)
     team_id = conv_map.get("__team_id__")
+    # For self-orchestrating backends without AionUi (Hermes direct HTTP),
+    # use the run_id as the backend_ref so the watcher's signal source
+    # (HermesSignalSource) can poll the correct run.
+    if not team_id and conv_map.get("__run_id__"):
+        team_id = conv_map["__run_id__"]
     worktree_path = plan_data.get("worktree_path")
     _update_session_runtime(session_id, worktree_path)
 
@@ -113,7 +136,7 @@ def launch_run(
         "id": ns_id,
         "run_id": run_id,
         "node_id": first_id,
-        "backend": first.get("backend", "opencode"),
+        "backend": node_backend,
         "members": first_members,
         "verdict": "running",
         "worktree": worktree_path,
@@ -129,7 +152,7 @@ def launch_run(
             "id": ns_map[nid],
             "run_id": run_id,
             "node_id": nid,
-            "backend": node.get("backend", "opencode"),
+            "backend": _resolve_backend(node),
             "members": node.get("members", [node.get("agent_config", "opencode:backend-executor")]),
             "verdict": "pending",
             "worktree": worktree_path,

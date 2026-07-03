@@ -98,61 +98,240 @@ def _handle_plan_ratified(session, payload):
     logger.info("Emitted %d NodeSpawned events for run %s", len(node_sessions), run_id)
 
 
+def _commit_worktree(run_id: str) -> None:
+    """git add -A && git commit for the run's active worktree."""
+    from shared.db import session as db_session
+    from shared.models import NodeSession as NodeSessionModel
+    import subprocess
+    with db_session() as s:
+        ns = s.query(NodeSessionModel).filter(
+            NodeSessionModel.run_id == run_id,
+            NodeSessionModel.worktree.isnot(None),
+        ).first()
+        if not ns or not ns.worktree:
+            logger.info("No worktree found for run %s — skipping commit", run_id)
+            return
+        wt = ns.worktree
+        try:
+            subprocess.run(["git", "add", "-A"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
+            result = subprocess.run(["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True, timeout=30)
+            if result.stdout.strip():
+                subprocess.run(["git", "commit", "-m", f"auto-commit run {run_id}"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
+                print(f"[PRINT] Auto-committed worktree changes for run {run_id}", flush=True)
+            else:
+                logger.info("Nothing to commit for run %s", run_id)
+        except subprocess.CalledProcessError as exc:
+            logger.warning("Auto-commit failed for run %s: %s", run_id, exc.stderr)
+            print(f"[PRINT] Auto-commit skipped for run {run_id}: {exc}", flush=True)
+
+
+def _finalize_or_advance(run_id: str, payload: dict[str, object]) -> None:
+    """Check DAG for more ready nodes; spawn next or finalize as success.
+
+    Queries the plan DAG and all node_sessions for the run.  If a pending
+    node has all its dependencies satisfied, spawns it.  If all nodes are
+    complete, finalizes the run as success.
+    """
+    from backend.planning.store import get_plan
+    from backend.orchestration.spawn import spawn_node_team
+    from backend.worktree.lifecycle import finalize_success, _update_run
+    from services.executor.aionui_client import AionUiClient
+    from services.executor.worktree_manager import WorktreeManager
+    from shared.db import session as db_session
+    from shared.models import NodeSession as NodeSessionModel, Run as RunModel
+    from contracts.events import NodeSpawned, RunCompleted
+    from shared.outbox import emit
+    import time
+    from typing import Any
+
+    # 1. Get plan_id from runs table
+    with db_session() as s:
+        run_row = s.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run_row:
+        logger.error("Run %s not found — cannot advance DAG", run_id)
+        return
+    plan_id = str(run_row.plan_id)
+
+    # 2. Load plan (has DAG)
+    plan_data = get_plan(plan_id)
+    if not plan_data:
+        logger.error("Plan %s not found — cannot advance DAG", plan_id)
+        return
+    dag = plan_data.get("dag", plan_data.get("nodes", []))
+    if not dag:
+        logger.error("Plan %s has no DAG — cannot advance", plan_id)
+        return
+
+    # 3. Load all node_sessions for this run
+    with db_session() as s:
+        node_sessions = (
+            s.query(NodeSessionModel)
+            .filter(NodeSessionModel.run_id == run_id)
+            .all()
+        )
+
+    # Build completed / pending sets
+    completed_ids: set[str] = set()
+    session_map: dict[str, NodeSessionModel] = {}
+    for ns in node_sessions:
+        session_map[str(ns.node_id)] = ns
+        if ns.verdict in ("done_no_change", "done_with_change", "failed", "crashed"):
+            completed_ids.add(str(ns.node_id))
+        elif ns.gate_outcome in ("pass", "done"):
+            completed_ids.add(str(ns.node_id))
+
+    # 4. Find next ready node (pending + all deps satisfied)
+    next_node: dict[str, Any] | None = None
+    for n in dag:
+        if not isinstance(n, dict):
+            continue
+        nid = str(n.get("id") or n.get("node_id") or "")
+        if not nid or nid in completed_ids:
+            continue
+        ns = session_map.get(nid)
+        if ns and ns.verdict == "running":
+            continue  # already running
+        deps = n.get("depends_on", [])
+        if isinstance(deps, list) and all(d in completed_ids for d in deps):
+            next_node = n
+            break
+
+    if next_node:
+        next_nid = str(next_node.get("id") or next_node.get("node_id") or "")
+        logger.info("Advancing DAG: spawning node %s for run %s", next_nid, run_id)
+        print(f"[PRINT] Advancing DAG: spawning node {next_nid} for run {run_id}", flush=True)
+
+        aionui = AionUiClient(_AIONUI_HOST)
+        wm = WorktreeManager(_WORKSPACE_ROOT)
+
+        # Find the pending node_session for this node
+        ns_id: str | None = None
+        existing_ns = session_map.get(next_nid)
+        if existing_ns is not None:
+            ns_id = str(existing_ns.id)
+            with db_session() as s:
+                s.query(NodeSessionModel).filter(NodeSessionModel.id == ns_id).update({
+                    NodeSessionModel.verdict: "running",
+                })
+                s.commit()
+
+        if not ns_id:
+            logger.error("No node_session found for node %s (run %s)", next_nid, run_id)
+            return
+
+        worktree_path = str(plan_data.get("worktree_path") or (existing_ns.worktree if existing_ns else "") or "")
+        plan_data["worktree_path"] = worktree_path  # prevent spawn_node_team from creating a duplicate worktree
+        session_id = run_id  # microservice convention
+        members_raw = next_node.get("members", [next_node.get("agent_config", "opencode:backend-executor")])
+        if not isinstance(members_raw, list):
+            members_raw = [str(members_raw)]
+
+        try:
+            conv_map = spawn_node_team(
+                node=next_node,
+                plan=plan_data,
+                session_id=session_id,
+                aionui=aionui,
+                wm=wm,
+                members=members_raw,
+                dep_context="",
+                workspace_root=_WORKSPACE_ROOT,
+                auto_approve=plan_data.get("auto_approve", True),
+            )
+        except Exception as exc:
+            logger.exception("Failed to spawn node %s for run %s", next_nid, run_id)
+            print(f"[PRINT] FAILED to spawn node {next_nid}: {exc}", flush=True)
+            return
+
+        # Extract IDs from spawn result
+        orch_conv = conv_map.get("orchestrator")
+        if not orch_conv:
+            for k, v in conv_map.items():
+                if not k.startswith("__"):
+                    orch_conv = v
+                    break
+        team_id = conv_map.get("__team_id__")
+        if not team_id and conv_map.get("__run_id__"):
+            team_id = conv_map["__run_id__"]
+
+        # Update node_session with spawn results
+        with db_session() as s:
+            s.query(NodeSessionModel).filter(NodeSessionModel.id == ns_id).update({
+                NodeSessionModel.aionui_conversation_id: orch_conv or "",
+                NodeSessionModel.aionui_team_id: team_id or "",
+            })
+            s.commit()
+
+        # Emit NodeSpawned so watcher-svc picks up this session
+        with db_session() as s:
+            emit(s, NodeSpawned(
+                node_session_id=ns_id,
+                backend=str(next_node.get("backend", "opencode")),
+                backend_ref=team_id or "",
+                worktree=worktree_path or "",
+                ts=time.time(),
+            ))
+            s.commit()
+
+        logger.info("Advanced DAG: spawned node %s (ns=%s) for run %s", next_nid, ns_id, run_id)
+        print(f"[PRINT] Advanced DAG: spawned node {next_nid} (ns={ns_id})", flush=True)
+
+    else:
+        # No more ready nodes — check if ALL nodes are done
+        total = len(dag)
+        completed = len(completed_ids)
+        logger.info("DAG check: %d/%d nodes completed for run %s", completed, total, run_id)
+        print(f"[PRINT] DAG check: {completed}/{total} nodes completed for run {run_id}", flush=True)
+
+        if completed >= total:
+            logger.info("All %d nodes complete for run %s — finalizing success", total, run_id)
+            print(f"[PRINT] All {total} nodes complete for run {run_id} — finalizing success", flush=True)
+            try:
+                finalize_success(run_id, workspace_root=_WORKSPACE_ROOT)
+                _update_run(run_id, state="done")
+                with db_session() as s:
+                    emit(s, RunCompleted(
+                        run_id=run_id,
+                        plan_id=plan_id,
+                        status="done",
+                        worktree_status="merged",
+                        ts=time.time(),
+                    ))
+                    s.commit()
+                print(f"[PRINT] Run {run_id} finalized and marked done", flush=True)
+            except Exception as exc:
+                logger.error("Failed to finalize run %s: %s", run_id, exc)
+                print(f"[PRINT] FAILED to finalize run {run_id}: {exc}", flush=True)
+        else:
+            logger.info("DAG incomplete (%d/%d) — waiting for more nodes for run %s", completed, total, run_id)
+            print(f"[PRINT] DAG incomplete ({completed}/{total}) — waiting for more nodes", flush=True)
+
+
 def _handle_gate_evaluated(session, payload):
     """Finalize or advance a run based on the gate evaluation outcome.
 
-    On ``pass`` -> merge the worktree via ``finalize_success``.
-    On ``fail``  -> quarantine via ``finalize_failure``.
-    Other outcomes -> advance to the next DAG node.
+    On ``done``/``pass`` -> commit worktree, check DAG for next node to
+    spawn, or finalize success if all nodes complete.
+    On ``fail``/``failed`` -> quarantine via ``finalize_failure``.
+    On ``remediate`` -> log (handled by NodeRemediate event).
+    On other outcomes -> log and let the DAG advancement decide.
     """
     from backend.worktree.lifecycle import finalize_success, finalize_failure, _update_run
-    from shared.db import session as db_session
-    from shared.models import NodeSession as NodeSessionModel
 
     run_id = payload["run_id"]
     gate_outcome = payload.get("gate_outcome", "")
-
-    # Auto-commit agent work before finalizing
-    def _commit_worktree(run_id: str) -> None:
-        """git add -A && git commit for the run's active worktree."""
-        import subprocess
-        with db_session() as s:
-            ns = s.query(NodeSessionModel).filter(
-                NodeSessionModel.run_id == run_id,
-                NodeSessionModel.worktree.isnot(None),
-            ).first()
-            if not ns or not ns.worktree:
-                logger.info("No worktree found for run %s — skipping commit", run_id)
-                return
-            wt = ns.worktree
-            try:
-                subprocess.run(["git", "add", "-A"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
-                result = subprocess.run(["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True, timeout=30)
-                if result.stdout.strip():
-                    subprocess.run(["git", "commit", "-m", f"auto-commit run {run_id}"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
-                    print(f"[PRINT] Auto-committed worktree changes for run {run_id}", flush=True)
-                else:
-                    logger.info("Nothing to commit for run %s", run_id)
-            except subprocess.CalledProcessError as exc:
-                logger.warning("Auto-commit failed for run %s: %s", run_id, exc.stderr)
-                print(f"[PRINT] Auto-commit skipped for run {run_id}: {exc}", flush=True)
+    node_session_id = payload.get("node_session_id", "")
 
     if gate_outcome in ("pass", "done"):
-        logger.info("Gate passed for run %s (%s) -- finalizing success", run_id, gate_outcome)
+        logger.info("Gate passed for run %s (%s) -- committing + checking DAG", run_id, gate_outcome)
         print(f"[PRINT] Gate passed for run {run_id} ({gate_outcome})", flush=True)
-        try:
-            _commit_worktree(run_id)
-            finalize_success(run_id, workspace_root=_WORKSPACE_ROOT)
-            _update_run(run_id, state="done")
-            emit(s, {"event_type": "run.completed", "run_id": run_id, "plan_id": payload.get("plan_id", ""), "product_type": "api"})
-            print(f"[PRINT] Run {run_id} finalized and marked done — run.completed emitted", flush=True)
-        except Exception as exc:
-            logger.error("Failed to finalize run %s: %s", run_id, exc)
-            print(f"[PRINT] FAILED to finalize run {run_id}: {exc}", flush=True)
+        _commit_worktree(run_id)
+        _finalize_or_advance(run_id, payload)
     elif gate_outcome in ("fail", "failed"):
         logger.warning("Gate failed for run %s -- finalizing failure", run_id)
         print(f"[PRINT] Gate failed for run {run_id}", flush=True)
         try:
+            _commit_worktree(run_id)
             finalize_failure(run_id, reason="gate_evaluated_fail", workspace_root=_WORKSPACE_ROOT)
             _update_run(run_id, state="failed")
             print(f"[PRINT] Run {run_id} quarantined and marked failed", flush=True)
@@ -170,6 +349,7 @@ def _handle_gate_evaluated(session, payload):
             gate_outcome,
             run_id,
         )
+        _finalize_or_advance(run_id, payload)
 
 
 def _handle_node_remediate(session, payload):

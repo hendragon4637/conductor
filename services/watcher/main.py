@@ -67,6 +67,15 @@ class SessionTrack:
 _tracker: dict[str, SessionTrack] = {}
 
 
+def _is_spawned(ns: NodeSession) -> bool:
+    """Check whether a node_session has a backend reference (has been spawned).
+
+    Pending nodes that haven't been spawned yet have neither backend ref set.
+    We skip them to avoid false settle-time verdicts on empty worktrees.
+    """
+    return bool(ns.aionui_conversation_id) or bool(ns.aionui_team_id)
+
+
 def _bootstrap_tracker() -> None:
     """Load active sessions from DB into the tracker on startup."""
     try:
@@ -81,6 +90,8 @@ def _bootstrap_tracker() -> None:
                 .all()
             )
         for ns in active:
+            if not _is_spawned(ns):
+                continue
             if ns.id not in _tracker:
                 git_sig = _git_state_signature(ns.worktree)
                 _tracker[ns.id] = SessionTrack(
@@ -212,6 +223,8 @@ def _watch_loop() -> None:
 
         print(f"[PRINT] Polling {len(active)} active session(s)", flush=True)
         for ns in active:
+            if not _is_spawned(ns):
+                continue  # not yet spawned — skip until DAG advancement creates it
             try:
                 # Ensure tracker entry exists
                 if ns.id not in _tracker:

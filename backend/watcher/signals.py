@@ -149,15 +149,59 @@ class AionUiSignalSource(SignalSource):
         )
 
 
-# ── Hermes stub ────────────────────────────────────────────────────────────
+# ── Hermes SignalSource (direct HTTP) ───────────────────────────────────────
 
 class HermesSignalSource(SignalSource):
+    """Polls the Hermes HTTP API (``/v1/runs/{run_id}``) for run status.
+
+    Expects ``node_session.backend_ref`` to hold the Hermes ``run_id``
+    (stored as ``aionui_team_id`` in the DB by ``launch_run()``).
+    """
+
     backend = "hermes"
 
     def query(self, node_session) -> RawSignal:
-        # TODO: wire when Hermes backend lands
+        # The run_id is stored in aionui_team_id by launch_run()
+        if isinstance(node_session, dict):
+            run_id = node_session.get("aionui_team_id")
+            worktree = node_session.get("worktree")
+        else:
+            run_id = getattr(node_session, "aionui_team_id", None)
+            worktree = getattr(node_session, "worktree", None)
+
+        if not run_id:
+            return RawSignal(
+                fs_changed=_run_git_diff(worktree) != "",
+                detail={"src": "hermes", "reason": "no run_id"},
+            )
+
+        from backend.hermes_adapter import HermesClient
+
+        client = HermesClient()
+        try:
+            status_resp = client.get_run_status(run_id)
+        except RuntimeError:
+            return RawSignal(
+                any_error=True,
+                fs_changed=_run_git_diff(worktree) != "",
+                detail={"src": "hermes", "run_id": run_id, "error": "poll_failed"},
+            )
+
+        status = status_resp.get("status", "unknown")
+        terminal = status in ("completed", "failed", "cancelled", "stopped")
+        any_error = status in ("failed", "cancelled", "stopped", "error")
+        fs_dirty = _run_git_diff(worktree) != ""
+
         return RawSignal(
-            detail={"src": "hermes", "stub": True},
+            terminal=terminal,
+            any_error=any_error,
+            fs_changed=fs_dirty,
+            last_activity_ts=None,  # Hermes doesn't expose per-second activity
+            detail={
+                "src": "hermes",
+                "run_id": run_id,
+                "status": status,
+            },
         )
 
 
@@ -166,4 +210,5 @@ class HermesSignalSource(SignalSource):
 SIGNAL_SOURCES: dict[str, SignalSource] = {
     "opencode": AionUiSignalSource(),
     "opencode_omo": AionUiSignalSource(),
+    "hermes": HermesSignalSource(),
 }

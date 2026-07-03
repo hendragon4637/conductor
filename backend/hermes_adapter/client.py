@@ -51,7 +51,7 @@ class HermesClient:
             RuntimeError: If the HTTP request fails.
         """
         body: dict[str, Any] = {
-            "goal": goal,
+            "input": goal,
             "workspace": worktree,
         }
         return self._request("POST", "/v1/runs", body)
