@@ -98,6 +98,24 @@ def _handle_plan_ratified(session, payload):
     logger.info("Emitted %d NodeSpawned events for run %s", len(node_sessions), run_id)
 
 
+def _fix_worktree_perms(wt: str) -> None:
+    """Fix root-owned files in the worktree (Hermes Docker sandbox writes as root).
+
+    Runs an ephemeral alpine container to chown the worktree to the host ``aipc``
+    user (UID 1001).  Silently no-ops if Docker is unavailable.
+    """
+    import subprocess
+    try:
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{wt}:/wt", "alpine:latest",
+             "chown", "-R", "1001:1001", "/wt"],
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        logger.info("Fixed worktree permissions for %s", wt)
+    except Exception as exc:
+        logger.warning("Could not fix worktree permissions for %s: %s", wt, exc)
+
+
 def _commit_worktree(run_id: str) -> None:
     """git add -A && git commit for the run's active worktree."""
     from shared.db import session as db_session
@@ -121,7 +139,18 @@ def _commit_worktree(run_id: str) -> None:
             else:
                 logger.info("Nothing to commit for run %s", run_id)
         except subprocess.CalledProcessError as exc:
-            logger.warning("Auto-commit failed for run %s: %s", run_id, exc.stderr)
+            if "Permission denied" in exc.stderr:
+                logger.warning("Permission denied during commit — Hermes root-owned files; fixing perms and retrying")
+                _fix_worktree_perms(wt)
+                try:
+                    subprocess.run(["git", "add", "-A"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
+                    subprocess.run(["git", "commit", "-m", f"auto-commit run {run_id}"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
+                    print(f"[PRINT] Auto-committed worktree changes for run {run_id} (after permission fix)", flush=True)
+                    return
+                except subprocess.CalledProcessError as retry_exc:
+                    logger.warning("Auto-commit still failed after permission fix: %s", retry_exc.stderr)
+            else:
+                logger.warning("Auto-commit failed for run %s: %s", run_id, exc.stderr)
             print(f"[PRINT] Auto-commit skipped for run {run_id}: {exc}", flush=True)
 
 
