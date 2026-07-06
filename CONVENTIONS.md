@@ -162,6 +162,15 @@
 - RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
 - A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
 
+## Skills & profiles (agent import pipeline)
+- Imported profiles use `source='imported'` in `agent_configs`; hand-written use `source='hand'`
+- New harness renderers: subclass `HarnessRenderer`, set `name`, implement `render_agent()`/`render_skill()`, register via `register()` in `backend/skills.py`
+- Skill layers: **global** skills (`~/.config/opencode/skills/`) available to all runs; **worktree** skills (`.opencode/skills/` per worktree) scoped to node capabilities via `capability_skills` mapping
+- `install_worktree_skills()` is called pre-spawn in `spawn_node_team()` — never call it separately
+- Realizability checks: `check_capability_realizability()` flags capability tools unsupported by a harness
+- Collision guard: OMO reserved names + duplicate agent_config_ids get `imp-` prefix during import
+- All imported agents default to `backend_targets=["opencode"]`; extend when adding a new harness
+
 ## Git
 - Atomic commits with clear messages
 - Never commit .env, *.db, node_modules/, __pycache__/

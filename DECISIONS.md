@@ -142,6 +142,23 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 
 **Trade-offs**: Not real data — `MAE ≈ 0.5` and `agreement ≈ 0.15` typical. `judge_trust.trusted=false` until real calibrated data replaces it. Ratchet cannot run until judge is trusted.
 
+## 2026-07-06 — Harness-agnostic agent profile import pipeline
+
+**Status**: ACTIVE
+
+**Context**: Ready-made agent profiles (agency-agents, wshobson) and skills (awesome-agent-skills) needed to be imported as Conductor staffable rows AND harness drop-in files without assuming a specific target harness format.
+
+**Decision**:
+- Import writes to a **neutral schema** (`agent_configs` with `source`, `import_ref`, `raw_definition`, `backend_targets`) — no harness-specific assumptions at import time
+- A `HarnessRenderer` ABC in `backend/skills.py` converts neutral rows to harness-specific files (opencode now; any harness later)
+- `RENDERERS` registry maps harness names to renderer instances; adding a harness = one new renderer implementation + registration, no re-import
+- Skill layers: **global** (all skills, available to every run) and **worktree** (capability-scoped subset, installed pre-spawn per node)
+- Capability→skill mapping in `capability_skills` table drives per-node worktree skill selection
+- Collision guard: OMO reserved names + duplicate IDs get `imp-` prefix
+- All imported agents default `backend_targets=["opencode"]`, `source="imported"`, model overridden to LiteLLM group
+
+**Rationale**: Harness-agnostic import prevents lock-in — adding a new execution backend requires only a new renderer, not a re-import. Per-worktree skill scoping avoids context bloat from loading all 1177 catalog skills into every node.
+
 ## 2026-07-02 — Example-generated data marking convention
 
 **Status**: ACTIVE

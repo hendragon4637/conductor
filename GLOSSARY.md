@@ -45,6 +45,11 @@
 | **SSE transport** | Server-Sent Events transport for MCP — used when client and server are on different machines (human PC → AIPC). |
 | **Conductor MCP** | MCP server on `127.0.0.1:8092` exposing safe plan operations (`conductor-create_plan`, `conductor-refine_plan`, `conductor-get_plan`, `conductor-list_sessions`, `conductor-search_memory`). No approve/spawn. |
 | **Obsidian vault MCP** | MCP server on `127.0.0.1:8093` exposing `/home/aipc/conductor-notes/` as read-only markdown resources via `obsidian-read_note`. |
+| **HarnessRenderer** | Abstract base class in `backend/skills.py` for converting neutral agent/skill DB rows to harness-specific files. One subclass per execution backend (opencode, stub, future). |
+| **Global skills** | Skills installed to `~/.config/opencode/skills/` — available to every run regardless of node capabilities. |
+| **Worktree skills** | Skills scoped to a node's capabilities, installed into `.opencode/skills/` in the worktree pre-spawn via `install_worktree_skills()`. |
+| **capability_skills** | DB table mapping capabilities to skill IDs — drives per-node worktree skill selection. |
+| **Import pipeline** | The automated process of cloning external repos (agency-agents, wshobson, awesome-agent-skills), parsing to neutral rows, classifying capabilities, and inserting to DB with `source='imported'`. |
 | **Hermes Agent** | Nous Research v0.16.0 — second execution backend alongside AionUi. Self-routing agent core; receives one goal per node from Conductor, self-decomposes, and routes to its own subagents. Runs via HTTP API (`:8642/v1`), Docker sandboxed, with Conductor worktree mounted at `/workspace`. |
 | **Calibration** | The L3 process of re-scoring frozen golden artifacts via the L2 judge and computing MAE and agreement. Results are stored in `judge_trust`. Does NOT modify the golden set. |
 | **CalibrationReport** | Output from `calibrate()`: node_type, total golden items, agreement rate, MAE, trusted boolean, per-item `CalibrationItem` list, and a human-readable note. |

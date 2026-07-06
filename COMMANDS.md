@@ -245,6 +245,40 @@ docker exec postgres psql -U aipc -d aipc_conductor \
 bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 ```
 
+## Profiles & skills (import pipeline)
+```bash
+# Import agent profiles from external repos (uses DB, idempotent)
+cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --verify
+
+# Render global skills + agents to opencode harness dirs
+uv run python scripts/renderer.py                     # install global skills
+uv run python scripts/renderer.py --agents            # also install imported agents
+uv run python scripts/renderer.py --list-harnesses    # list registered renderers
+
+# Check installed global skills/agents
+ls ~/.config/opencode/skills/                         # global skills dir
+ls ~/.config/opencode/agent/ | wc -l                  # count global agents
+
+# Check capability→skill mappings
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM capability_skills ORDER BY capability"
+
+# Check imported agent configs
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT agent_config_id, source, new_capabilities FROM agent_configs WHERE source='imported' LIMIT 10"
+
+# Verify worktree skills were installed (run after a node spawns)
+ls /opt/aipc/conductor/workspace/<project>.<run-id>/.opencode/skills/
+```
+
+## Harness-add procedure
+To add a new CLI harness later:
+1. Implement `HarnessRenderer` subclass in `backend/skills.py` (`render_agent`, `render_skill`, `agents_dir`, `skills_dir`)
+2. Register via `register(MyRenderer())` — adds to `RENDERERS` dict
+3. Add harness tool profile in `backend/planning/capability/harness_profiles.py`
+4. Add harness name to `backend_targets` on relevant agent configs
+No re-import, no schema change.
+
 ## Migrations
 Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration files:
 - `v6_030_l4.sql` — adds L4 columns (`l4_status`, `l4_standalone`, `l4_acceptance`, `l4_reason`) to `runs` table and `needs_usage_sim` to `plans`

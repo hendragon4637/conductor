@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -8,12 +9,15 @@ from typing import Any
 
 import psycopg
 
+logger = logging.getLogger(__name__)
+
 from backend.adapters.registry import get_adapter
 from backend.aionui import AionUiClient
 from backend.backends.opencode_config import spawn_env_for, write_worktree_config
 from backend.backends.registry import is_self_orchestrating
 from backend.db.queries import get_agent_config
 from backend.orchestration.orchestrator_brief import build_orchestrator_brief, build_single_agent_lead_brief
+from backend.skills import _make_engine, install_worktree_skills
 from backend.worktree import WorktreeManager, assemble_for_spawn
 
 
@@ -448,6 +452,13 @@ def spawn_node_team(
         wt_path = wm.create(project_id, branch)
         wt = Path(wt_path)
         plan["worktree_path"] = str(wt)
+
+    # Install capability-scoped skills into worktree (pre-spawn)
+    try:
+        engine = _make_engine(_db_url)
+        install_worktree_skills(engine, str(wt), node)
+    except Exception as exc:
+        logger.warning("Failed to install worktree skills: %s — continuing", exc)
 
     # ── Class-a (self-orchestrating) short-circuit ──────────────────────────
     backend_key = node.get("backend", "opencode")

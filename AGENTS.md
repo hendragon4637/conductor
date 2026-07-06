@@ -52,6 +52,11 @@
 | **SSE transport** | Server-Sent Events transport for MCP — used when client and server are on different machines (human PC → AIPC). |
 | **Conductor MCP** | MCP server on `127.0.0.1:8092` exposing safe plan operations (`conductor-create_plan`, `conductor-refine_plan`, `conductor-get_plan`, `conductor-list_sessions`, `conductor-search_memory`). No approve/spawn. |
 | **Obsidian vault MCP** | MCP server on `127.0.0.1:8093` exposing `/home/aipc/conductor-notes/` as read-only markdown resources via `obsidian-read_note`. |
+| **HarnessRenderer** | Abstract base class in `backend/skills.py` for converting neutral agent/skill DB rows to harness-specific files. One subclass per execution backend (opencode, stub, future). |
+| **Global skills** | Skills installed to `~/.config/opencode/skills/` — available to every run regardless of node capabilities. |
+| **Worktree skills** | Skills scoped to a node's capabilities, installed into `.opencode/skills/` in the worktree pre-spawn via `install_worktree_skills()`. |
+| **capability_skills** | DB table mapping capabilities to skill IDs — drives per-node worktree skill selection. |
+| **Import pipeline** | The automated process of cloning external repos (agency-agents, wshobson, awesome-agent-skills), parsing to neutral rows, classifying capabilities, and inserting to DB with `source='imported'`. |
 | **Hermes Agent** | Nous Research v0.16.0 — second execution backend alongside AionUi. Self-routing agent core; receives one goal per node from Conductor, self-decomposes, and routes to its own subagents. Runs via HTTP API (`:8642/v1`), Docker sandboxed, with Conductor worktree mounted at `/workspace`. |
 | **Calibration** | The L3 process of re-scoring frozen golden artifacts via the L2 judge and computing MAE and agreement. Results are stored in `judge_trust`. Does NOT modify the golden set. |
 | **CalibrationReport** | Output from `calibrate()`: node_type, total golden items, agreement rate, MAE, trusted boolean, per-item `CalibrationItem` list, and a human-readable note. |
@@ -241,6 +246,15 @@
 - The evaluator dispatcher routes by inspecting payload fields (e.g., `event_type`), not by routing key — maintain this pattern for new consumers
 - RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
 - A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
+
+## Skills & profiles (agent import pipeline)
+- Imported profiles use `source='imported'` in `agent_configs`; hand-written use `source='hand'`
+- New harness renderers: subclass `HarnessRenderer`, set `name`, implement `render_agent()`/`render_skill()`, register via `register()` in `backend/skills.py`
+- Skill layers: **global** skills (`~/.config/opencode/skills/`) available to all runs; **worktree** skills (`.opencode/skills/` per worktree) scoped to node capabilities via `capability_skills` mapping
+- `install_worktree_skills()` is called pre-spawn in `spawn_node_team()` — never call it separately
+- Realizability checks: `check_capability_realizability()` flags capability tools unsupported by a harness
+- Collision guard: OMO reserved names + duplicate agent_config_ids get `imp-` prefix during import
+- All imported agents default to `backend_targets=["opencode"]`; extend when adding a new harness
 
 ## Git
 - Atomic commits with clear messages
@@ -494,6 +508,40 @@ docker exec postgres psql -U aipc -d aipc_conductor \
 ```bash
 bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 ```
+
+## Profiles & skills (import pipeline)
+```bash
+# Import agent profiles from external repos (uses DB, idempotent)
+cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --verify
+
+# Render global skills + agents to opencode harness dirs
+uv run python scripts/renderer.py                     # install global skills
+uv run python scripts/renderer.py --agents            # also install imported agents
+uv run python scripts/renderer.py --list-harnesses    # list registered renderers
+
+# Check installed global skills/agents
+ls ~/.config/opencode/skills/                         # global skills dir
+ls ~/.config/opencode/agent/ | wc -l                  # count global agents
+
+# Check capability→skill mappings
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT * FROM capability_skills ORDER BY capability"
+
+# Check imported agent configs
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT agent_config_id, source, new_capabilities FROM agent_configs WHERE source='imported' LIMIT 10"
+
+# Verify worktree skills were installed (run after a node spawns)
+ls /opt/aipc/conductor/workspace/<project>.<run-id>/.opencode/skills/
+```
+
+## Harness-add procedure
+To add a new CLI harness later:
+1. Implement `HarnessRenderer` subclass in `backend/skills.py` (`render_agent`, `render_skill`, `agents_dir`, `skills_dir`)
+2. Register via `register(MyRenderer())` — adds to `RENDERERS` dict
+3. Add harness tool profile in `backend/planning/capability/harness_profiles.py`
+4. Add harness name to `backend_targets` on relevant agent configs
+No re-import, no schema change.
 
 ## Migrations
 Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration files:
