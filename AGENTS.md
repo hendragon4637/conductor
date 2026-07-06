@@ -81,6 +81,11 @@
 | **Conditional entry point** | `_route_entry()` in the planner graph that checks `state["status"]` to route to `"formulate"` (new plan, `status=="new"`) or `"inject"` (formulated/clarified plan, `status=="formulated"`). Replaces `set_entry_point("formulate")` to enable the clarify→continue flow. |
 | **Clarify → continue flow** | The `/clarify` endpoint in `services/planner/main.py` re-invokes the planner LangGraph after `formulate_or_clarify()` returns a MetaGoal, enabling formulated plans to proceed through `inject → decompose → select_capabilities → generate_checks → gate` without manual re-submission. Previously, `/clarify` returned `formulated` status but never continued the graph. |
 | **Revise loop (planner remediation)** | When the planner gate fails, `_n_decompose()` passes `gate_feedback` and prior `dag` from `PlanState` to `decompose()`, which injects them into the LLM prompt as a `{revision_block}` with fix-forward instructions. The LLM keeps working nodes and only fixes failures, rather than regenerating the entire DAG from scratch. |
+| **Heterogeneity stress test** | A generated-data test proving the moat machinery works across multiple domains (Software Delivery + Content Studio) with varying verification strength. Covers: JSONB family-array selector, both backends (opencode + Hermes), L1/L2/L3/L4 evaluator layers, and the ratchet. |
+| **Family array** | The `capabilities.family` column as a JSONB array of strings (e.g., `["software", "design"]`). Enables multi-domain capability matching via the `?|` overlap operator. Replaced the original single-string TEXT column. |
+| **Stress goals** | Generated goals in the `stress_goals` table with `domain`, `scope` (small/medium/large), `title`, `spec`, and `expected_capabilities` — used for heterogeneity stress test execution. 90 goals total (45 domain × 15 scope). |
+| **Provisional label** | A golden set label authored by a STRONGER model (ChatGPT Plus) rather than a human. Marked `labeled_by=chatgpt-plus`, `confidence=provisional`. Better than P0 (labeler ≠ judge breaks circularity), not as good as P3 (human = real ground truth). Swappable to human with zero system change (same `add_golden`, different `labeled_by`). |
+| **Verification tier** | The strength of objective evaluation a capability supports: **strong-oracle** (backend_api, tests_suite — L1 deterministically verifiable), **mixed** (frontend, design_layout — L1 builds + L2 subjective), **weak-oracle** (copywriting, content_review — L1 file-exists only, L2 dominates), **unrealizable** (image_gen, music_generation — unsupported tools, honest skip). |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -246,6 +251,21 @@
 - The evaluator dispatcher routes by inspecting payload fields (e.g., `event_type`), not by routing key — maintain this pattern for new consumers
 - RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
 - A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
+
+## Capability family (JSONB array)
+- `capabilities.family` is a JSONB array of strings, not a single TEXT value
+- Multi-family capabilities use `["software", "design"]` to match multiple domain pre-filters
+- Queries use `family ?| %s::text[]` for overlap matching — never `family = %s` (will not work)
+- The GIN index `idx_cap_family_gin` supports efficient `?|` lookups
+- `DOMAIN_TO_FAMILY` values in `selector.py` are `list[str]`, not `str`; use `["design", "creative"]` for backward-compatible domain→family mapping
+- `_FALLBACK_CAPS` in `registry.py` stores `family` as a list; fallback matching uses `any(f in c["family"] for f in families)`
+
+## Stress test data
+- Generated goals in `stress_goals` use `source='generated'` and have unique `sg-` prefixed UUID IDs
+- Seed scripts use `source='example-generated'` for capabilities and agent_configs created during stress test setup
+- `scripts/gen_stress_goals.py` reads `LITELLM_KEY_PLANNING` as fallback for `LITELLM_GATEWAY_KEY` when auth is needed
+- Stress test capabilities follow the same family-array convention as production capabilities
+- Content Studio caps with unrealizable tools (`image_gen`, `audio_gen`) are expected to honestly fail realizability checks — no silent skipping
 
 ## Skills & profiles (agent import pipeline)
 - Imported profiles use `source='imported'` in `agent_configs`; hand-written use `source='hand'`
@@ -543,9 +563,29 @@ To add a new CLI harness later:
 4. Add harness name to `backend_targets` on relevant agent configs
 No re-import, no schema change.
 
+## Stress test data setup
+```bash
+# Seed stress test capabilities + agent_configs (idempotent)
+set -a; source /opt/aipc/scripts/load-secrets.sh; source /opt/aipc/conductor/.env; set +a
+cd /opt/aipc/conductor && uv run python scripts/seed_stress_domains.py
+
+# Generate 90 stress goals via free LiteLLM (requires LITELLM_KEY_PLANNING)
+set -a; source /opt/aipc/scripts/load-secrets.sh; source /opt/aipc/conductor/.env; set +a
+LITELLM_GATEWAY_KEY="$LITELLM_KEY_PLANNING" LITELLM_GATEWAY_URL="$LITELLM_BASE" \
+  uv run python scripts/gen_stress_goals.py
+
+# Verify stress data
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT domain, scope, count(*) FROM stress_goals GROUP BY domain, scope ORDER BY domain, scope"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT name, family FROM capabilities ORDER BY name"
+```
+
 ## Migrations
 Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration files:
 - `v6_030_l4.sql` — adds L4 columns (`l4_status`, `l4_standalone`, `l4_acceptance`, `l4_reason`) to `runs` table and `needs_usage_sim` to `plans`
+- `v6_040_family_array.sql` — migrates `capabilities.family` from TEXT to JSONB array, adds GIN index
+- `v6_060_stress_goals.sql` — creates `stress_goals` table for generated heterogeneous stress test goals
 - Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
 
 ## Environment

@@ -162,6 +162,21 @@
 - RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
 - A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
 
+## Capability family (JSONB array)
+- `capabilities.family` is a JSONB array of strings, not a single TEXT value
+- Multi-family capabilities use `["software", "design"]` to match multiple domain pre-filters
+- Queries use `family ?| %s::text[]` for overlap matching — never `family = %s` (will not work)
+- The GIN index `idx_cap_family_gin` supports efficient `?|` lookups
+- `DOMAIN_TO_FAMILY` values in `selector.py` are `list[str]`, not `str`; use `["design", "creative"]` for backward-compatible domain→family mapping
+- `_FALLBACK_CAPS` in `registry.py` stores `family` as a list; fallback matching uses `any(f in c["family"] for f in families)`
+
+## Stress test data
+- Generated goals in `stress_goals` use `source='generated'` and have unique `sg-` prefixed UUID IDs
+- Seed scripts use `source='example-generated'` for capabilities and agent_configs created during stress test setup
+- `scripts/gen_stress_goals.py` reads `LITELLM_KEY_PLANNING` as fallback for `LITELLM_GATEWAY_KEY` when auth is needed
+- Stress test capabilities follow the same family-array convention as production capabilities
+- Content Studio caps with unrealizable tools (`image_gen`, `audio_gen`) are expected to honestly fail realizability checks — no silent skipping
+
 ## Skills & profiles (agent import pipeline)
 - Imported profiles use `source='imported'` in `agent_configs`; hand-written use `source='hand'`
 - New harness renderers: subclass `HarnessRenderer`, set `name`, implement `render_agent()`/`render_skill()`, register via `register()` in `backend/skills.py`

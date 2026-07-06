@@ -14,26 +14,26 @@ from backend.planning.meta_planner.llm import call_llm_structured, get_meta_plan
 logger = logging.getLogger(__name__)
 
 # Domain string -> capability family mapping (deterministic pre-filter)
-DOMAIN_TO_FAMILY: dict[str, str] = {
-    "software_app": "software",
-    "fullstack": "software",
-    "frontend": "software",
-    "backend": "software",
-    "api": "software",
-    "cli": "software",
-    "data_pipeline": "data",
-    "analytics": "data",
-    "data": "data",
-    "design": "creative",
-    "creative": "creative",
-    "music": "creative",
-    "video": "creative",
-    "game": "creative",
-    "research": "research",
-    "docs": "research",
-    "business": "business",
-    "finance": "business",
-    "general": "research",
+DOMAIN_TO_FAMILY: dict[str, list[str]] = {
+    "software_app": ["software"],
+    "fullstack": ["software"],
+    "frontend": ["software"],
+    "backend": ["software"],
+    "api": ["software"],
+    "cli": ["software"],
+    "data_pipeline": ["data"],
+    "analytics": ["data"],
+    "data": ["data"],
+    "design": ["design", "creative"],
+    "creative": ["creative"],
+    "music": ["creative"],
+    "video": ["creative"],
+    "game": ["creative"],
+    "research": ["research"],
+    "docs": ["research"],
+    "business": ["business"],
+    "finance": ["business"],
+    "general": ["research"],
 }
 
 MAX_GAP_PROPOSALS = 2

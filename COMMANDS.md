@@ -279,9 +279,29 @@ To add a new CLI harness later:
 4. Add harness name to `backend_targets` on relevant agent configs
 No re-import, no schema change.
 
+## Stress test data setup
+```bash
+# Seed stress test capabilities + agent_configs (idempotent)
+set -a; source /opt/aipc/scripts/load-secrets.sh; source /opt/aipc/conductor/.env; set +a
+cd /opt/aipc/conductor && uv run python scripts/seed_stress_domains.py
+
+# Generate 90 stress goals via free LiteLLM (requires LITELLM_KEY_PLANNING)
+set -a; source /opt/aipc/scripts/load-secrets.sh; source /opt/aipc/conductor/.env; set +a
+LITELLM_GATEWAY_KEY="$LITELLM_KEY_PLANNING" LITELLM_GATEWAY_URL="$LITELLM_BASE" \
+  uv run python scripts/gen_stress_goals.py
+
+# Verify stress data
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT domain, scope, count(*) FROM stress_goals GROUP BY domain, scope ORDER BY domain, scope"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT name, family FROM capabilities ORDER BY name"
+```
+
 ## Migrations
 Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration files:
 - `v6_030_l4.sql` — adds L4 columns (`l4_status`, `l4_standalone`, `l4_acceptance`, `l4_reason`) to `runs` table and `needs_usage_sim` to `plans`
+- `v6_040_family_array.sql` — migrates `capabilities.family` from TEXT to JSONB array, adds GIN index
+- `v6_060_stress_goals.sql` — creates `stress_goals` table for generated heterogeneous stress test goals
 - Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
 
 ## Environment

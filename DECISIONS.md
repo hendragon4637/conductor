@@ -159,6 +159,45 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 
 **Rationale**: Harness-agnostic import prevents lock-in — adding a new execution backend requires only a new renderer, not a re-import. Per-worktree skill scoping avoids context bloat from loading all 1177 catalog skills into every node.
 
+## 2026-07-06 — JSONB family array for multi-domain capability matching
+
+**Status**: ACTIVE
+
+**Context**: Capabilities needed to belong to multiple families (e.g., `frontend` is both `software` and `design`) for domain-based pre-filtering in the capability selector. The original `family TEXT` column with equality matching (`WHERE family = %s`) could only represent a single family.
+
+**Decision**:
+- `capabilities.family` migrated from `TEXT` to `JSONB` array of strings
+- Existing single-family rows wrapped in single-element JSONB arrays (e.g., `"software"` → `["software"]`)
+- Selector pre-filter changed from `family = %s` to `family ?| %s::text[]` (JSONB any-string-overlap operator)
+- GIN index (`idx_cap_family_gin`) replaces the old btree index for efficient `?|` queries
+- `_FALLBACK_CAPS` in `registry.py` updated: all `family` values are now lists
+- `DOMAIN_TO_FAMILY` in `selector.py` updated: values are `list[str]` instead of `str`; `design` domain maps to `["design", "creative"]` for backward compatibility
+- `frontend` capability carries `["software", "design"]` — selectable by either domain
+- `image_gen`, `design_layout` carry `["creative", "design"]`
+- `tech_docs` carries `["software", "research"]`
+
+**Rationale**: JSONB array with `?|` overlap query is the simplest Postgres-native approach — no join table needed, no schema complexity, existing GIN index support. A single capability can match multiple domain pre-filters without duplication.
+
+**Trade-offs**: JSONB operators are slightly less readable than TEXT equality in queries. The `?|` operator requires a `text[]` argument — callers must pass a list, not a scalar. Older psycopg versions need explicit `::text[]` cast.
+
+## 2026-07-06 — Heterogeneity stress test data pipeline (generated, provisional)
+
+**Status**: ACTIVE
+
+**Context**: Proving the moat machinery works across heterogeneous domains required realistic, multi-domain stress test data. Manual authoring of 90 goals across two domains (Software Delivery + Content Studio) was impractical. Goals needed to span verification-strength tiers (strong-oracle, mixed, weak-oracle, unrealizable).
+
+**Decision**:
+- `scripts/seed_stress_domains.py` seeds 12 capabilities (7 Software Delivery + 5 Content Studio) with JSONB family arrays and objective+subjective quality dimensions, plus 3 agent_configs (sw-fullstack-opencode, sw-backend-hermes, content-writer-opencode)
+- `scripts/gen_stress_goals.py` generates 90 goals (45/domain: 15 small + 15 medium + 15 large) via free LiteLLM (`deepseek-planning`) with `source='generated'`
+- Goals stored in `stress_goals` table with `domain`, `scope`, `title`, `spec`, `expected_capabilities`, `source='generated'`
+- Content Studio caps (`image_gen`, `music_generation`) intentionally left partially unstaffed — triggers honest gap/realizability failures as expected
+- The `gen_stress_goals.py` script reads `LITELLM_KEY_PLANNING` (fallback from `LITELLM_GATEWAY_KEY`) for LiteLLM auth
+- `source='generated'` marks auto-generated goals; `source='labeled_by=gpt'` with `confidence='provisional'` marks auto-labeled golden
+
+**Rationale**: Generated data proves pipe flow end-to-end across heterogeneous domains without human annotation. The scope tiers (small/medium/large) enable staged execution — run small first for quick validation, large overnight.
+
+**Trade-offs**: Not real user goals — edge cases may differ from production. Large goals (5+ capabilities) are expensive to run end-to-end. The `expected_capabilities` field is LLM-generated and may hallucinate capabilities not in the registry.
+
 ## 2026-07-02 — Example-generated data marking convention
 
 **Status**: ACTIVE
