@@ -185,6 +185,10 @@
 - Realizability checks: `check_capability_realizability()` flags capability tools unsupported by a harness
 - Collision guard: OMO reserved names + duplicate agent_config_ids get `imp-` prefix during import
 - All imported agents default to `backend_targets=["opencode"]`; extend when adding a new harness
+- Skill catalog import: `scripts/import_profiles.py --skills-only --pin`. Processes awesome-agent-skills README links in interleaved batches of 30: sequential fetch (1 worker, 2s gap between requests, exponential backoff on 429) → LLM batch classify → DB upsert → 60s cooldown → next batch
+- Per-skill folders are stored in `skills_store/<skill_id>/` with `store_path` in the DB. The renderer copies these folders to harness-specific skill dirs (not individual files).
+- Scripts detection uses content-based regex (`scripts/[\w.\-/]+`) on the fetched SKILL.md body, not GitHub API (avoids rate limits)
+- Resume partial imports with `--start-batch N` (1-indexed batch number)
 
 ## Git
 - Atomic commits with clear messages

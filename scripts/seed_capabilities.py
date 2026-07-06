@@ -22,7 +22,7 @@ DB_URL = os.environ["DATABASE_URL"]
 
 CAPS = [
     # ---------- SOFTWARE (strong objective oracle) ----------
-    {"name": "frontend", "family": "software",
+    {"name": "frontend", "family": ["software", "design"],
      "description": "user-facing UI a person interacts with",
      "quality_dimensions": [
          {"id": "renders", "dimension": "UI renders without errors", "kind": "objective"},
@@ -33,7 +33,7 @@ CAPS = [
      ],
      "required_tools": ["write_file", "browser"]},
 
-    {"name": "backend_api", "family": "software",
+    {"name": "backend_api", "family": ["software"],
      "description": "HTTP API with endpoints + data logic",
      "quality_dimensions": [
          {"id": "tests_pass", "dimension": "unit/endpoint tests pass", "kind": "objective"},
@@ -44,7 +44,7 @@ CAPS = [
      ],
      "required_tools": ["write_file", "shell"]},
 
-    {"name": "cli_tool", "family": "software",
+    {"name": "cli_tool", "family": ["software"],
      "description": "command-line tool runnable from shell",
      "quality_dimensions": [
          {"id": "help_works", "dimension": "`--help` exits 0", "kind": "objective"},
@@ -54,7 +54,7 @@ CAPS = [
      "required_tools": ["write_file", "shell"]},
 
     # ---------- DATA ----------
-    {"name": "data_pipeline", "family": "data",
+    {"name": "data_pipeline", "family": ["data"],
      "description": "ingest->transform->output data pipeline",
      "quality_dimensions": [
          {"id": "runs_sample", "dimension": "runs on sample input, produces expected-shape output",
@@ -66,7 +66,7 @@ CAPS = [
      ],
      "required_tools": ["write_file", "shell"]},
 
-    {"name": "analytics_assistant", "family": "data",
+    {"name": "analytics_assistant", "family": ["data"],
      "description": "derives insights from data streams",
      "quality_dimensions": [
          {"id": "parses", "dimension": "parses input data correctly", "kind": "objective"},
@@ -77,7 +77,7 @@ CAPS = [
      "required_tools": ["read_data", "write_file"]},
 
     # ---------- MEDIA / CREATIVE (weak objective oracle -> mostly subjective + golden) ----------
-    {"name": "music_generation", "family": "creative",
+    {"name": "music_generation", "family": ["creative"],
      "description": "generate a musical piece from a prompt",
      "quality_dimensions": [
          {"id": "valid_audio", "dimension": "produces playable audio of correct length", "kind": "objective"},
@@ -87,7 +87,7 @@ CAPS = [
      ],
      "required_tools": ["audio_gen", "write_file"]},
 
-    {"name": "video_content", "family": "creative",
+    {"name": "video_content", "family": ["creative"],
      "description": "generate/edit a video clip",
      "quality_dimensions": [
          {"id": "valid_video", "dimension": "valid encoded video of correct duration", "kind": "objective"},
@@ -97,7 +97,7 @@ CAPS = [
      ],
      "required_tools": ["video_gen", "write_file"]},
 
-    {"name": "game_build", "family": "creative",
+    {"name": "game_build", "family": ["creative"],
      "description": "build a small playable game",
      "quality_dimensions": [
          {"id": "runs", "dimension": "game launches + core loop runs", "kind": "objective"},
@@ -108,7 +108,7 @@ CAPS = [
      "required_tools": ["write_file", "shell", "browser"]},
 
     # ---------- BUSINESS ----------
-    {"name": "agentic_business_flow", "family": "business",
+    {"name": "agentic_business_flow", "family": ["business"],
      "description": "automate a business workflow across tools",
      "quality_dimensions": [
          {"id": "executes", "dimension": "workflow runs end-to-end without error", "kind": "objective"},
@@ -120,7 +120,7 @@ CAPS = [
      "required_tools": ["http", "read_data", "write_file"]},
 
     # ---------- RESEARCH / DOCS (non-runnable) ----------
-    {"name": "research_report", "family": "research",
+    {"name": "research_report", "family": ["research"],
      "description": "researched written report",
      "quality_dimensions": [
          {"id": "file_present", "dimension": "report file exists", "kind": "objective"},
@@ -131,7 +131,7 @@ CAPS = [
      "required_tools": ["read_web", "write_file"]},
 
     # ---------- GENERIC FALLBACK (always available) ----------
-    {"name": "generic", "family": "research",
+    {"name": "generic", "family": ["research"],
      "description": "fallback for unclassified deliverables",
      "quality_dimensions": [
          {"id": "deliverable_present", "dimension": "stated deliverable exists", "kind": "objective"},
@@ -145,28 +145,28 @@ def main() -> int:
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             for cap in CAPS:
-                cur.execute(
-                    """
-                    INSERT INTO capabilities (name, family, description, quality_dimensions,
-                                               required_tools, source, golden_ref_count, version)
-                    VALUES (%(name)s, %(family)s, %(description)s, %(quality_dimensions)s::jsonb,
-                            %(required_tools)s::jsonb, 'example-generated', 0, 1)
-                    ON CONFLICT (name) DO UPDATE SET
-                      family = EXCLUDED.family,
-                      description = EXCLUDED.description,
-                      quality_dimensions = EXCLUDED.quality_dimensions,
-                      required_tools = EXCLUDED.required_tools,
-                      version = capabilities.version + 1,
-                      updated_at = now()
-                    """,
-                    {
-                        "name": cap["name"],
-                        "family": cap["family"],
-                        "description": cap["description"],
-                        "quality_dimensions": json.dumps(cap["quality_dimensions"]),
-                        "required_tools": json.dumps(cap["required_tools"]),
-                    },
-                )
+                    cur.execute(
+                        """
+                        INSERT INTO capabilities (name, family, description, quality_dimensions,
+                                                   required_tools, source, golden_ref_count, version)
+                        VALUES (%(name)s, %(family)s::jsonb, %(description)s, %(quality_dimensions)s::jsonb,
+                                %(required_tools)s::jsonb, 'example-generated', 0, 1)
+                        ON CONFLICT (name) DO UPDATE SET
+                          family = EXCLUDED.family,
+                          description = EXCLUDED.description,
+                          quality_dimensions = EXCLUDED.quality_dimensions,
+                          required_tools = EXCLUDED.required_tools,
+                          version = capabilities.version + 1,
+                          updated_at = now()
+                        """,
+                        {
+                            "name": cap["name"],
+                            "family": json.dumps(cap["family"]),
+                            "description": cap["description"],
+                            "quality_dimensions": json.dumps(cap["quality_dimensions"]),
+                            "required_tools": json.dumps(cap["required_tools"]),
+                        },
+                    )
         conn.commit()
     print(f"Seeded {len(CAPS)} capabilities.")
     return 0

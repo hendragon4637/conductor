@@ -4,6 +4,7 @@ import abc
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +121,14 @@ class OpenCodeRenderer(HarnessRenderer):
 
     def render_skill(self, row: dict[str, Any], scope: str = "global") -> tuple[str, str]:
         skill_id = row["skill_id"]
+        store_path = row.get("store_path")
+
+        # When store_path exists, copy the whole skill folder
+        if store_path and Path(store_path).is_dir():
+            dst = self.skills_dir(scope) / skill_id
+            return str(dst), f"__COPY_DIR__:{store_path}:{dst}"
+
+        # Fallback: write single SKILL.md (for hand-authored skills)
         name = row.get("name", skill_id)
         desc = (row.get("description") or "")[:200]
         body = row.get("body") or ""
@@ -168,7 +177,8 @@ def capability_skills(engine, capability: str) -> list[dict[str, Any]]:
     with engine.connect() as conn:
         rows = conn.execute(
             text("""
-                SELECT s.skill_id, s.name, s.description, s.body, s.tools
+                SELECT s.skill_id, s.name, s.description, s.body, s.tools,
+                       s.store_path, s.has_scripts, s.requires_setup
                 FROM skills s
                 JOIN capability_skills cs ON cs.skill_id = s.skill_id
                 WHERE cs.capability = :cap
@@ -191,8 +201,16 @@ def skills_for_node(engine, capabilities: list[str]) -> list[dict[str, Any]]:
 
 
 def backend_supports(harness: str, skill_row: dict[str, Any]) -> bool:
-    if harness == "opencode":
-        return True
+    backend_targets = skill_row.get("backend_targets")
+    if backend_targets:
+        if isinstance(backend_targets, str):
+            try:
+                backend_targets = json.loads(backend_targets)
+            except (json.JSONDecodeError, TypeError):
+                backend_targets = None
+        if isinstance(backend_targets, list):
+            return harness in backend_targets
+    # No backend_targets means "supports all"
     return True
 
 
@@ -244,7 +262,7 @@ def install_global_skills(engine, renderer: HarnessRenderer) -> int:
     count = 0
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT skill_id, name, description, body, tools FROM skills ORDER BY skill_id")
+            text("SELECT skill_id, name, description, body, tools, store_path FROM skills ORDER BY skill_id")
         ).mappings()
         for row in rows:
             skill_dict = dict(row)
@@ -253,9 +271,17 @@ def install_global_skills(engine, renderer: HarnessRenderer) -> int:
             path, content = renderer.render_skill(skill_dict, scope="global")
             if not path:
                 continue
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            Path(path).write_text(content)
-            count += 1
+            if content.startswith("__COPY_DIR__:"):
+                _, src, dst = content.split(":", 2)
+                dst_path = Path(dst)
+                if dst_path.exists():
+                    shutil.rmtree(dst_path)
+                shutil.copytree(src, dst_path, symlinks=True)
+                count += 1
+            else:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(content)
+                count += 1
     logger.info("Installed %d skills to %s global skills dir", count, renderer.name)
     return count
 
@@ -309,9 +335,17 @@ def install_worktree_skills(engine, worktree_path: str, node: dict[str, Any]) ->
         path, content = renderer.render_skill(sk, scope=worktree_path)
         if not path:
             continue
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(content)
-        count += 1
+        if content.startswith("__COPY_DIR__:"):
+            _, src, dst = content.split(":", 2)
+            dst_path = Path(dst)
+            if dst_path.exists():
+                shutil.rmtree(dst_path)
+            shutil.copytree(src, dst_path, symlinks=True)
+            count += 1
+        else:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(content)
+            count += 1
 
     if count:
         logger.info("Installed %d worktree skills to %s", count, worktree_path)

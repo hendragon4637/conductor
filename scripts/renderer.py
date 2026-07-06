@@ -16,6 +16,7 @@ from pathlib import Path
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
+from sqlalchemy import text
 from backend.skills import HarnessRenderer, RENDERERS, install_global_skills, install_global_agents, backend_supports
 
 logging.basicConfig(
@@ -53,7 +54,7 @@ def main() -> int:
     try:
         engine = _make_engine()
         with engine.connect() as conn:
-            conn.execute("SELECT 1")
+            conn.execute(text("SELECT 1"))
         logger.info("Database connection OK")
     except Exception as exc:
         logger.error("Database connection failed: %s", exc)

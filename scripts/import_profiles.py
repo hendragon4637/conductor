@@ -28,6 +28,9 @@ import urllib.request
 import yaml
 from sqlalchemy import create_engine, text
 
+# ── Catalog fetching ────────────────────────────────────────────────
+from urllib.parse import urlparse
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -97,6 +100,12 @@ CANONICAL_TOOLS: set[str] = {"write_file", "read_file", "shell", "browser", "htt
 
 # Override model for ALL imported agents.
 OVERRIDE_MODEL = "nvidia/openai/gpt-oss-120b"
+
+# ── Catalog fetch paths ─────────────────────────────────────────────
+SKILLS_STORE = BASE / "skills_store"
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com"
+CATALOG_FETCH_WORKERS = 10
+
 
 # agency-agents division → Conductor domain family
 DIVISION_FAMILY_MAP: dict[str, str] = {
@@ -280,12 +289,13 @@ def normalize_tools(tools_raw: list[str]) -> list[str]:
 
 
 # ===================================================================
-# 3. AWESOME-AGENT-SKILLS PARSING (README catalog)
+# 3. AWESOME-AGENT-SKILLS PARSING (README catalog) + per-skill fetch
 # ===================================================================
 def parse_skills_catalog() -> dict[str, Any]:
     """Extract all markdown skill links from the awesome-agent-skills README.
 
-    Returns a dict with 'links' (list of dicts) and 'count'.
+    Returns a dict with 'links' (list of dicts with name, url, org, skill_name)
+    and 'count'.
     """
     readme_path = AWESOME_DIR / "README.md"
     if not readme_path.exists():
@@ -293,22 +303,255 @@ def parse_skills_catalog() -> dict[str, Any]:
         return {"links": [], "count": 0}
 
     text = readme_path.read_text(encoding="utf-8", errors="replace")
-    # Match markdown links: [text](url) - optional leading - or *
-    pattern = re.compile(r"[-*]\s*\[([^\]]+)\]\(([^)]+)\)")
+    pattern = re.compile(r"[-*]\s*\[([^\]]+)\]\(([^)]+)\)\s*\*{0,2}\s*-\s*(.*)")
     links: list[dict[str, str]] = []
 
     for match in pattern.finditer(text):
         name = match.group(1).strip()
         url = match.group(2).strip()
-        # Skip non-skill links (table-of-contents markers, badges, images)
+        raw_desc = match.group(3).strip().rstrip(".")
+        # Clean up any remaining markdown artifacts in description
+        description = raw_desc.replace("**", "").strip()
+        # Skip non-skill links
         if any(skip in name.lower() for skip in ("skill quality", "become a sponsor")):
             continue
         if url.startswith("#"):
             continue
-        links.append({"name": name, "url": url})
+
+        # Parse org and skill name from name field (format: "org/name")
+        org = ""
+        skill_name = name
+        if "/" in name:
+            parts = name.split("/", 1)
+            org = parts[0].strip()
+            skill_name = parts[1].strip()
+
+        links.append({
+            "name": name,
+            "url": url,
+            "org": org,
+            "skill_name": skill_name,
+            "description": description,
+        })
 
     logger.info("Extracted %d skill links from awesome-agent-skills README", len(links))
     return {"links": links, "count": len(links)}
+
+
+# ── GitHub URL resolution ───────────────────────────────────────────
+
+def _construct_github_raw_url(
+    url: str, org: str, skill_name: str,
+) -> str | None:
+    """Construct the raw.githubusercontent.com URL for a skill's SKILL.md.
+
+    Handles three URL patterns:
+    1. officialskills.sh/{org}/skills/{name} → github.com/{org}/skills/tree/main/skills/{name}
+    2. github.com/{org}/{repo}/tree/{branch}/{path}
+    3. github.com/{org}/{repo}/blob/{branch}/{path}
+
+    Returns the raw.githubusercontent.com URL or None if unresolvable.
+    """
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+
+    # ── officialskills.sh ──
+    if "officialskills.sh" in host:
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 3 and path_parts[1] == "skills":
+            skill_org = path_parts[0]
+            skill_n = path_parts[2]
+            return (
+                f"{GITHUB_RAW_BASE}/{skill_org}/skills/main/"
+                f"skills/{skill_n}/SKILL.md"
+            )
+        return None
+
+    # ── github.com ──
+    if "github.com" in host:
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) < 2:
+            return None
+        gh_org = path_parts[0]
+        gh_repo = path_parts[1]
+
+        # Bare repo URL: github.com/org/repo (no path deeper than repo name)
+        # → SKILL.md at repo root
+        if len(path_parts) < 4:
+            return f"{GITHUB_RAW_BASE}/{gh_org}/{gh_repo}/main/SKILL.md"
+
+        ref_type = path_parts[2]  # tree or blob
+        branch = path_parts[3]
+        source_path = "/".join(path_parts[4:])
+
+        # If source path already ends with SKILL.md, use as-is
+        if source_path.endswith("SKILL.md"):
+            return f"{GITHUB_RAW_BASE}/{gh_org}/{gh_repo}/{branch}/{source_path}"
+        return (
+            f"{GITHUB_RAW_BASE}/{gh_org}/{gh_repo}/{branch}/"
+            f"{source_path}/SKILL.md"
+        )
+
+    return None
+
+
+# ── HTTP fetching (rate-limit-aware) ────────────────────────────────
+
+_RETRYABLE_CODES = {429, 503, 502, 500}
+
+
+def _http_get(url: str, timeout: int = 15) -> tuple[str | None, str | None]:
+    """HTTP GET returning ``(body, None)`` on success or ``(None, reason)`` on failure.
+
+    ``reason`` is ``"not_found"`` for 404, ``"rate_limited"`` for 429/503,
+    or ``"error"`` for other failures.
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Conductor/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace"), None
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None, "not_found"
+        if exc.code in _RETRYABLE_CODES:
+            return None, "rate_limited"
+        return None, f"http_{exc.code}"
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None, "error"
+
+
+
+# ── Skill fetch + store ─────────────────────────────────────────────
+
+def fetch_skill_content(
+    link: dict[str, str],
+) -> dict[str, Any]:
+    """Fetch a single skill's SKILL.md from its source repo and write to disk.
+
+    Returns a dict with skill metadata (skill_id, body, store_path, has_scripts,
+    source, description) or None on failure.
+    """
+    url = link["url"]
+    org = link.get("org", "")
+    skill_name = link.get("skill_name", "")
+    description = link.get("description", "")
+
+    skill_id = _slugify(f"{org}-{skill_name}") if org else _slugify(skill_name)
+    if not skill_id:
+        return None
+
+    store_dir = SKILLS_STORE / skill_id
+    sk_md_path = store_dir / "SKILL.md"
+
+    # Re-use already-fetched content
+    if sk_md_path.exists():
+        body = sk_md_path.read_text(encoding="utf-8", errors="replace")
+        has_scripts = (store_dir / "scripts").is_dir() or bool(re.search(r'scripts/[\w.\-/]+', body))
+        return {
+            "skill_id": skill_id,
+            "name": f"{org}/{skill_name}" if org else skill_name,
+            "description": description,
+            "body": body,
+            "store_path": str(store_dir),
+            "has_scripts": has_scripts,
+            "requires_setup": has_scripts,
+            "source": "imported",
+            "import_ref": f"awesome-agent-skills:{url}",
+        }
+
+    # Resolve raw URL and fetch (with retry on rate limit)
+    raw_url = _construct_github_raw_url(url, org, skill_name)
+    if not raw_url:
+        logger.warning("Cannot resolve URL for skill %s (%s)", skill_id, url)
+        return None
+
+    body = None
+    reason = None
+    for attempt in range(3):
+        body, reason = _http_get(raw_url)
+        if body is not None:
+            break
+        if reason == "rate_limited" and attempt < 2:
+            backoff = 2 ** (attempt + 1)  # 2s, 4s
+            jitter = backoff * 0.5 * (__import__("random").random() - 0.5)
+            wait = backoff + jitter
+            logger.debug("Rate limited on %s, retrying in %.1fs (attempt %d/3)", skill_id, wait, attempt + 2)
+            time.sleep(wait)
+        else:
+            break
+
+    if not body:
+        logger.warning(
+            "Failed to fetch %s — %s (tried %s)",
+            skill_id, reason or "unknown", raw_url,
+        )
+        return None
+
+    # Write to skills_store
+    store_dir.mkdir(parents=True, exist_ok=True)
+    sk_md_path.write_text(body, encoding="utf-8")
+
+    # Detect scripts/ directory from SKILL.md content (references to scripts/ paths)
+    has_scripts = bool(re.search(r'scripts/[\w.\-/]+', body))
+
+    return {
+        "skill_id": skill_id,
+        "name": f"{org}/{skill_name}" if org else skill_name,
+        "description": description,
+        "body": body,
+        "store_path": str(store_dir),
+        "has_scripts": has_scripts,
+        "requires_setup": has_scripts,
+        "source": "imported",
+        "import_ref": f"awesome-agent-skills:{url}",
+    }
+
+
+_FETCH_GAP_SEC = 2  # gap between sequential fetches to avoid rate limits
+
+
+def fetch_all_skills(
+    catalog: dict[str, Any],
+    max_workers: int = 0,
+) -> list[dict[str, Any]]:
+    """Fetch all catalog skills SEQUENTIALLY (1 worker) with retry + cooldown.
+
+    Each skill is fetched one at a time with a ``_FETCH_GAP_SEC`` pause
+    between requests to stay under ``raw.githubusercontent.com`` rate limits
+    (~60 req/min per IP).  Retries up to 2 more times on 429/503.
+
+    Returns list of skill dicts (only successfully fetched).
+    """
+    links = catalog.get("links", [])
+    if not links:
+        logger.info("No catalog links to fetch")
+        return []
+
+    total = len(links)
+    logger.info("Fetching %d skills sequentially (gap=%ds)…", total, _FETCH_GAP_SEC)
+    skills: list[dict[str, Any]] = []
+    failed = 0
+
+    for i, link in enumerate(links, 1):
+        name = link.get("name", "?")
+        result = fetch_skill_content(link)
+        if result:
+            skills.append(result)
+        else:
+            failed += 1
+
+        if i % 50 == 0 or i == total:
+            logger.info("Fetched %d/%d (%d ok, %d failed)", i, total, len(skills), failed)
+
+        # Gap between requests (even when failed — still counts as a request for rate limiting)
+        if i < total:
+            time.sleep(_FETCH_GAP_SEC)
+
+    logger.info(
+        "Fetched %d/%d skills successfully (%d failed)",
+        len(skills), total, failed,
+    )
+    return skills
 
 
 # ===================================================================
@@ -584,8 +827,17 @@ def upsert_skill(skill: dict[str, Any], engine: Any) -> str | None:
     with engine.begin() as conn:
         conn.execute(
             text("""
-                INSERT INTO skills (skill_id, name, description, body, tools, source, import_ref, updated_at)
-                VALUES (:skill_id, :name, :description, :body, CAST(:tools AS jsonb), :source, :import_ref, now())
+                INSERT INTO skills (
+                    skill_id, name, description, body, tools,
+                    source, import_ref,
+                    store_path, has_scripts, requires_setup,
+                    updated_at
+                ) VALUES (
+                    :skill_id, :name, :description, :body, CAST(:tools AS jsonb),
+                    :source, :import_ref,
+                    :store_path, :has_scripts, :requires_setup,
+                    now()
+                )
                 ON CONFLICT (skill_id) DO UPDATE SET
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
@@ -593,6 +845,9 @@ def upsert_skill(skill: dict[str, Any], engine: Any) -> str | None:
                     tools = CAST(EXCLUDED.tools AS jsonb),
                     source = EXCLUDED.source,
                     import_ref = EXCLUDED.import_ref,
+                    store_path = EXCLUDED.store_path,
+                    has_scripts = EXCLUDED.has_scripts,
+                    requires_setup = EXCLUDED.requires_setup,
                     updated_at = now()
             """),
             {
@@ -603,6 +858,9 @@ def upsert_skill(skill: dict[str, Any], engine: Any) -> str | None:
                 "tools": json.dumps(skill.get("tools", [])),
                 "source": skill.get("source", "imported"),
                 "import_ref": skill.get("import_ref", ""),
+                "store_path": skill.get("store_path"),
+                "has_scripts": skill.get("has_scripts", False),
+                "requires_setup": skill.get("requires_setup", False),
             },
         )
     logger.debug("Upserted skill %s", skill_id)
@@ -767,124 +1025,273 @@ def main() -> int:
         db_vocab = CAPABILITIES_VOCAB
 
     # ------------------------------------------------------------------
-    # Step 2: Parse all agency-agents .md files
+    # Step 2-5: Parse + classify + upsert agent profiles (skip with --skills-only)
     # ------------------------------------------------------------------
-    logger.info("\n--- Parsing agency-agents ---")
-    agency_agents = parse_all_agents("agency-agents")
-    logger.info("Found %d agency-agents profiles", len(agency_agents))
-
-    # ------------------------------------------------------------------
-    # Step 3: Parse all wshobson agent .md files (agents + commands)
-    # ------------------------------------------------------------------
-    logger.info("\n--- Parsing wshobson-agents ---")
-    wshobson_agents = parse_all_agents("wshobson-agents")
-    logger.info("Found %d wshobson profiles", len(wshobson_agents))
-
-    # Separate agents from commands
-    wshobson_agent_files = [a for a in wshobson_agents if not a["is_command"]]
-    wshobson_command_files = [a for a in wshobson_agents if a["is_command"]]
-    logger.info(
-        "  → %d agents, %d commands",
-        len(wshobson_agent_files), len(wshobson_command_files),
-    )
-
-    all_agents = agency_agents + wshobson_agent_files + wshobson_command_files
-
-    # ------------------------------------------------------------------
-    # Step 4+5: Classify capabilities + upsert to DB (interleaved per batch)
-    # ------------------------------------------------------------------
-    logger.info("\n--- Classifying capabilities & upserting (per batch) ---")
     collision_count = 0
     upserted_count = 0
     skipped_configs = 0
+    agency_agents = []
+    wshobson_agent_files = []
+    wshobson_command_files = []
 
-    def _flush_batch(batch: list[dict[str, Any]], _caps: list[list[str]]) -> None:
-        nonlocal collision_count, upserted_count, skipped_configs
-        for agent in batch:
-            raw_name = agent.get("raw_name", "")
-            slug = _slugify(raw_name)
-            if slug.lower() in OMO_RESERVED:
-                collision_count += 1
-            result = upsert_agent_config(agent, engine)
-            if result:
-                upserted_count += 1
-                if result != slug:
-                    collision_count += 1
-            else:
-                skipped_configs += 1
-
-    if all_agents:
-        batch_classify(all_agents, db_vocab, batch_size=10, label="agents", on_batch=_flush_batch)
+    if ARGS.skills_only:
+        logger.info("--skills-only: skipping agent parsing (already imported)")
     else:
-        logger.warning("No agents to classify!")
+        logger.info("\n--- Parsing agency-agents ---")
+        agency_agents = parse_all_agents("agency-agents")
+        logger.info("Found %d agency-agents profiles", len(agency_agents))
 
-    logger.info(
-        "Upserted %d agent configs (%d collisions, %d skipped)",
-        upserted_count, collision_count, skipped_configs,
-    )
+        logger.info("\n--- Parsing wshobson-agents ---")
+        wshobson_agents = parse_all_agents("wshobson-agents")
+        logger.info("Found %d wshobson profiles", len(wshobson_agents))
+
+        wshobson_agent_files = [a for a in wshobson_agents if not a["is_command"]]
+        wshobson_command_files = [a for a in wshobson_agents if a["is_command"]]
+        logger.info(
+            "  → %d agents, %d commands",
+            len(wshobson_agent_files), len(wshobson_command_files),
+        )
+
+        all_agents = agency_agents + wshobson_agent_files + wshobson_command_files
+
+        logger.info("\n--- Classifying capabilities & upserting (per batch) ---")
+
+        def _flush_batch(batch: list[dict[str, Any]], _caps: list[list[str]]) -> None:
+            nonlocal collision_count, upserted_count, skipped_configs
+            for agent in batch:
+                raw_name = agent.get("raw_name", "")
+                slug = _slugify(raw_name)
+                if slug.lower() in OMO_RESERVED:
+                    collision_count += 1
+                result = upsert_agent_config(agent, engine)
+                if result:
+                    upserted_count += 1
+                    if result != slug:
+                        collision_count += 1
+                else:
+                    skipped_configs += 1
+
+        if all_agents:
+            batch_classify(all_agents, db_vocab, batch_size=10, label="agents", on_batch=_flush_batch)
+        else:
+            logger.warning("No agents to classify!")
+
+        logger.info(
+            "Upserted %d agent configs (%d collisions, %d skipped)",
+            upserted_count, collision_count, skipped_configs,
+        )
 
     # ------------------------------------------------------------------
-    # Step 6: Parse awesome-agent-skills catalog
+    # Step 6: Parse + fetch + classify + upsert awesome-agent-skills
     # ------------------------------------------------------------------
     logger.info("\n--- Parsing awesome-agent-skills catalog ---")
     catalog = parse_skills_catalog()
+    logger.info("Found %d skill links in README catalog", catalog["count"])
 
-    # Upsert skills from catalog as a registry entry
     if catalog["count"] > 0:
-        # Create a single registry record for the catalog
-        registry_skill = {
-            "skill_id": "awesome-agent-skills-catalog",
-            "name": "Awesome Agent Skills Catalog",
-            "description": (
-                f"A curated catalog of {catalog['count']} agent skills from "
-                f"the VoltAgent awesome-agent-skills repository. "
-                f"Sources include Anthropic, Google, Vercel, Stripe, and the community."
-            ),
-            "body": json.dumps(catalog["links"], indent=2),
-            "tools": ["read_web"],
-            "source": "catalog",
-            "import_ref": "awesome-agent-skills:README.md",
-        }
-        upsert_skill(registry_skill, engine)
+        all_links = catalog["links"]
+        if ARGS.limit_skills:
+            all_links = all_links[:ARGS.limit_skills]
+        total_skills = len(all_links)
 
-        # Link to 'generic' capability
-        upsert_capability_skill("generic", "awesome-agent-skills-catalog", engine)
+        # Interleaved: fetch 30 → classify 30 → upsert 30 → repeat
+        BATCH_SIZE = 30
+        skill_classified = 0
+        skill_failed = 0
+        batch_num = 0
+        total_batches = (total_skills + BATCH_SIZE - 1) // BATCH_SIZE
+
+        def _infer_tools(sk: dict[str, Any]) -> None:
+            desc = (sk.get("description") or "").lower()
+            tools: list[str] = []
+            if any(w in desc for w in ("code", "build", "compile", "test", "deploy")):
+                tools.append("shell")
+            if any(w in desc for w in ("web", "api", "url", "fetch", "http")):
+                tools.append("read_web")
+            if any(w in desc for w in ("browser", "page", "ui", "render")):
+                tools.append("browser")
+            if any(w in desc for w in ("read", "search", "find", "lookup", "query")):
+                tools.append("read_file")
+            if any(w in desc for w in ("write", "create", "edit", "update")):
+                tools.append("write_file")
+            sk["tools"] = sorted(set(tools)) if tools else ["read_web"]
+            sk["tools_raw"] = sk["tools"]
+
+        def _flush_skill_batch(batch: list[dict[str, Any]], caps_list: list[list[str]]) -> None:
+            nonlocal skill_classified, skill_failed
+            for sk, caps in zip(batch, caps_list):
+                sk["capabilities"] = caps
+                sk_id = upsert_skill(sk, engine)
+                if sk_id:
+                    for cap in caps:
+                        upsert_capability_skill(cap, sk_id, engine)
+                    skill_classified += 1
+                else:
+                    skill_failed += 1
+
+        for batch_start in range(0, total_skills, BATCH_SIZE):
+            batch_num += 1
+            batch_links = all_links[batch_start:batch_start + BATCH_SIZE]
+
+            # Skip already-processed batches
+            if batch_num < ARGS.start_batch:
+                logger.info(
+                    "Batch %d/%d: skipped (%d skills already processed)",
+                    batch_num, total_batches, len(batch_links),
+                )
+                skill_classified += len(batch_links)
+                continue
+
+            # 6a: Fetch this batch (sequential, with cooldown)
+            logger.info(
+                "\n--- Batch %d/%d: fetching %d skills ---",
+                batch_num, total_batches, len(batch_links),
+            )
+            batch_skills = fetch_all_skills({"links": batch_links})
+            if not batch_skills:
+                logger.info("No skills fetched in batch %d, skipping", batch_num)
+                continue
+
+            # Infer tools
+            for sk in batch_skills:
+                _infer_tools(sk)
+
+            # 6b: Classify + upsert this batch (LLM batch of up to 30)
+            logger.info(
+                "--- Batch %d/%d: classifying %d skills via LLM ---",
+                batch_num, total_batches, len(batch_skills),
+            )
+            batch_classify(
+                batch_skills, db_vocab,
+                batch_size=BATCH_SIZE, label=f"catalog-skills-b{batch_num}",
+                on_batch=_flush_skill_batch,
+            )
+
+            logger.info(
+                "Batch %d/%d done — %d upserted (%d failed, %d/%d total)",
+                batch_num, total_batches,
+                skill_classified, skill_failed,
+                min(batch_start + BATCH_SIZE, total_skills), total_skills,
+            )
+
+            # Cooldown between batches to avoid rate limits
+            if batch_start + BATCH_SIZE < total_skills and batch_num >= ARGS.start_batch:
+                logger.info("Batch cooldown 60s before next batch…")
+                time.sleep(60)
+
+        logger.info(
+            "Skills upserted: %d, failed: %d",
+            skill_classified, skill_failed,
+        )
+    else:
+        skill_classified = 0
 
     # ------------------------------------------------------------------
-    # Step 7: Summary
+    # Step 7: Realizability sanity check
+    # ------------------------------------------------------------------
+    if ARGS.verify:
+        logger.info("\n--- Checking capability realizability ---")
+        try:
+            sys.path.insert(0, str(BASE))
+            from backend.skills import check_capability_realizability
+            all_caps = db_vocab[:5]
+            gaps = check_capability_realizability(engine, all_caps, harness="opencode")
+            if gaps:
+                logger.warning("Realizability gaps found:")
+                for cap, unsupported in gaps.items():
+                    logger.warning("  %s: missing tools %s", cap, unsupported)
+            else:
+                logger.info("All capabilities are realizable on opencode harness")
+        except ImportError as exc:
+            logger.warning("Cannot check realizability: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Step 8: Commit SHA pinning
+    # ------------------------------------------------------------------
+    pinned_shas: dict[str, str] = {}
+    if ARGS.pin:
+        logger.info("\n--- Pinning commit SHAs ---")
+        import subprocess
+        for repo_label, repo_dir in [
+            ("agency-agents", AGENCY_DIR),
+            ("wshobson-agents", WSHOBSON_DIR),
+            ("awesome-agent-skills", AWESOME_DIR),
+        ]:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=10,
+                    cwd=str(repo_dir),
+                )
+                sha = result.stdout.strip()
+                if sha:
+                    pinned_shas[repo_label] = sha
+                    logger.info("  %s → %s", repo_label, sha[:12])
+            except (subprocess.SubprocessError, FileNotFoundError) as exc:
+                logger.warning("  %s: could not get SHA (%s)", repo_label, exc)
+
+        shas_path = IMPORTS / ".commit_shas.json"
+        shas_path.write_text(
+            json.dumps(pinned_shas, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        logger.info("Commit SHAs written to %s", shas_path)
+
+    # ------------------------------------------------------------------
+    # Step 9: Summary
     # ------------------------------------------------------------------
     logger.info("\n" + "=" * 60)
     logger.info("IMPORT SUMMARY")
     logger.info("=" * 60)
-    logger.info("  agency-agents profiles:     %d", len(agency_agents))
-    logger.info("  wshobson agent files:       %d", len(wshobson_agent_files))
-    logger.info("  wshobson command files:     %d", len(wshobson_command_files))
-    logger.info("  awesome-agent-skills links: %d", catalog["count"])
+    logger.info("  agency-agents profiles:       %d", len(agency_agents))
+    logger.info("  wshobson agent files:         %d", len(wshobson_agent_files))
+    logger.info("  wshobson command files:       %d", len(wshobson_command_files))
+    logger.info("  awesome-agent-skills total:   %d", catalog["count"])
+    logger.info("  awesome-agent-skills fetched: %d", skill_classified + skill_failed)
+    logger.info("  awesome-agent-skills upserted:%d", skill_classified)
     logger.info("  ─────────────────────────────────────")
-    logger.info("  Agent configs upserted:     %d", upserted_count)
-    logger.info("  Collisions (reserved/dup):  %d", collision_count)
-    logger.info("  Skipped (errors):           %d", skipped_configs)
+    logger.info("  Agent configs upserted:       %d", upserted_count)
+    logger.info("  Collisions (reserved/dup):    %d", collision_count)
+    logger.info("  Skipped (errors):             %d", skipped_configs)
     logger.info("  ─────────────────────────────────────")
-    logger.info("  DB capabilities loaded:     %d", len(db_vocab))
+    logger.info("  DB capabilities loaded:       %d", len(db_vocab))
+    if ARGS.pin:
+        logger.info("  Commit SHAs pinned:          %s", ", ".join(pinned_shas.keys()))
     logger.info("=" * 60)
 
     return 0
 
 
+# ── CLI args ────────────────────────────────────────────────────────
+import argparse
+_ARGS_PARSER = argparse.ArgumentParser(description="Import agent profiles into Conductor DB")
+_ARGS_PARSER.add_argument("--limit", type=int, default=0,
+                          help="Process only first N agents per repo (for testing)")
+_ARGS_PARSER.add_argument("--limit-skills", type=int, default=0,
+                          help="Process only first N skills (for testing)")
+_ARGS_PARSER.add_argument("--skills-only", action="store_true",
+                          help="Skip agent parsing, only process skill catalog")
+_ARGS_PARSER.add_argument("--verify", action="store_true",
+                          help="Run capability realizability check post-import")
+_ARGS_PARSER.add_argument("--pin", action="store_true",
+                          help="Pin commit SHAs for imported repos")
+_ARGS_PARSER.add_argument("--start-batch", type=int, default=1,
+                          help="Skip batches before this number (1-indexed, default 1)")
+# Parse once, fallback to defaults if running as import (e.g. pytest)
+try:
+    ARGS = _ARGS_PARSER.parse_args()
+except SystemExit:
+    ARGS = _ARGS_PARSER.parse_args([])
+
+
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Import agent profiles into Conductor DB")
-    parser.add_argument("--limit", type=int, default=0,
-                        help="Process only first N agents per repo (for testing)")
-    args = parser.parse_args()
-    if args.limit:
-        # Monkey-patch parse_all_agents to slice results
+    if ARGS.limit:
         _orig_parse = parse_all_agents
         def _limited_parse(repo_label: str) -> list[dict[str, Any]]:
             agents = _orig_parse(repo_label)
-            return agents[:args.limit]
+            return agents[:ARGS.limit]
         import import_profiles  # noqa
         import_profiles.parse_all_agents = _limited_parse  # type: ignore
         globals()["parse_all_agents"] = _limited_parse
-        logger.info("LIMITED MODE: processing only %d agents per repo", args.limit)
+        logger.info("LIMITED MODE: processing only %d agents per repo", ARGS.limit)
     sys.exit(main())

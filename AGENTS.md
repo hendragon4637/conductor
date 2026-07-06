@@ -86,6 +86,9 @@
 | **Stress goals** | Generated goals in the `stress_goals` table with `domain`, `scope` (small/medium/large), `title`, `spec`, and `expected_capabilities` — used for heterogeneity stress test execution. 90 goals total (45 domain × 15 scope). |
 | **Provisional label** | A golden set label authored by a STRONGER model (ChatGPT Plus) rather than a human. Marked `labeled_by=chatgpt-plus`, `confidence=provisional`. Better than P0 (labeler ≠ judge breaks circularity), not as good as P3 (human = real ground truth). Swappable to human with zero system change (same `add_golden`, different `labeled_by`). |
 | **Verification tier** | The strength of objective evaluation a capability supports: **strong-oracle** (backend_api, tests_suite — L1 deterministically verifiable), **mixed** (frontend, design_layout — L1 builds + L2 subjective), **weak-oracle** (copywriting, content_review — L1 file-exists only, L2 dominates), **unrealizable** (image_gen, music_generation — unsupported tools, honest skip). |
+| **Skills store** | Per-skill directory under `skills_store/<skill_id>/` containing a `SKILL.md` and optionally a `scripts/` subdirectory. Each skill is fetched individually from its source GitHub repo, written to disk, then upserted to the DB with `store_path` pointing to its folder. |
+| **Import pipeline** | The automated process of cloning external repos (agency-agents, wshobson, awesome-agent-skills), parsing to neutral rows, classifying capabilities, and inserting to DB with `source='imported'`. Skills are fetched sequentially (2s gap between requests) in interleaved batches of 30: fetch → LLM classify → upsert → next batch. |
+| **Harness renderer** | A `HarnessRenderer` subclass in `backend/skills.py` that converts neutral DB rows to harness-specific config files. The opencode renderer copies per-skill folders from `skills_store/` to `~/.config/opencode/skills/` (global) or `.opencode/skills/` (worktree). |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -275,6 +278,10 @@
 - Realizability checks: `check_capability_realizability()` flags capability tools unsupported by a harness
 - Collision guard: OMO reserved names + duplicate agent_config_ids get `imp-` prefix during import
 - All imported agents default to `backend_targets=["opencode"]`; extend when adding a new harness
+- Skill catalog import: `scripts/import_profiles.py --skills-only --pin`. Processes awesome-agent-skills README links in interleaved batches of 30: sequential fetch (1 worker, 2s gap between requests, exponential backoff on 429) → LLM batch classify → DB upsert → 60s cooldown → next batch
+- Per-skill folders are stored in `skills_store/<skill_id>/` with `store_path` in the DB. The renderer copies these folders to harness-specific skill dirs (not individual files).
+- Scripts detection uses content-based regex (`scripts/[\w.\-/]+`) on the fetched SKILL.md body, not GitHub API (avoids rate limits)
+- Resume partial imports with `--start-batch N` (1-indexed batch number)
 
 ## Git
 - Atomic commits with clear messages
@@ -534,6 +541,12 @@ bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 # Import agent profiles from external repos (uses DB, idempotent)
 cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --verify
 
+# Import only skills (skip agents, already imported):
+cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --skills-only --pin
+
+# Resume from a specific batch (1-indexed, e.g. batch 8 after partial import):
+cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --skills-only --start-batch 8 --pin
+
 # Render global skills + agents to opencode harness dirs
 uv run python scripts/renderer.py                     # install global skills
 uv run python scripts/renderer.py --agents            # also install imported agents
@@ -543,9 +556,17 @@ uv run python scripts/renderer.py --list-harnesses    # list registered renderer
 ls ~/.config/opencode/skills/                         # global skills dir
 ls ~/.config/opencode/agent/ | wc -l                  # count global agents
 
+# Check per-skill folders on disk
+ls /opt/aipc/conductor/skills_store/ | wc -l          # count individual skill dirs
+ls /opt/aipc/conductor/skills_store/<skill_id>/       # SKILL.md + optional scripts/
+
 # Check capability→skill mappings
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT * FROM capability_skills ORDER BY capability"
+
+# Check imported skills in DB
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT skill_id, has_scripts, length(body) FROM skills WHERE source='imported' LIMIT 10"
 
 # Check imported agent configs
 docker exec postgres psql -U aipc -d aipc_conductor \
@@ -586,6 +607,7 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration 
 - `v6_030_l4.sql` — adds L4 columns (`l4_status`, `l4_standalone`, `l4_acceptance`, `l4_reason`) to `runs` table and `needs_usage_sim` to `plans`
 - `v6_040_family_array.sql` — migrates `capabilities.family` from TEXT to JSONB array, adds GIN index
 - `v6_060_stress_goals.sql` — creates `stress_goals` table for generated heterogeneous stress test goals
+- `v6_070_skills_store.sql` — adds `store_path`, `has_scripts`, `requires_setup` columns to `skills` table for per-skill folder storage
 - Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
 
 ## Environment

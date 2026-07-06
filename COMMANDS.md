@@ -250,6 +250,12 @@ bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 # Import agent profiles from external repos (uses DB, idempotent)
 cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --verify
 
+# Import only skills (skip agents, already imported):
+cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --skills-only --pin
+
+# Resume from a specific batch (1-indexed, e.g. batch 8 after partial import):
+cd /opt/aipc/conductor && uv run python scripts/import_profiles.py --skills-only --start-batch 8 --pin
+
 # Render global skills + agents to opencode harness dirs
 uv run python scripts/renderer.py                     # install global skills
 uv run python scripts/renderer.py --agents            # also install imported agents
@@ -259,9 +265,17 @@ uv run python scripts/renderer.py --list-harnesses    # list registered renderer
 ls ~/.config/opencode/skills/                         # global skills dir
 ls ~/.config/opencode/agent/ | wc -l                  # count global agents
 
+# Check per-skill folders on disk
+ls /opt/aipc/conductor/skills_store/ | wc -l          # count individual skill dirs
+ls /opt/aipc/conductor/skills_store/<skill_id>/       # SKILL.md + optional scripts/
+
 # Check capability→skill mappings
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT * FROM capability_skills ORDER BY capability"
+
+# Check imported skills in DB
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT skill_id, has_scripts, length(body) FROM skills WHERE source='imported' LIMIT 10"
 
 # Check imported agent configs
 docker exec postgres psql -U aipc -d aipc_conductor \
@@ -302,6 +316,7 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration 
 - `v6_030_l4.sql` — adds L4 columns (`l4_status`, `l4_standalone`, `l4_acceptance`, `l4_reason`) to `runs` table and `needs_usage_sim` to `plans`
 - `v6_040_family_array.sql` — migrates `capabilities.family` from TEXT to JSONB array, adds GIN index
 - `v6_060_stress_goals.sql` — creates `stress_goals` table for generated heterogeneous stress test goals
+- `v6_070_skills_store.sql` — adds `store_path`, `has_scripts`, `requires_setup` columns to `skills` table for per-skill folder storage
 - Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
 
 ## Environment
