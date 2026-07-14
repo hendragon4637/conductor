@@ -1,31 +1,115 @@
-"""L2 rubric judge — one generalist model, preset rubrics, schema-constrained output.
+"""L2 rubric judge — deepeval GEval metrics via LiteLLM JUDGE gateway.
 
-Each rubric item is judged independently via a structured LLM call.
-Weighted score is computed from per-item ``criteria_met`` booleans.
-Scores are written to Langfuse on the node trace.
+Each rubric item is evaluated as a separate GEval metric. The weighted
+score is computed from per-item criteria_met booleans. Langfuse scoring
+is preserved.
+
+Backward compat: if ``llm_call`` is passed to ``run_l2()``, the original
+raw-LLM code path is used (for testing with mocks).
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from deepeval.metrics import GEval
+from deepeval.metrics.g_eval.utils import Rubric
+from deepeval.test_case import LLMTestCase, LLMTestCaseParams
+
 from backend.evaluator.schema import Check, Judgment
+from shared.eval_models import JUDGE as JUDGE_MODEL
 
-# ── Judge model config (now via LiteLLM gateway) ────────────────────────────
-JUDGE_TIMEOUT = 120.0
+# ── Judge model config ──────────────────────────────────────────────────────
+JUDGE_TIMEOUT = 300.0
 
-# L2 input-size guard — oversized artifacts trigger a flag-fail instead of truncation
+# L2 input-size — oversized artifacts trigger a flag-fail instead of truncation
 L2_MAX_CHARS = int(os.environ.get("L2_MAX_INPUT_CHARS", "24000"))
 
-ARTIFACT_SKIP_PARTS = {".git", ".venv", "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+GEVAL_THRESHOLD = 0.5
+"""Score threshold for per-item criteria_met conversion."""
+
+from contracts.paths import INFRA_EXCLUDES, INFRA_SKIP_PARTS
+from contracts.feedback import get_dim_feedback, parse_feedback, try_validate_feedback
+
+ARTIFACT_SKIP_PARTS = INFRA_SKIP_PARTS | {".git"}
 ARTIFACT_SKIP_SUFFIXES = {".pyc", ".pyo", ".so", ".dll", ".dylib", ".db", ".sqlite", ".sqlite3", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".tar", ".gz"}
 
-# ── Prompt template ─────────────────────────────────────────────────────────
+# ── Structured feedback contract (folded into evaluation_steps) ─────────────
+
+FEEDBACK_CONTRACT = (
+    'In your reason, output STRICT JSON only: {"what": "which specific requirement failed or passed", '
+    '"where": "file:function or exact path in the artifact", '
+    '"why": "root cause in one sentence", '
+    '"how": "the concrete change that would satisfy this criterion"}. '
+    'Quote actual file paths and code identifiers FROM THE ARTIFACT — never generic phrases.'
+)
+
+L2_RUBRIC_ANCHORS = [
+    Rubric(score_range=(0, 2),  expected_outcome="deliverable missing or core behavior absent"),
+    Rubric(score_range=(3, 5),  expected_outcome="deliverable exists but the criterion's core behavior is wrong"),
+    Rubric(score_range=(6, 8),  expected_outcome="criterion met for the main path; edge cases unhandled"),
+    Rubric(score_range=(9, 10), expected_outcome="criterion fully met incl. edge cases"),
+]
+
+
+
+def build_dim_metric(dim_id: str, rubric_question: str, steps: list[str] | None = None) -> GEval:
+    """Build a single GEval metric with explicit steps + rubric anchors.
+
+    ``evaluation_steps`` replaces GEval's auto-generated vague steps;
+    ``rubric`` anchors give the judge a 0-10 scale with clear mappings;
+    ``FEEDBACK_CONTRACT`` demands structured JSON in ``reason``.
+
+    If ``steps`` is provided, it replaces the default steps. This allows
+    acceptance criteria from the shared contract to drive the judge's
+    evaluation focus.
+    """
+    return GEval(
+        name=dim_id,
+        evaluation_steps=steps or [
+            f"Evaluate the artifact against this criterion: {rubric_question}",
+            "Identify the exact files/functions relevant to the criterion; check their actual content",
+            FEEDBACK_CONTRACT,
+        ],
+        rubric=L2_RUBRIC_ANCHORS,
+        evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
+        model=JUDGE_MODEL,
+        threshold=GEVAL_THRESHOLD,
+        strict_mode=False,
+    )
+
+_MAX_GEVAL_RETRIES = 3
+_GEVAL_RETRY_DELAY_S = 5
+
+_RETRYABLE_ERROR_PATTERNS = [
+    "rate_limit", "rate limit", "ratelimit",
+    "timeout",
+    "badrequesterror",
+    "serviceunavailable",
+    "resource_exhausted", "resourceexhausted",
+    "upstream request failed",
+    "connection", "connectionrefused", "connectionreset",
+    "internal server error",
+    "server error",
+    "429", "502", "503",
+    "api error",
+    "try again",
+]
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Return True if *exc* looks like a transient infra error."""
+    low = str(exc).lower()
+    return any(p in low for p in _RETRYABLE_ERROR_PATTERNS)
+
+# ── Legacy prompt templates (kept for ``llm_call`` backward compat) ─────────
 
 JUDGE_SYSTEM_PROMPT = """You are a strict, impartial quality judge.
 
@@ -106,11 +190,67 @@ def _read_artifact_text(path: Path, limit: int = 3000) -> str | None:
         return None
 
 
-def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS) -> str:
+def _build_repomix_snapshot(worktree: str, node_context: dict | None = None) -> str:
+    """Generate a bounded repomix snapshot of the worktree for the judge.
+
+    Includes full content for: criterion ``where`` paths + deliverables +
+    manifests (pyproject.toml, package.json, RUN.md). Everything else is
+    a compressed tree listing (~2KB). Falls back gracefully if repomix
+    CLI is unavailable.
+    """
+    include_paths: list[str] = ["pyproject.toml", "package.json", "requirements.txt", "RUN.md"]
+    if node_context:
+        for ac in (node_context.get("acceptance_criteria") or []):
+            include_paths.extend(ac.get("where", []))
+        for d in (node_context.get("deliverables") or node_context.get("task", {}).get("deliverables", [])):
+            if d not in include_paths:
+                include_paths.append(d)
+    include_paths = list(dict.fromkeys(include_paths))  # dedupe, preserve order
+    ignore_str = ",".join(INFRA_EXCLUDES)
+    include_str = ",".join(include_paths)
+    snapshot_path = os.path.join(worktree, ".conductor", "snapshot.md")
+    os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
+
+    try:
+        subprocess.run(
+            ["repomix", "--include", include_str, "--ignore", ignore_str,
+             "--no-gitignore", "--style", "markdown", "--output", snapshot_path, worktree],
+            capture_output=True, text=True, timeout=60,
+        )
+        if os.path.isfile(snapshot_path):
+            with open(snapshot_path) as f:
+                snapshot = f.read()
+        else:
+            snapshot = ""
+    except Exception:
+        snapshot = ""
+
+    try:
+        result = subprocess.run(
+            ["repomix", "--include", "**", "--ignore", ignore_str,
+             "--no-gitignore", "--style", "plain", "--output", "-", worktree],
+            capture_output=True, text=True, timeout=60,
+        )
+        tree = result.stdout.strip()[:2000]
+    except Exception:
+        tree = ""
+
+    parts: list[str] = []
+    if snapshot:
+        parts.append("[REPOMIX SNAPSHOT — contract paths + manifests (full content)]")
+        parts.append(snapshot[:10000])
+    if tree:
+        parts.append("[REPO TREE — bounded]")
+        parts.append(tree)
+    return "\n".join(parts)
+
+
+def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS, node_context: dict | None = None) -> str:
     """Collect evidence from the worktree for the judge to evaluate.
 
     Captures working-tree diff, last-commit diff (for committed executor
-    results), tracked file listing, file contents, and untracked files.
+    results), tracked file listing, file contents, untracked files, and
+    a bounded repomix snapshot ("what exists" alongside "what changed").
     """
     parts: list[str] = []
 
@@ -127,6 +267,13 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS) -> str:
             has_wt_diff = True
     except Exception:
         parts.append("[Git diff: unavailable]")
+
+    # Report existence of important directories that would otherwise be
+    # excluded from the artifact (e.g., .venv), so the L2 judge has
+    # evidence they exist without including their full contents.
+    for _marker_dir in (".venv",):
+        if (Path(worktree) / _marker_dir).is_dir():
+            parts.append(f"[Directory exists: {_marker_dir}/]")
 
     try:
         result = subprocess.run(
@@ -148,9 +295,16 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS) -> str:
         )
         untracked = result.stdout.strip()
         if untracked:
+            all_lines = [f for f in untracked.splitlines() if f.strip()]
+            # Log what was excluded
+            excluded = [f for f in all_lines if _artifact_skip_path(f)]
+            if excluded:
+                print(f"[ARTIFACT] excluded {len(excluded)} files (skip path): {excluded[:5]}...", flush=True)
+            included = [f for f in all_lines if not _artifact_skip_path(f)]
             parts.append("[New files]")
-            lines = [f for f in untracked.splitlines() if f.strip() and not _artifact_skip_path(f)]
-            lines = sorted(lines, key=_artifact_priority)[:40]
+            lines = sorted(included, key=_artifact_priority)[:40]
+            if len(included) > 40:
+                print(f"[ARTIFACT] untracked overflow: {len(included)} files, showing first 40 (sorted by priority, alphabetical)", flush=True)
             for f in lines:
                 fpath = Path(worktree) / f
                 content = _read_artifact_text(fpath)
@@ -186,6 +340,12 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS) -> str:
                 parts.append(shown[:max_chars // 4])
     except Exception:
         pass
+
+    # Append bounded repomix snapshot ("what exists" alongside "what changed")
+    snapshot = _build_repomix_snapshot(worktree, node_context)
+    if snapshot:
+        parts.append("")
+        parts.append(snapshot)
 
     full = "\n".join(parts)
     return full[:max_chars]
@@ -255,34 +415,69 @@ def _extract_json(text: str) -> dict | None:
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
+def _build_eval_steps_from_criterion(criterion: Check, node_context: dict | None = None) -> list[str]:
+    """Build GEval evaluation steps, deriving from acceptance criteria when available.
+
+    If ``node_context`` carries ``acceptance_criteria``, inject
+    criterion-specific ``where`` and ``how_verified`` into the steps.
+    """
+    steps = [
+        f"Evaluate the artifact against this criterion: {criterion.rubric_item or criterion.criterion}",
+        "Identify the exact files/functions relevant to the criterion; check their actual content",
+        FEEDBACK_CONTRACT,
+    ]
+    if node_context:
+        ac_list = node_context.get("acceptance_criteria", []) or node_context.get("criteria", [])
+        for ac in ac_list:
+            if ac.get("id") == criterion.id or ac.get("what", "").startswith((criterion.rubric_item or "")[:40]):
+                where = ac.get("where", [])
+                verified = ac.get("how_verified", "")
+                if where:
+                    steps.insert(1, f"Inspect these paths: {', '.join(where)}")
+                if verified:
+                    steps.insert(2, f"It is satisfied when: {verified}")
+                break
+    return steps
+
+
 def run_l2(
     checks: list[Check],
     worktree: str,
     trace_id: str | None = None,
     llm_call: Callable[[str], str] | None = None,
+    node_context: dict | None = None,
 ) -> L2Result:
     """Run rubric judge for all rubric checks on a node.
+
+    Default path uses deepeval GEval metrics via ``JUDGE_MODEL``.
+    If ``llm_call`` is provided, falls back to the legacy raw-LLM path (for
+    testing with mock responses).
 
     Args:
         checks: List of ``Check`` objects (only ``type=="rubric"`` are evaluated).
         worktree: Path to the node's worktree (for artifact collection).
         trace_id: Optional Langfuse trace id for scoring.
-        llm_call: Overrideable LLM call function (for testing).
+        llm_call: Legacy override — if provided, uses raw LLM call instead of GEval.
+        node_context: Optional node dict with ``acceptance_criteria`` for deriving
+            evaluation steps from the shared contract.
 
     Returns:
         ``L2Result`` with weighted score and per-item judgments.
     """
-    if llm_call is None:
-        llm_call = _default_judge_llm
-
     rubric_checks = [c for c in checks if getattr(c, "tier", None) == "L2"]
     print(f"[L2] run: worktree={worktree} rubric_checks={len(rubric_checks)} trace_id={trace_id}", flush=True)
     if not rubric_checks:
         print("[L2] run: no rubric checks, vacuous pass (score=1.0)", flush=True)
         return L2Result(score=1.0, judgments=[])  # vacuous pass
 
-    artifact = collect_artifact(worktree)
+    # If legacy llm_call is provided, use old code path (for mock-based tests)
+    if llm_call is not None:
+        return _run_l2_legacy(rubric_checks, worktree, trace_id, llm_call)
+
+    # ── Default: deepeval GEval path ──────────────────────────────────────
+    artifact = collect_artifact(worktree, node_context=node_context)
     print(f"[L2] artifact collected: {len(artifact)} chars for {worktree}", flush=True)
+    print(f"[L2] artifact content:\n{artifact}", flush=True)
 
     # L2 input-size guard: oversize → flag-fail (no silent truncation)
     if len(artifact) > L2_MAX_CHARS:
@@ -297,34 +492,129 @@ def run_l2(
 
     judgments: list[Judgment] = []
     total_weight = 0.0
+    score_sum = 0.0
+
+    deepeval_timeout = os.environ.get("DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE", "not set")
+    artifact_chars = len(artifact)
+    print(f"[L2] GEval config: model={JUDGE_MODEL.model} model_base={JUDGE_MODEL.base_url} threshold={GEVAL_THRESHOLD} deepeval_timeout={deepeval_timeout}s artifact_size={artifact_chars}chars", flush=True)
+
+    for c in rubric_checks:
+        question = getattr(c, "rubric_item", None) or c.criterion
+        print(f"[L2] rubric check: id={c.id} weight={getattr(c, 'weight', 1.0)} question={question}", flush=True)
+
+        # Build eval steps from acceptance criteria if available
+        steps = _build_eval_steps_from_criterion(c, node_context)
+
+        last_error: str | None = None
+        judgment = None
+        for attempt in range(1 + _MAX_GEVAL_RETRIES):
+            try:
+                metric = build_dim_metric(c.id, question, steps=steps)
+                test_case = LLMTestCase(
+                    input=question,
+                    actual_output=artifact,
+                )
+                if attempt == 0:
+                    print(f"[L2] GEval >>> name={c.id} steps={metric.evaluation_steps} rubric={L2_RUBRIC_ANCHORS} model={JUDGE_MODEL} threshold={GEVAL_THRESHOLD}", flush=True)
+                    print(f"[L2] GEval >>> input_len={len(artifact)} chars", flush=True)
+                t0 = _time.time()
+                metric.measure(test_case)
+                elapsed = _time.time() - t0
+                if attempt > 0:
+                    print(f"[L2] GEval retry #{attempt} succeeded id={c.id} elapsed={elapsed:.1f}s", flush=True)
+                else:
+                    print(f"[L2] GEval <<< completed id={c.id} elapsed={elapsed:.1f}s", flush=True)
+
+                raw_reason = json.dumps(metric.reason) if isinstance(metric.reason, dict) else (metric.reason or "")
+                original_score = float(getattr(metric, "score", 0.0) or 0.0)
+                feedback, feedback_degraded = get_dim_feedback(
+                    metric, c.id, test_case, raw_reason=raw_reason,
+                )
+                met = original_score >= GEVAL_THRESHOLD
+                judgment = Judgment(
+                    check_id=c.id,
+                    criteria_met=met,
+                    score=original_score,
+                    explanation=raw_reason,
+                    feedback_raw=feedback,
+                )
+                where = feedback.get("where", "unspecified")
+                what = feedback.get("what", "")
+                print(f"[L2] {c.id} score={original_score:.4f} WHERE={where} WHAT={what}", flush=True)
+                if feedback_degraded or feedback.get("_degraded"):
+                    print(f"[L2] {c.id} WARNING: feedback failed content validation, marked degraded", flush=True)
+                elif feedback.get("_unstructured"):
+                    print(f"[L2] {c.id} WARNING: unstructured GEval reason, feedback degraded", flush=True)
+                break
+
+            except Exception as exc:
+                exc_str = str(exc)
+                last_error = exc_str
+                if _is_retryable(exc) and attempt < _MAX_GEVAL_RETRIES:
+                    delay = _GEVAL_RETRY_DELAY_S * (2 ** attempt)
+                    print(f"[L2] GEval transient error (attempt {attempt+1}), retrying in {delay}s: {exc_str[:200]}", flush=True)
+                    _time.sleep(delay)
+                else:
+                    print(f"[L2] GEval permanent error (attempt {attempt+1}): {exc_str[:300]}", flush=True)
+                    judgment = Judgment(
+                        check_id=c.id,
+                        criteria_met=False,
+                        score=0.0,
+                        explanation=f"GEval error ({'retries exhausted' if attempt > 0 else 'permanent'}): {exc}",
+                    )
+                    break
+
+        if judgment is None:
+            judgment = Judgment(
+                check_id=c.id,
+                criteria_met=False,
+                score=0.0,
+                explanation=f"GEval error: {last_error or 'unknown'}",
+            )
+
+        judgments.append(judgment)
+        w = getattr(c, "weight", 1.0) or 1.0
+        total_weight += w
+        score_sum += (judgment.score or 0.0) * w
+
+    score = score_sum / total_weight if total_weight > 0 else 1.0
+    items_met = sum(1 for j in judgments if j.criteria_met)
+    print(f"[L2] result: score={score:.4f} items_met={items_met}/{len(judgments)} for {worktree}", flush=True)
+
+    _write_langfuse(trace_id, score, judgments)
+    return L2Result(
+        score=round(score, 4),
+        judgments=judgments,
+        rubric_count=len(rubric_checks),
+        items_met=items_met,
+    )
+
+
+def _run_l2_legacy(
+    rubric_checks: list[Check],
+    worktree: str,
+    trace_id: str | None,
+    llm_call: Callable[[str], str],
+) -> L2Result:
+    """Legacy code path: raw LLM call per rubric item (used when ``llm_call`` is injected for tests)."""
+    artifact = collect_artifact(worktree)
+    if len(artifact) > L2_MAX_CHARS:
+        return L2Result(score=0.0, judgments=[], rubric_count=len(rubric_checks), items_met=0, oversize=True)
+
+    judgments: list[Judgment] = []
+    total_weight = 0.0
     met_weight = 0.0
 
     for c in rubric_checks:
         question = getattr(c, "rubric_item", None) or c.criterion
         prompt = JUDGE_USER_PROMPT.format(rubric_item=question, artifact=artifact)
-        print(f"[L2] rubric check: id={c.id} weight={getattr(c, 'weight', 1.0)} question={question}", flush=True)
-
         raw = llm_call(prompt)
         parsed = _extract_json(raw)
-
         if parsed is None:
-            judgment = Judgment(
-                check_id=c.id,
-                criteria_met=False,
-                explanation="Judge returned unparseable response",
-            )
-            print(f"[L2] rubric {c.id}: unparseable response: {raw[:200]}", flush=True)
+            judgment = Judgment(check_id=c.id, criteria_met=False, explanation="Judge returned unparseable response")
         else:
-            met = parsed.get("criteria_met")
-            if met is None:
-                met = False
-            judgment = Judgment(
-                check_id=c.id,
-                criteria_met=bool(met),
-                explanation=str(parsed.get("explanation", "")),
-            )
-            print(f"[L2] rubric {c.id}: criteria_met={judgment.criteria_met} explanation={judgment.explanation}", flush=True)
-
+            met = bool(parsed.get("criteria_met", False))
+            judgment = Judgment(check_id=c.id, criteria_met=met, explanation=str(parsed.get("explanation", "")))
         judgments.append(judgment)
         w = getattr(c, "weight", 1.0) or 1.0
         total_weight += w
@@ -333,37 +623,34 @@ def run_l2(
 
     score = met_weight / total_weight if total_weight > 0 else 1.0
     items_met = sum(1 for j in judgments if j.criteria_met)
-    print(f"[L2] result: score={score:.4f} items_met={items_met}/{len(judgments)} for {worktree}", flush=True)
+    _write_langfuse(trace_id, score, judgments)
+    return L2Result(score=round(score, 4), judgments=judgments, rubric_count=len(rubric_checks), items_met=items_met)
 
-    # Write to Langfuse if trace_id is provided
-    if trace_id:
-        try:
-            from backend.observability.langfuse_client import get_langfuse
-            lf = get_langfuse()
-            lf.create_score(
-                trace_id=trace_id,
-                name="goal_review",
-                value=round(score, 4),
-                data_type="NUMERIC",
-                comment=" | ".join(
-                    f"{j.check_id}: {'pass' if j.criteria_met else 'FAIL'} ({j.explanation[:100]})"
-                    for j in judgments
-                ),
-            )
-            lf.create_score(
-                trace_id=trace_id,
-                name="passed",
-                value=1.0 if score >= 0.7 else 0.0,
-                data_type="BOOLEAN",
-                comment=f"L2 score={score:.2f}, items={items_met}/{len(judgments)}",
-            )
-            lf.flush()
-        except Exception:
-            pass  # Langfuse write is best-effort
 
-    return L2Result(
-        score=round(score, 4),
-        judgments=judgments,
-        rubric_count=len(rubric_checks),
-        items_met=items_met,
-    )
+def _write_langfuse(trace_id: str | None, score: float, judgments: list[Judgment]) -> None:
+    """Write L2 scores to Langfuse (best-effort)."""
+    if not trace_id:
+        return
+    try:
+        from backend.observability.langfuse_client import get_langfuse
+        lf = get_langfuse()
+        lf.create_score(
+            trace_id=trace_id,
+            name="goal_review",
+            value=round(score, 4),
+            data_type="NUMERIC",
+            comment=" | ".join(
+                f"{j.check_id}: {'pass' if j.criteria_met else 'FAIL'} ({j.explanation[:100]})"
+                for j in judgments
+            ),
+        )
+        lf.create_score(
+            trace_id=trace_id,
+            name="passed",
+            value=1.0 if score >= 0.7 else 0.0,
+            data_type="BOOLEAN",
+            comment=f"L2 score={score:.2f}, items={sum(1 for j in judgments if j.criteria_met)}/{len(judgments)}",
+        )
+        lf.flush()
+    except Exception:
+        pass  # Langfuse write is best-effort

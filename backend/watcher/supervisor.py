@@ -642,7 +642,74 @@ class Watcher:
         st.unchanged_cycles = 0
         st.conversation_id = None
 
-        # 8. Spawn the same node with remediation brief (fix-forward, same worktree)
+        # 8. Steering check: reuse existing conversation within limit
+        prev_steer_count = _get_steering_count(st.node_id, run_id)
+        if prev_steer_count < 5 and st.conversation_id:
+            logger.info(
+                "Steering path for %s/%s (steering_count=%d, conv=%s)",
+                session_id, st.node_id, prev_steer_count, st.conversation_id,
+            )
+            from backend.evaluator.steering import build_steering_brief
+            steering_brief = build_steering_brief(
+                original_task, success_criterion, feedback, prev_steer_count,
+            )
+            aionui = AionUiClient(os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+            # Cancel any running turn so AionUi doesn't reject with 409
+            try:
+                aionui.cancel_conversation(st.conversation_id)
+            except Exception:
+                logger.exception("cancel_conversation failed for conv %s", st.conversation_id)
+            # Look up team_id for team conversations (v2.1.33+)
+            _team_id = None
+            try:
+                with queries.conn() as c, c.cursor() as cur:
+                    cur.execute(
+                        "SELECT aionui_team_id FROM node_sessions WHERE aionui_conversation_id = %s",
+                        (st.conversation_id,),
+                    )
+                    _row = cur.fetchone()
+                    if _row:
+                        _team_id = dict(_row).get("aionui_team_id")
+            except Exception:
+                logger.exception("failed to lookup aionui_team_id for conv %s", st.conversation_id)
+
+            if _team_id:
+                _team_info = aionui.get_team(_team_id)
+                _slot_id = ""
+                for _agent in _team_info.get("agents", []):
+                    if _agent.get("conversation_id") == st.conversation_id:
+                        _slot_id = _agent.get("slot_id", "")
+                        break
+                if _slot_id:
+                    aionui.send_team_message(_team_id, _slot_id, steering_brief)
+                else:
+                    logger.warning(
+                        "No slot_id for conv %s in team %s — fallback to direct message",
+                        st.conversation_id, _team_id,
+                    )
+                    aionui.send_message(st.conversation_id, steering_brief)
+            else:
+                aionui.send_message(st.conversation_id, steering_brief)
+            try:
+                with queries.conn() as c, c.cursor() as cur:
+                    cur.execute(
+                        "UPDATE node_sessions SET steering_count = %s, finished_at = NULL WHERE id = %s",
+                        (prev_steer_count + 1, st.node_session_id),
+                    )
+            except Exception:
+                logger.exception("failed to update steering_count for %s", st.node_session_id)
+            st.status = VERDICT_RUNNING
+            st.started_ts = time.time()
+            st.last_seen = st.started_ts
+            st.last_change_ts = None
+            st.saw_change = False
+            st.last_git_sig = None
+            st.last_query_sig = None
+            st.unchanged_cycles = 0
+            print(f"[PRINT {time.strftime('%H:%M:%S')}] _handle_remediation: steering path for {session_id}/{st.node_id} steering_count={prev_steer_count + 1}", flush=True)
+            return
+
+        # 9. Spawn the same node with remediation brief (fix-forward, same worktree)
         try:
             dep_context = ""
             deps = node.get("depends_on", []) or []
@@ -653,7 +720,6 @@ class Watcher:
             wm = WorktreeManager(os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace"))
             plan["worktree_path"] = st.worktree
 
-            # Override node task with remediation brief (same members, same config)
             node_with_brief = dict(node)
             node_with_brief["task"] = {"text": brief}
 
@@ -1192,3 +1258,25 @@ def _has_changes_since_prev_attempt(plan_id: str, node_id: str, worktree: str) -
         return count >= 1
     except Exception:
         return False
+
+
+def _get_steering_count(node_id: str, run_id: str) -> int:
+    """Return the latest steering_count for a node in a run.
+
+    Queries the most recent node_session for the node and returns its
+    steering_count (defaults to 0 if no sessions exist).
+    """
+    try:
+        with queries.conn() as c, c.cursor() as cur:
+            cur.execute(
+                """SELECT steering_count FROM node_sessions
+                   WHERE run_id = %s AND node_id = %s
+                   ORDER BY created_at DESC LIMIT 1""",
+                (run_id, node_id),
+            )
+            row = cur.fetchone()
+            if row:
+                return dict(row).get("steering_count", 0)
+    except Exception:
+        logger.exception("Failed to get steering_count for %s/%s", run_id, node_id)
+    return 0

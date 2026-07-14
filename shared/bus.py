@@ -30,8 +30,8 @@ EXCHANGE = "conductor.events"
 
 # Queue → routing keys each service consumes
 BINDINGS: dict[str, list[str]] = {
-    "planner.q": ["run.completed", "run.failed"],
-    "executor.q": ["plan.ratified", "node.remediate", "gate.evaluated"],
+    "planner.q": ["run.completed", "run.failed", "node.observed"],
+    "executor.q": ["plan.ratified", "node.steer", "node.remediate", "gate.evaluated"],
     "watcher.q": ["node.spawned"],
     "evaluator.q": ["node.observed", "ratchet.trigger", "calibrate.trigger", "run.completed"],
 }
@@ -71,6 +71,10 @@ class EventBus:
     def connect(self) -> pika.channel.Channel:
         """Open a blocking connection and return the channel."""
         params = pika.URLParameters(self._cfg.rabbit_url)
+        # Planner handler can run 2-4 minutes (check-gen LLM calls).
+        # Default heartbeat (60s) kills the connection during long handler runs.
+        # 600s gives plenty of headroom.
+        params.heartbeat = 600
         self._connection = pika.BlockingConnection(params)
         self._channel = self._connection.channel()
         return self._channel
@@ -123,17 +127,26 @@ class EventBus:
             key = dedupe_key(method.routing_key, payload)
             with db_session() as s:
                 if already_processed(s, consumer_name, key):
-                    ch.basic_ack(method.delivery_tag)
+                    try:
+                        ch.basic_ack(method.delivery_tag)
+                    except Exception:
+                        logger.warning("basic_ack failed (already_processed) — channel may be closed")
                     return
                 try:
                     handler(s, payload)
                 except Exception:
                     logger.exception("Handler failed for %s on %s", key, queue)
-                    ch.basic_nack(method.delivery_tag, requeue=False)
-                    raise
+                    try:
+                        ch.basic_nack(method.delivery_tag, requeue=False)
+                    except Exception:
+                        logger.warning("nack failed too — channel likely dead")
+                    return  # keep consumer alive for next message
                 mark_processed(s, consumer_name, key)
                 s.commit()
-            ch.basic_ack(method.delivery_tag)
+            try:
+                ch.basic_ack(method.delivery_tag)
+            except Exception:
+                logger.warning("basic_ack failed after handler success — channel may be closed")
 
         self._channel.basic_consume(queue, _callback)
         logger.info("Consumer %s started on queue %s", consumer_name, queue)

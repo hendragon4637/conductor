@@ -89,6 +89,9 @@
 | **Skills store** | Per-skill directory under `skills_store/<skill_id>/` containing a `SKILL.md` and optionally a `scripts/` subdirectory. Each skill is fetched individually from its source GitHub repo, written to disk, then upserted to the DB with `store_path` pointing to its folder. |
 | **Import pipeline** | The automated process of cloning external repos (agency-agents, wshobson, awesome-agent-skills), parsing to neutral rows, classifying capabilities, and inserting to DB with `source='imported'`. Skills are fetched sequentially (2s gap between requests) in interleaved batches of 30: fetch → LLM classify → upsert → next batch. |
 | **Harness renderer** | A `HarnessRenderer` subclass in `backend/skills.py` that converts neutral DB rows to harness-specific config files. The opencode renderer copies per-skill folders from `skills_store/` to `~/.config/opencode/skills/` (global) or `.opencode/skills/` (worktree). |
+| **NODE_BRIEF.md** | Static reference brief file written to the worktree by `_write_planner_opencode_json()`. Contains role, steps, rules, schemas, roster — the durable material that does NOT change between planning retries. |
+| **plan_l2_raw_response** | `TEXT` column on the `plan_l2_judgments` table storing the raw (pre-Pydantic-parse) LLM response from the L2 plan judge. Observability-only; never fed into retry briefs. |
+| **JUDGE_MODEL** | The model group identifier used for L2 plan evaluation, distinct from the meta-planner generation model (`deepseek-planning`). Set via `role="l2_judge"` in `call_llm_structured()`. |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -283,6 +286,29 @@
 - Scripts detection uses content-based regex (`scripts/[\w.\-/]+`) on the fetched SKILL.md body, not GitHub API (avoids rate limits)
 - Resume partial imports with `--start-batch N` (1-indexed batch number)
 
+## Planner (meta-planner)
+- `NODE_BRIEF.md` holds static reference material (role, steps, rules, schemas, roster) — written by `_write_planner_opencode_json()` at worktree setup
+- `planning_brief()` builds ONLY dynamic content (goal/spec/quality_intent/worktree path, domain-filtered capabilities/dimensions); references NODE_BRIEF.md for static content
+- `retry_brief()` calls thin `planning_brief()` + prepends ✓/FIX block — never regenerates static content
+- `_schema_text()` is called once and cached; duplicate calls have been removed
+- `_build_static_brief()` in `harness_worktree.py` composes the static brief from DB sys_prompt + role + steps + rules + schemas + roster
+
+## Run constraint (project_id)
+- Every run has a required `project_id` column (FK to plans.project_id, NOT NULL)
+- Partial unique index `idx_runs_active_project` on `runs(project_id)` WHERE state NOT IN ('done','failed','cancelled','planning') — allows multiple planning attempts before ratification but only one active run per project
+- `get_active_run_for_project(project_id)` returns any run in a non-terminal state (excludes done/failed/cancelled)
+- `save_run()` raises `ValueError` if `project_id` is missing from the run dict (defense-in-depth)
+- `/goal` endpoint checks for active project run (409) before invoking planner LangGraph
+- `/ratify` endpoint checks for active project run (409) before creating execution run
+
+## Plan evaluator (gate & judge)
+- `call_llm_structured()` accepts optional `role` param (default `"meta_planner"`) and `include_raw` param (default `False`)
+- `role="l2_judge"` routes through the gateway to the JUDGE model group — independent from the meta-planner generation model (`deepseek-planning`)
+- `include_raw=True` returns `(parsed, raw_text)` tuple; the raw response is stored in `PlanL2Result.raw_response` and persisted to `plan_l2_raw_response` TEXT column
+- `plan_l2_raw_response` is for observability only — never fed into the retry brief
+- Gate results (`gate_outcome`, `l2_score`, `feedback`, `l2_feedback`) are persisted to `node_sessions` on EVERY gate decision (both ratify and revise) in `_on_node_observed_planning()`
+- `update_plan_gate_result()` is called in the FAILURE path before retry, persisting `plan_goal_review` + `l2_judgments` + `raw_response` mid-retry for observability
+
 ## Git
 - Atomic commits with clear messages
 - Never commit .env, *.db, node_modules/, __pycache__/
@@ -399,6 +425,82 @@ Port mapping: executor=8091, watcher=8092, planner=8093, evaluator=8094.
 bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 ```
 One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 4 microservices. Health check runs at end.
+
+### Step-by-step: clean re-run a plan (after code or config changes)
+
+Full teardown + restart sequence. Use when you changed evaluator code, rubric presets, agent configs, or event bus wiring and want a clean cycle.
+
+```bash
+# 0. Variables
+PLAN_ID="plan_09f23fe0"
+declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 )
+
+# 1. Kill running microservices
+for port in 8091 8092 8093 8094; do
+    fuser -k "${port}/tcp" 2>/dev/null || true
+done
+
+# 2. Clean Conductor DB (stale runs, node_sessions, outbox, processed_events)
+docker exec postgres psql -U aipc -d aipc_conductor -c "
+  DELETE FROM node_sessions;
+  DELETE FROM runs;
+  DELETE FROM processed_events;
+  DELETE FROM outbox;
+  UPDATE plans SET ratified = false;
+"
+
+# 3. Clean AionUi SQLite DB (purge stale conversations, messages, teams)
+sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db "
+    DELETE FROM messages;
+    DELETE FROM conversations;
+    DELETE FROM assistant_sessions;
+    DELETE FROM team_tasks;
+    DELETE FROM teams;
+    VACUUM;
+"
+
+# 4. Clean conductor workspace dirs
+find /opt/aipc/conductor/workspace -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+
+# 5. Kill lingering opencode ACP processes
+pkill -f "opencode acp" 2>/dev/null || true
+sleep 1
+
+# 6. Purge RabbitMQ queues (load secrets first for auth)
+set -a; source /opt/aipc/scripts/load-secrets.sh; source /opt/aipc/conductor/.env; set +a
+RABBIT_PASS="$(echo "$RABBIT_URL" | sed 's/.*:\([^@]*\)@.*/\1/')"
+RABBIT_AUTH="conductor:${RABBIT_PASS}"
+for queue in planner.q executor.q watcher.q evaluator.q; do
+    curl -s -u "$RABBIT_AUTH" -X DELETE \
+        "http://127.0.0.1:15672/api/queues/staging/${queue}/contents" > /dev/null
+done
+
+# 7. Restart all 4 microservices
+for svc in executor watcher planner evaluator; do
+    port=${PORTS[$svc]}
+    set -a
+    source /opt/aipc/scripts/load-secrets.sh 2>/dev/null
+    source /opt/aipc/conductor/services/${svc}/.env
+    set +a
+    cd /opt/aipc/conductor
+    setsid uv run uvicorn services.${svc}.main:app \
+        --host 0.0.0.0 --port "${port}" \
+        > /tmp/${svc}-svc.log 2>&1 &
+    echo "${svc}-svc started on :${port} (PID $!)"
+done
+
+sleep 5
+
+# 8. Health check
+for p in 8091 8092 8093 8094; do
+    echo -n ":${p} "
+    curl -sfm 3 "http://127.0.0.1:${p}/health" 2>/dev/null || echo "DOWN"
+done
+
+# 9. Re-ratify with 300s timeout
+curl -s --max-time 300 -X POST "http://127.0.0.1:8093/ratify/${PLAN_ID}" \
+  -H 'Content-Type: application/json' | python3 -m json.tool
+```
 
 ### Manual E2E cycle
 ```bash
@@ -608,6 +710,8 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration 
 - `v6_040_family_array.sql` — migrates `capabilities.family` from TEXT to JSONB array, adds GIN index
 - `v6_060_stress_goals.sql` — creates `stress_goals` table for generated heterogeneous stress test goals
 - `v6_070_skills_store.sql` — adds `store_path`, `has_scripts`, `requires_setup` columns to `skills` table for per-skill folder storage
+- `v6_080_plan_l2_raw_response.sql` — adds `plan_l2_raw_response` TEXT column to `plan_eval_detailed` table for raw LLM response capture
+- `v6_090_runs_project_id.sql` — adds `project_id` column to `runs` table, backfills from plans, adds partial unique index for active-run-per-project constraint
 - Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
 
 ## Environment

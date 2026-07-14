@@ -81,7 +81,7 @@ class RunCompleted(BaseModel):
 
 
 class RunFailed(BaseModel):
-    run_id: str
+    run_id: Optional[str] = None
     reason: str
     quarantine_tag: Optional[str] = None
     ts: float
@@ -100,6 +100,22 @@ class RatchetTrigger(BaseModel):
     ts: float
 
 
+class NodeSteer(BaseModel):
+    """Reuse the existing AionUi session and send a fix-forward message.
+
+    Emitted by the evaluator when ``steering_count < 5``, consumed by
+    executor-svc (``_handle_node_steer``) to call ``send_message`` on the
+    existing conversation instead of spawning a brand new team/remediation.
+    """
+    run_id: str
+    node_id: str
+    session_id: str       # current node_session (has aionui_conversation_id to reuse)
+    feedback_ref: str     # session with evaluator feedback
+    worktree: str
+    steering_count: int   # current count; handler sets steering_count+1 on the new session
+    ts: float
+
+
 class CalibrateTrigger(BaseModel):
     node_type: str
     env: str
@@ -114,6 +130,7 @@ ROUTING: dict[type[BaseModel], str] = {
     NodeSpawned: "node.spawned",
     NodeObserved: "node.observed",
     GateEvaluated: "gate.evaluated",
+    NodeSteer: "node.steer",
     NodeRemediate: "node.remediate",
     RunCompleted: "run.completed",
     RunFailed: "run.failed",

@@ -16,5 +16,6 @@ Event consumption (``evaluator.q``):
 
 Event emission:
   ``gate.evaluated``  — Outcome of the evaluator gate (done | remediate | failed).
-  ``node.remediate``  — Spawn a remediation node when the gate requires retry.
+  ``node.steer``      — Reuse existing AionUi conversation for fix-forward (steering_count < 5).
+  ``node.remediate``  — Spawn a brand new team when steering is exhausted (steering_count >= 5).
 """

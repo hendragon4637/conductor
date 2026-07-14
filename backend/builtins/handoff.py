@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from contracts.paths import is_infra
 from backend.builtins.git_ops import show_node
 
 
@@ -48,8 +49,10 @@ def build_node_context(
                     break
 
         if stat_lines:
+            # Filter out infra-only entries
+            product_lines = [s for s in stat_lines if not is_infra(s.split("|")[0].strip())]
             parts.append("Changed files:")
-            parts.extend(f"  {s}" for s in stat_lines)
+            parts.extend(f"  {s}" for s in product_lines)
 
         # Include the summary (first parent commit message + stats)
         for line in diff_lines:

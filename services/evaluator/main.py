@@ -26,7 +26,7 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from contracts.events import GateEvaluated, NodeRemediate, CalibrateTrigger
+from contracts.events import GateEvaluated, NodeSteer, NodeRemediate, CalibrateTrigger
 from shared.bus import EventBus
 from shared.config import ServiceConfig
 from shared.db import init_db
@@ -103,15 +103,27 @@ def _non_terminal_outcome(
     ))
 
     if gate_outcome == "remediate":
-        emit(s, NodeRemediate(
-            run_id=ns.run_id,
-            node_id=ns.node_id,
-            prev_session_id=ns.id,
-            attempt_next=(ns.attempt or 1) + 1,
-            feedback_ref=ns.id,
-            worktree=ns.worktree or "",
-            ts=time.time(),
-        ))
+        steering_count = ns.steering_count or 0
+        if steering_count < 5:
+            emit(s, NodeSteer(
+                run_id=ns.run_id,
+                node_id=ns.node_id,
+                session_id=ns.id,
+                feedback_ref=ns.id,
+                worktree=ns.worktree or "",
+                steering_count=steering_count,
+                ts=time.time(),
+            ))
+        else:
+            emit(s, NodeRemediate(
+                run_id=ns.run_id,
+                node_id=ns.node_id,
+                prev_session_id=ns.id,
+                attempt_next=(ns.attempt or 1) + 1,
+                feedback_ref=ns.id,
+                worktree=ns.worktree or "",
+                ts=time.time(),
+            ))
 
     logger.info(
         "Non-terminal %s node_session=%s outcome=%s stop=%s",
@@ -159,6 +171,12 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
     if ns is None:
         logger.error("NodeSession %s not found", node_session_id)
         return
+
+    # Role filter: planning sessions are handled by planner-svc, not evaluator
+    if getattr(ns, "role", "execution") == "planning":
+        logger.info("NodeSession %s is role=planning — evaluator skips", node_session_id)
+        return
+
     worktree: str | None = ns.worktree
     if not worktree:
         logger.error("NodeSession %s has no worktree", node_session_id)
@@ -194,7 +212,12 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
         )
         return
 
-    check_list: list[Any] = node_def.get("checks", [])
+    from contracts.plan_assembler import Check as CheckModel
+    raw_checks: list[dict] = node_def.get("checks", [])
+    check_list: list[Any] = [
+        CheckModel(**c) if isinstance(c, dict) else c
+        for c in raw_checks
+    ]
 
     # 3. Run evaluator gate (includes false-fail escalation — V8)
     #    Wrapped in try/except to match monolith's error discipline:
@@ -203,6 +226,21 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
     decision: GateDecision | None = None
     judge_error: bool = False
     gate_exc: str | None = None
+
+    # Load previous session's L1 results for L2-gating on remediation
+    prev_session = (
+        s.query(NodeSession)
+        .filter(
+            NodeSession.run_id == ns.run_id,
+            NodeSession.node_id == ns.node_id,
+            NodeSession.id != ns.id,
+        )
+        .order_by(NodeSession.attempt.desc())
+        .first()
+    )
+    prev_l1_passed_ids: list[str] | None = (
+        prev_session.l1_passed_ids if prev_session else None
+    )
     try:
         decision = evaluate_gate(
             check_list=check_list,
@@ -211,7 +249,7 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
                 checks, wt, trace_id=ns.langfuse_trace_id,
             ),
             threshold=0.7,
-            prev_l1_passed_ids=ns.l1_passed_ids or None,
+            prev_l1_passed_ids=prev_l1_passed_ids,
             has_changes_since_prev=bool(ns.remediation_of),
         )
     except JudgeUnavailableError:
@@ -328,24 +366,38 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
     )
     emit(s, gate_event)
 
-    # 8. Emit NodeRemediate if remediation needed (not for errors)
+    # 8. Emit NodeSteer or NodeRemediate (steering first, then remediate)
     if gate_outcome == "remediate" and not gate_exc and not judge_error:
-        attempt_next = (ns.attempt or 1) + 1
-        remediate_event = NodeRemediate(
-            run_id=ns.run_id,
-            node_id=ns.node_id,
-            prev_session_id=node_session_id,
-            attempt_next=attempt_next,
-            feedback_ref=node_session_id,
-            worktree=worktree,
-            ts=time.time(),
-        )
-        emit(s, remediate_event)
+        steering_count = ns.steering_count or 0
+        if steering_count < 5:
+            steer_event = NodeSteer(
+                run_id=ns.run_id,
+                node_id=ns.node_id,
+                session_id=node_session_id,
+                feedback_ref=node_session_id,
+                worktree=worktree,
+                steering_count=steering_count,
+                ts=time.time(),
+            )
+            emit(s, steer_event)
+        else:
+            attempt_next = (ns.attempt or 1) + 1
+            remediate_event = NodeRemediate(
+                run_id=ns.run_id,
+                node_id=ns.node_id,
+                prev_session_id=node_session_id,
+                attempt_next=attempt_next,
+                feedback_ref=node_session_id,
+                worktree=worktree,
+                ts=time.time(),
+            )
+            emit(s, remediate_event)
 
     logger.info(
         "Gate %s node_session=%s outcome=%s l1=%s l2=%s best=%s stop=%s",
         gate_outcome,
         node_session_id,
+        gate_outcome,
         ns.l1_pass if decision else "N/A",
         l2_score_val,
         best,
@@ -719,20 +771,32 @@ def _prepare_l4_workspace(
         raise
 
 
-def _l4_score_from_report(report_text: str) -> float:
-    """Derive a 0-1 L4 score from the agent's narrative report.
+def _l4_score_via_deepeval(report_text: str, task_description: str) -> float:
+    """Score L4 report using deepeval TaskCompletionMetric.
 
-    Simple heuristic: counts successful vs failed test outcomes.
-    Returns a friction-adjusted score (1.0 = all pass, 0.0 = all fail).
+    Replaces the heuristic keyword-counting approach with an LLM judge
+    that evaluates whether the report demonstrates task completion.
     """
-    lower = report_text.lower()
-    # Count explicit pass/fail signals
-    passes = lower.count("pass") + lower.count("passed") + lower.count("works") + lower.count("success") + lower.count("200") + lower.count("302") + lower.count("201")
-    fails = lower.count("fail") + lower.count("failed") + lower.count("error") + lower.count("404") + lower.count("400") + lower.count("422") + lower.count("broken")
-    total = passes + fails
-    if total == 0:
-        return 0.5  # neutral if unclear
-    return round(passes / total, 4)
+    from deepeval.metrics import TaskCompletionMetric
+    from deepeval.test_case import LLMTestCase
+    from shared.eval_models import JUDGE as JUDGE_MODEL
+
+    try:
+        metric = TaskCompletionMetric(
+            task=task_description,
+            model=JUDGE_MODEL,
+            threshold=0.5,
+            include_reason=True,
+        )
+        test_case = LLMTestCase(
+            input=task_description,
+            actual_output=report_text,
+        )
+        metric.measure(test_case)
+        return round(float(metric.score), 4)
+    except Exception as exc:
+        logger.warning("L4 TaskCompletionMetric failed: %s", exc)
+        return 0.5  # neutral fallback
 
 
 def on_run_completed(s, payload: dict) -> None:
@@ -843,7 +907,7 @@ def on_run_completed(s, payload: dict) -> None:
                         l4_text = parsed.get("content", str(raw_content)) if isinstance(parsed, dict) else str(raw_content)
                     except (json.JSONDecodeError, TypeError):
                         l4_text = str(raw_content)
-                    score = _l4_score_from_report(l4_text)
+                    score = _l4_score_via_deepeval(l4_text, goal_brief)
                     if case_name == "standalone":
                         l4_standalone = score
                     else:

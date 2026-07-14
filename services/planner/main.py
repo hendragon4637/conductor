@@ -1,11 +1,12 @@
 """planner-svc entrypoint.
 
 FastAPI endpoints for goal submission, clarification, and ratification.
-Background consumer for run.completed/run.failed + outbox relay.
+Background consumer for run.completed, run.failed, and node.observed (role=planning).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -14,15 +15,21 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from contracts.events import PlanRatified, RunCompleted, RunFailed
 from shared.bus import EventBus
 from shared.config import ServiceConfig
 from shared.db import init_db
+from shared.models import NodeSession
 
 from services.planner.graph import build_planner_graph
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 cfg = ServiceConfig.from_env()
@@ -65,6 +72,227 @@ def _handle_run_failed(session, payload):
     logger.warning("Run failed: %s", payload.get("run_id"))
 
 
+def _on_node_observed_planning(session, payload):
+    """Handle ``node.observed`` for role=planning sessions.
+
+    Flow: assemble_plan → validate_assembled (pydantic+roster) → capability
+    selector → check gen → gate.  On gate_ok the DAG is persisted and the
+    plan is ready for ratification.  On failure the retry loop re-spawns
+    the meta-planner with verbatim file-targeted feedback.
+    """
+    from contracts.plan_assembler import assemble_plan, validate_assembled
+    from backend.planning.harness_worktree import (
+        MAX_PLANNING_ATTEMPTS,
+        on_planning_failed,
+    )
+
+    node_session_id = payload["node_session_id"]
+    ns: NodeSession | None = (
+        session.query(NodeSession)
+        .filter(NodeSession.id == node_session_id)
+        .first()
+    )
+    if ns is None:
+        logger.error("NodeSession %s not found", node_session_id)
+        return
+    if getattr(ns, "role", "execution") != "planning":
+        return  # evaluator handles execution sessions
+
+    logger.info("Planning observed: ns=%s", node_session_id)
+
+    # Find the associated plan via the worktree-based lookup
+    from backend.db.queries import conn as db_conn
+    with db_conn() as dbc:
+        row = dbc.execute(
+            """SELECT plan_id, project_id, planning_worktree, planning_attempts
+               FROM plans WHERE planning_worktree = %s""",
+            (ns.worktree,),
+        ).fetchone()
+    if row is None:
+        logger.error("No plan found for worktree %s", ns.worktree)
+        return
+    plan_id = row["plan_id"]
+    project_id = row.get("project_id", "default")
+    worktree = row["planning_worktree"]
+    attempts = row["planning_attempts"] or 0
+
+    dec = None  # set by gate below; needed in FAIL path (Item 3.c)
+    # 1. Deterministic assembly
+    dag_dict, errs = assemble_plan(worktree)
+    if not errs:
+        # 2. Pydantic + roster validation
+        roster_ids = _get_roster_ids()
+        dag, errs = validate_assembled(dag_dict, roster_ids)
+
+    if not errs:
+        # 3. Capability selector (existing)
+        from backend.planning.capability.selector import resolve_dag_capabilities
+        dag_list = [n.model_dump() for n in dag.nodes]
+        need_resolve = [n for n in dag_list if not (n.get("capabilities") or [])]
+        if need_resolve:
+            resolve_dag_capabilities(need_resolve)
+
+        # 4. Check boundary validation (deterministic, replaces LLM check-gen)
+        from contracts.plan_assembler import validate_check_boundaries
+        errs = validate_check_boundaries(dag_list)
+
+    if not errs:
+        # 5. Plan-evaluator gate (existing)
+        from backend.evaluator.plan_evaluator import gate_plan
+        mg_goal = _get_plan_goal(plan_id)
+        dec = gate_plan(dag_list, plan_goal=mg_goal)
+        logger.info(
+            "Gate decision for %s (attempt %d): action=%s score=%s feedback=%.200s",
+            plan_id, attempts + 1,
+            dec.action, getattr(dec, "plan_goal_review", "N/A"),
+            (dec.feedback_text or "none").replace("\n", " "),
+        )
+
+        # [Item 3.b] Persist gate results to node_session
+        from backend.db.queries import conn as db_conn
+        gate_outcome = "pass" if dec.action == "ratify" else "fail"
+        with db_conn() as dbc:
+            dbc.execute(
+                """UPDATE node_sessions
+                      SET gate_outcome = %s,
+                          l2_score = %s,
+                          feedback = %s::jsonb,
+                          l2_feedback = %s::jsonb
+                    WHERE id = %s""",
+                (
+                    gate_outcome,
+                    dec.plan_goal_review,
+                    json.dumps({"feedback_text": dec.feedback_text}),
+                    json.dumps(dec.l2_judgments),
+                    ns.id,
+                ),
+            )
+
+        if dec.action == "ratify":
+            # Persist the DAG
+            _persist_harness_dag(plan_id, dag_list)
+            with db_conn() as dbc:
+                dbc.execute(
+                    "UPDATE plans SET planning_status = 'gated_ok' WHERE plan_id = %s",
+                    (plan_id,),
+                )
+            logger.info("Plan %s ratified via harness", plan_id)
+            return
+
+        errs = [dec.feedback_text]
+    elif errs:
+        logger.warning("Assembly/validation errors for %s: %s", plan_id, errs[:3])
+
+    # FAIL path — retry or give up
+    if errs and dec:
+        # [Item 3.c] Persist plan gate results on failure too (mid-retry observability)
+        from backend.planning.store import update_plan_gate_result
+        update_plan_gate_result(
+            plan_id=plan_id or "",
+            plan_goal_review=dec.plan_goal_review,
+            l2_judgments=dec.l2_judgments or [],
+            hard_failures=dec.hard_failures or [],
+            raw_response=dec.raw_response,
+        )
+
+    if attempts >= MAX_PLANNING_ATTEMPTS:
+        on_planning_failed(worktree, project_id, "/opt/aipc/conductor/workspace")
+        with db_conn() as dbc:
+            dbc.execute(
+                "UPDATE plans SET planning_status = 'failed', planning_worktree = NULL WHERE plan_id = %s",
+                (plan_id,),
+            )
+        logger.warning("Planning failed for %s after %d attempts", plan_id, attempts)
+        from shared.outbox import emit as outbox_emit
+        outbox_emit(session, RunFailed(
+            run_id=None, reason=f"planning failed: {errs[:3]}", ts=time.time(),
+        ))
+    else:
+        # Re-spawn via LangGraph with feedback
+        _resume_langgraph_with_feedback(plan_id, errs, dag_dict)
+
+
+def _get_roster_ids() -> list[str]:
+    from backend.db.queries import conn as db_conn
+    with db_conn() as dbc:
+        rows = dbc.execute(
+            "SELECT agent_config_id FROM agent_configs WHERE active = true"
+        ).fetchall()
+    return [r["agent_config_id"] for r in rows]
+
+
+def _get_plan_goal(plan_id: str) -> str:
+    from backend.db.queries import conn as db_conn
+    with db_conn() as dbc:
+        row = dbc.execute(
+            "SELECT goal FROM plans WHERE plan_id = %s", (plan_id,)
+        ).fetchone()
+    return row["goal"] if row else ""
+
+
+def _persist_harness_dag(plan_id: str, dag_list: list[dict]) -> None:
+    import json
+    from backend.db.queries import conn as db_conn
+    with db_conn() as dbc:
+        dbc.execute(
+            "UPDATE plans SET dag = %s WHERE plan_id = %s",
+            (json.dumps(dag_list), plan_id),
+        )
+
+
+def _get_meta_goal(plan_id: str) -> dict:
+    import json as _json
+    from backend.db.queries import conn as db_conn
+    with db_conn() as dbc:
+        row = dbc.execute(
+            "SELECT goal, partial_meta_goal FROM plans WHERE plan_id = %s", (plan_id,)
+        ).fetchone()
+    if row and row.get("partial_meta_goal"):
+        pmg = row["partial_meta_goal"]
+        if isinstance(pmg, str):
+            pmg = _json.loads(pmg)
+        pmg.setdefault("goal", "")
+        pmg.setdefault("spec", "")
+        pmg.setdefault("quality_intent", "")
+        pmg.setdefault("domain", "general")
+        return pmg
+    goal = row["goal"] if row else ""
+    return {"goal": goal, "spec": "", "quality_intent": "", "domain": "general"}
+
+
+def _resume_langgraph_with_feedback(
+    plan_id: str, feedback: list[str], prior_dag: dict | None,
+) -> None:
+    """Re-invoke the planner LangGraph with gate_feedback for a retry."""
+    feedback_text = "; ".join(feedback)
+    meta_goal = _get_meta_goal(plan_id)
+    from backend.db.queries import conn as db_conn
+    with db_conn() as dbc:
+        row = dbc.execute(
+            "SELECT project_id FROM plans WHERE plan_id = %s", (plan_id,)
+        ).fetchone()
+    project_id = row["project_id"] if row else "default"
+    state = planner_graph.invoke(
+        input={
+            "raw_input": "",
+            "origin": "system",
+            "meta_goal": meta_goal,
+            "dag": prior_dag.get("nodes") if prior_dag else None,
+            "plan_goal_review": None,
+            "clarify_rounds": 0,
+            "revise_rounds": 0,
+            "status": "formulated",
+            "error": None,
+            "gate_feedback": feedback_text,
+            "planning_session": None,
+            "plan_id": plan_id,
+            "project_id": project_id,
+        },
+        config={"configurable": {"thread_id": plan_id}},
+    )
+    logger.info("LangGraph resumed for plan %s (status=%s)", plan_id, state.get("status"))
+
+
 # ── Lifespan ─────────────────────────────────────────────────────────────
 
 
@@ -73,8 +301,20 @@ async def lifespan(app: FastAPI):
     """Startup: init DB, declare Rabbit topology, start consumers + relay."""
     init_db(cfg)
     bus.declare()
-    bus.start_consumer("planner.q", _handle_run_completed, "planner-svc")
-    bus.start_consumer("planner.q", _handle_run_failed, "planner-svc")
+
+    # Single dispatcher on planner.q (matching evaluator pattern)
+    # Multiple consumers on one queue round-robin — dispatcher avoids this.
+    def _dispatch(s, payload):
+        if "node_session_id" in payload:
+            _on_node_observed_planning(s, payload)
+        elif payload.get("event_type") == "run.completed" or "run_id" in payload:
+            _handle_run_completed(s, payload)
+        elif payload.get("event_type") == "run.failed":
+            _handle_run_failed(s, payload)
+        else:
+            logger.warning("No planner handler for payload keys: %s", list(payload.keys()))
+
+    bus.start_consumer("planner.q", _dispatch, "planner.dispatch")
     relay_t = threading.Thread(target=bus.relay_loop, daemon=True)
     relay_t.start()
     consumer_t = threading.Thread(target=bus.start_consuming, daemon=True)
@@ -250,11 +490,24 @@ def submit_goal(body: GoalRequest):
     if body.nodes:
         return _handle_byo_dag(body, body.nodes)
 
+    from backend.planning.store import save_plan, get_active_run_for_project
+
+    # Reject if project already has a non-terminal run
+    active = get_active_run_for_project(body.project_id or "default")
+    if active:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": f"Project {body.project_id} already has an active run "
+                         f"({active['state']}): {active['id']}. "
+                         "Complete or cancel it before starting a new goal.",
+            },
+        )
+
     from backend.planning.schema import (
         Plan, PlanNode, TaskSpec, NodeSuccess, SuccessCriterion, NodeMember,
     )
     from backend.evaluator.schema import Check
-    from backend.planning.store import save_plan
 
     thread_id = body.project_id or f"goal_{uuid4().hex[:12]}"
     state = planner_graph.invoke(
@@ -269,6 +522,7 @@ def submit_goal(body: GoalRequest):
             "status": "new",
             "error": None,
             "gate_feedback": None,
+            "project_id": body.project_id,
         },
         config={"configurable": {"thread_id": thread_id}},
     )
@@ -288,6 +542,39 @@ def submit_goal(body: GoalRequest):
         return {
             "status": "awaiting_clarification",
             "plan_id": plan_id,
+            "meta_goal": state.get("meta_goal"),
+        }
+
+    # generating — plan is being built asynchronously by meta-planner
+    if state["status"] == "generating":
+        plan_id = state.get("plan_id") or f"plan_{uuid4().hex[:8]}"
+        from backend.planning.store import save_plan
+        from backend.planning.schema import Plan, SuccessCriterion
+        mg = state.get("meta_goal") or {}
+        save_plan(plan=Plan(
+            plan_id=plan_id,
+            project_id=body.project_id,
+            user_intent=body.raw_input,
+            goal=mg.get("goal", body.raw_input) if isinstance(mg, dict) else body.raw_input,
+            success=SuccessCriterion(text=""),
+            version=1,
+        ))
+        planning_session = state.get("planning_session")
+        wt = None
+        if planning_session:
+            from backend.db.queries import conn as db_conn
+            with db_conn() as dbc:
+                row = dbc.execute(
+                    "SELECT worktree FROM node_sessions WHERE id = %s",
+                    (planning_session,),
+                ).fetchone()
+            if row:
+                wt = row["worktree"]
+        return {
+            "status": "generating",
+            "plan_id": plan_id,
+            "planning_session": planning_session,
+            "worktree": wt,
             "meta_goal": state.get("meta_goal"),
         }
 
@@ -394,6 +681,8 @@ def answer_clarification(plan_id: str, body: ClarifyRequest):
             "status": "formulated",
             "error": None,
             "gate_feedback": None,
+            "project_id": project_id,
+            "plan_id": plan_id,
         },
         config={"configurable": {"thread_id": thread_id}},
     )
@@ -405,6 +694,16 @@ def answer_clarification(plan_id: str, body: ClarifyRequest):
             "status": "awaiting_clarification",
             "plan_id": plan_id,
             "meta_goal": state.get("meta_goal"),
+        }
+
+    if state["status"] == "generating":
+        # Async meta-planner has been spawned — DAG not ready yet.
+        # The async completion will be handled by _on_node_observed_planning.
+        return {
+            "status": "generating",
+            "plan_id": plan_id,
+            "plan_goal_review": None,
+            "error": None,
         }
 
     # Persist the full plan with DAG
@@ -475,7 +774,7 @@ def ratify_plan(plan_id: str):
     """
     from shared.outbox import emit
 
-    from backend.planning.store import get_plan, update_plan_gate_result, set_ratified
+    from backend.planning.store import get_plan, update_plan_gate_result, set_ratified, get_active_run_for_project
     from backend.evaluator.plan_evaluator import run_plan_gate
 
     plan_dict = get_plan(plan_id)
@@ -492,6 +791,19 @@ def ratify_plan(plan_id: str):
             plan_goal_review=gate_result.plan_goal_review,
         )
 
+    # Reject if project already has an active (non-terminal) run
+    project_id = plan_dict.get("project_id", "default")
+    active = get_active_run_for_project(project_id)
+    if active:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": f"Project {project_id} already has an active run "
+                         f"({active['state']}): {active['id']}. "
+                         "Complete or cancel it before ratifying a new plan.",
+            },
+        )
+
     # Persist ratification + gate score
     set_ratified(plan_id)
     if gate_result.plan_goal_review is not None:
@@ -500,11 +812,12 @@ def ratify_plan(plan_id: str):
             plan_goal_review=gate_result.plan_goal_review,
             l2_judgments=gate_result.l2_judgments or [],
             hard_failures=[],
+            raw_response=gate_result.raw_response,
         )
 
     run_id = f"run_{uuid4().hex[:8]}"
     from backend.planning.store import save_run
-    save_run({"id": run_id, "plan_id": plan_id, "state": "created"})
+    save_run({"id": run_id, "plan_id": plan_id, "project_id": project_id, "state": "created"})
     from shared.db import session as db_session
     with db_session() as s:
         emit(s, PlanRatified(

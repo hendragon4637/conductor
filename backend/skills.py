@@ -22,10 +22,10 @@ OMO_RESERVED: set[str] = {
 }
 
 ROLE_TO_OPENCODE_MODE: dict[str, str] = {
-    "executor": "build",
-    "planner": "plan",
-    "commander": "ask",
-    "reviewer": "ask",
+    "executor": "primary",
+    "planner": "primary",
+    "commander": "primary",
+    "reviewer": "primary",
 }
 
 TOOL_TO_OPENCODE: dict[str, str] = {
@@ -83,11 +83,29 @@ class OpenCodeRenderer(HarnessRenderer):
             return OPENCODE_SKILL_DIR
         return Path(scope) / ".opencode" / "skills"
 
+    @staticmethod
+    def _yaml_safe(value: str) -> str:
+        """Return a YAML-safe scalar string. Quote when value contains special chars."""
+        if not value:
+            return '""'
+        if any(ch in value for ch in ':[]{}#>&|!%@`,'):
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            return f'"{escaped}"'
+        return value
+
     def render_agent(self, row: dict[str, Any], scope: str = "global") -> tuple[str, str]:
         agent_id = row["agent_config_id"]
-        desc = (row.get("system_prompt") or "")[:120].replace("\n", " ").strip()
+        raw_prompt = row.get("system_prompt") or ""
+        desc = ""
+        for line in raw_prompt.split("\n"):
+            line = line.strip()
+            if line:
+                desc = line
+                break
+        if not desc:
+            desc = (row.get("new_capabilities") or ["imported"])[0]
         role = row.get("role", "executor")
-        mode = ROLE_TO_OPENCODE_MODE.get(role, "build")
+        mode = ROLE_TO_OPENCODE_MODE.get(role, "all")
 
         conductor_tools = row.get("tools") or []
         if isinstance(conductor_tools, str):
@@ -97,23 +115,27 @@ class OpenCodeRenderer(HarnessRenderer):
         ))
 
         frontmatter = {
-            "description": desc or (row.get("new_capabilities") or ["imported"])[0],
+            "description": desc,
             "mode": mode,
         }
         if opencode_tools:
-            frontmatter["tools"] = opencode_tools
+            frontmatter["permission"] = {t: "allow" for t in opencode_tools}
 
         fm_lines = ["---"]
         for k, v in frontmatter.items():
-            if isinstance(v, list):
+            if isinstance(v, dict):
+                fm_lines.append(f"{k}:")
+                for subk, subv in v.items():
+                    fm_lines.append(f"  {subk}: {subv}")
+            elif isinstance(v, list):
                 fm_lines.append(f"{k}:")
                 for item in v:
                     fm_lines.append(f"  - {item}")
             else:
-                fm_lines.append(f"{k}: {v}")
+                fm_lines.append(f"{k}: {self._yaml_safe(str(v))}")
         fm_lines.append("---")
 
-        body = row.get("system_prompt") or ""
+        body = raw_prompt
         content = "\n".join(fm_lines) + "\n\n" + body
         filename = f"{agent_id}.md"
         path = str(self.agents_dir(scope) / filename)

@@ -23,6 +23,7 @@ from .memory_integration import (
     ground_meta_evaluation,
 )
 from .plan_evaluator import PlanEvalResult, PlanL1Result, PlanL2Result, evaluate_plan, plan_l2, run_plan_l1
+from .remediation import build_remediation_feedback
 from .ratchet import (
     ExperimentResult,
     FrozenTargetError,
@@ -58,6 +59,7 @@ __all__ = [
     "PlanL2Result",
     "add_golden",
     "assert_ready",
+    "build_remediation_feedback",
     "calibrate",
     "capture_evaluator_findings",
     "count_golden",

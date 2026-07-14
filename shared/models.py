@@ -108,3 +108,5 @@ class NodeSession(Base):
     gate_outcome = Column(String, nullable=True)
     best_score = Column(Real, nullable=True)
     stop_reason = Column(String, nullable=True)
+    role = Column(String, nullable=False, default="execution")
+    steering_count = Column(Integer, nullable=False, default=0)

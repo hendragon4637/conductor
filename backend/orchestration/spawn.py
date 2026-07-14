@@ -205,13 +205,17 @@ def spawn_team(
         agents=team_agents,
     )
 
-    # 5. Extract conversation IDs for each agent from the team response
-    # Response shape: { id, name, workspace, agents: [{ name, role, backend, model, conversation_id }] }
+    # 5. Extract conversation IDs and slot_ids for each agent from the team response
+    # Response shape: { id, name, workspace, agents: [{ name, role, slot_id, conversation_id }] }
     team_agents_result = team_data.get("agents", [])
+    team_id = team_data.get("id", "")
+    conv_to_slot: dict[str, str] = {}
     for i, node in enumerate(nodes):
         if i < len(team_agents_result):
             agent_info = team_agents_result[i]
             conv_id = agent_info.get("conversation_id", "")
+            slot_id = agent_info.get("slot_id", "")
+            conv_to_slot[conv_id] = slot_id
             node_conv_map[_node_id(node)] = conv_id
 
     # 6. Create task + aionui_links rows for each node
@@ -261,8 +265,12 @@ def spawn_team(
         if not is_orch:
             continue
         prompt = build_node_prompt(node, plan, team_info=team_info)
+        slot_id = conv_to_slot.get(conv_id, "")
         try:
-            aionui.send_message(conv_id, prompt)
+            if team_id and slot_id:
+                aionui.send_team_message(team_id, slot_id, prompt)
+            else:
+                aionui.send_message(conv_id, prompt)
         except Exception as e:
             print(f"  [spawn] Failed to send prompt to {_node_id(node)}: {e}")
 
@@ -378,34 +386,34 @@ def _spawn_single_member_team(
 
     _ensure_plan_in_db(_db_url, plan, project_id, session_id)
 
-    team_title = plan.get("title", plan["plan_id"])
-    project_prefix = f"[{project_id}]" if project_id else ""
-    team_data = aionui.create_team(
-        name=f"{project_prefix} {team_title} — node {_node_id(node) or '?'}".strip(),
+    # Single member nodes use a regular conversation instead of a team.
+    # This avoids AionUi v2.1.33 team lifecycle (team_tasks, slot_id
+    # routing) and lets the watcher detect completion via normal
+    # conversation idle-time signals.
+    try:
+        adapter = get_adapter(engine)
+        preset = adapter.aionui_preset_agent_type()
+        assistant_id = adapter.aionui_assistant_id()
+    except (ImportError, ValueError):
+        preset = "acp"
+        assistant_id = None
+    conv_id = aionui.create_conversation(
+        preset_agent_type=preset,
+        assistant_id=assistant_id,
         workspace=str(wt),
-        agents=[{
-            "name": f"{cfg['agent_config_id']} ({cfg['role']})",
-            "role": "lead",
-            "backend": engine,
-            "model": _normalize_model(cfg.get("model_preference")),
-        }],
+        model=_normalize_model(cfg.get("model_preference")),
     )
-
-    conv_id = ""
-    team_id = team_data.get("id", "")
-    agents_result = team_data.get("agents", [])
-    if agents_result:
-        conv_id = agents_result[0].get("conversation_id", "")
 
     task_id = _create_task(_db_url, plan, node, project_id, session_id)
     if conv_id:
         _create_aionui_link(_db_url, task_id, conv_id)
-        aionui.send_message(conv_id, build_single_agent_lead_brief(node=node, dep_context=dep_context))
+        brief = build_single_agent_lead_brief(
+            node=node, dep_context=dep_context,
+            goal=plan.get("user_intent", ""),
+        )
+        aionui.send_message(conv_id, brief)
 
-    result = {member_id: conv_id} if conv_id else {}
-    if team_id:
-        result["__team_id__"] = team_id
-    return result
+    return {member_id: conv_id} if conv_id else {}
 
 
 def spawn_node_team(
@@ -553,12 +561,15 @@ def spawn_node_team(
         agents=team_agents,
     )
 
-    # 6. Extract conversation IDs + team ID
+    # 6. Extract conversation IDs, slot_ids + team ID
     team_id = team_data.get("id", "")
     conv_map: dict[str, str] = {}
+    conv_to_slot: dict[str, str] = {}
     team_agents_result = team_data.get("agents", [])
     for i, agent_info in enumerate(team_agents_result):
         conv_id = agent_info.get("conversation_id", "")
+        slot_id = agent_info.get("slot_id", "")
+        conv_to_slot[conv_id] = slot_id
         if i == 0:
             conv_map["orchestrator"] = conv_id
         elif (i - 1) < len(node_members):
@@ -584,10 +595,15 @@ def spawn_node_team(
             for cfg in member_configs
         ],
         dep_context=dep_context,
+        goal=plan.get("user_intent", ""),
     )
     if orch_conv_id:
+        slot_id = conv_to_slot.get(orch_conv_id, "")
         try:
-            aionui.send_message(orch_conv_id, prompt)
+            if team_id and slot_id:
+                aionui.send_team_message(team_id, slot_id, prompt)
+            else:
+                aionui.send_message(orch_conv_id, prompt)
         except Exception as e:
             print(f"  [spawn] Failed to send prompt to orchestrator: {e}")
 

@@ -11,6 +11,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from contracts.paths import worktree_gitignore_lines
 from backend.adapters.registry import get_adapter
 
 
@@ -56,7 +57,7 @@ def assemble_for_spawn(
 
         model = agent_config.get("model_preference") or "litellm/gptoss-exec"
         agent_config_id = agent_config.get("agent_config_id", "")
-        agent_name = agent_config_id.split(":", 1)[-1] if ":" in agent_config_id else "backend-executor"
+        agent_name = agent_config_id.split(":", 1)[-1] if ":" in agent_config_id else agent_config_id
         sys_prompt = agent_config.get("system_prompt", "")
 
         write_worktree_config(
@@ -68,6 +69,11 @@ def assemble_for_spawn(
             agent_type=cli,
         )
 
+        # 1b. .gitignore — infra paths never committed
+        gitignore_path = worktree / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text(worktree_gitignore_lines())
+
     # 2. Instructions = global + project + session memory, concatenated
     parts: list[str] = []
 
@@ -78,6 +84,36 @@ def assemble_for_spawn(
             if body:
                 title = row.get("title", "")
                 parts.append(f"## {title}\n\n{body}")
+
+    workspace_conventions = """
+## Workspace Conventions
+
+### Root-level project layout
+- The workspace root IS your project root. All scaffolding files (pyproject.toml, RUN.md, .venv/) go at the root.
+- Do NOT create a wrapper project folder (e.g., `my_project/`, `project/`, `app/`) — files and directories go directly under the root, not nested inside a wrapper.
+- Standard source subdirectories (e.g., `app/`, `src/`, `tests/`) are fine — create them when the task's deliverable paths require them. The rule is: no WRAPPER folder, but yes SOURCE folders as specified.
+
+### Virtual environment
+- Use `uv venv .venv` to create the virtual environment at the workspace root.
+- Use `uv pip install` to install dependencies.
+- `uv` is available globally at `/home/aipc/.local/bin/uv`.
+- Do NOT use `python3 -m venv` (requires python3-venv package, not installed).
+- Do NOT use `pip install` at system level (blocked by PEP 668 externally-managed-environment).
+
+### Scaffolding files (always at root)
+- `pyproject.toml` — at the workspace root.
+- `RUN.md` — at the workspace root.
+- `.venv/` — at the workspace root.
+
+### Judge feedback is authoritative
+- The evaluator judge's feedback (L1 check failures and L2 rubric scores) is the ground truth.
+- If the judge says a file is missing, wrong, or a check failed — fix it. Do NOT argue, rationalize, or explain why your approach is also valid.
+- Even if you believe your implementation is correct, the judge's criteria define success. Adjust to match.
+- Read the failed check output carefully, identify what file or content is expected, and produce exactly that.
+- Treat each remediation attempt as a fresh chance to comply with the feedback — iterate toward what the judge asks for, not what you think is right.
+""".strip()
+
+    parts.append(workspace_conventions)
 
     # 3. Agent config system prompt
     sys_prompt = agent_config.get("system_prompt", "")

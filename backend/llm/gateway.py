@@ -115,9 +115,14 @@ def call(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    logger.info(
-        "gateway.call role=%s model=%s endpoint=%s messages=%d",
-        role, model, endpoint, len(messages),
+    # Log full request for debugging (omit Authorization header)
+    log_req_body = {**body, "messages": [
+        {**m, "content": (m.get("content", "")[:200] + "..." if len(m.get("content", "")) > 200 else m.get("content", ""))}
+        for m in body.get("messages", [])
+    ]}
+    logger.debug(
+        "LLM REQUEST role=%s model=%s body=%s",
+        role, model, json.dumps(log_req_body),
     )
 
     try:
@@ -128,10 +133,35 @@ def call(
         )
         with urllib.request.urlopen(req, timeout=kwargs.get("timeout", 120)) as resp:
             data: dict[str, Any] = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as http_exc:
+        # Preserve retry-after and status code from 429/rate-limit responses
+        ra = http_exc.headers.get("Retry-After", "")
+        body = http_exc.read().decode(errors="replace")[:500]
+        raise RuntimeError(
+            f"LiteLLM gateway call failed for role={role!r} model={model!r}: "
+            f"HTTP {http_exc.code} retry-after={ra} body={body}"
+        ) from http_exc
     except Exception as exc:
         raise RuntimeError(
             f"LiteLLM gateway call failed for role={role!r} model={model!r}: {exc}"
         ) from exc
+
+    # Log response for debugging (truncate long content)
+    log_resp = {
+        "model": data.get("model", "?"),
+        "usage": data.get("usage"),
+        "choices": [
+            {
+                "finish_reason": c.get("finish_reason"),
+                "content_preview": (c["message"]["content"] or "")[:200],
+            }
+            for c in data.get("choices", [])
+        ],
+    }
+    logger.debug(
+        "LLM RESPONSE role=%s status=200 body=%s",
+        role, json.dumps(log_resp),
+    )
 
     # Track usage for per-run token budget
     usage = data.get("usage") or {}

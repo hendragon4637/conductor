@@ -69,12 +69,20 @@ def build_orchestrator_brief(
     node: dict[str, Any],
     members: list[dict[str, Any]],
     dep_context: str,
+    goal: str = "",
 ) -> str:
     success = _node_success(node)
     description = _node_description(node)
+    goal_block = (
+        ""
+        if not goal
+        else f"GOAL (big picture):\n{goal}\n\nSCOPE NOTE:\n"
+             f"The goal is the overall destination. Your team's scope is only the TASK below "
+             f"— complete it as part of reaching this goal. Do not expand scope.\n"
+    )
     return f"""ROLE: You are the orchestrator. You COORDINATE; you do NOT implement, edit files, or run code yourself.
 
-TASK:
+{goal_block}TASK:
 {description}
 
 HARD RULES:
@@ -112,22 +120,68 @@ DONE CRITERIA:
 """
 
 
+def _acceptance_criteria_block(node: dict[str, Any]) -> str:
+    """Render acceptance criteria as a verbatim block with self-check instruction.
+
+    Returns empty string if no acceptance_criteria on the node.
+    """
+    ac = node.get("acceptance_criteria", []) or node.get("criteria", [])
+    if not ac:
+        return ""
+    lines = ["ACCEPTANCE CRITERIA (your work is judged EXACTLY against these):"]
+    for c in ac:
+        cid = c.get("id", "?")
+        what = c.get("what", "")
+        where = c.get("where", [])
+        verified = c.get("how_verified", "")
+        lines.append(f"  - [{cid}] {what}")
+        if where:
+            lines.append(f"    PATHS: {', '.join(where)}")
+        if verified:
+            lines.append(f"    VERIFIED BY: {verified}")
+    lines.append("")
+    lines.append("Before finishing: self-check every criterion (paths exist, verification satisfied).")
+    return "\n".join(lines)
+
+
 def build_single_agent_lead_brief(
     node: dict[str, Any],
     dep_context: str,
+    goal: str = "",
 ) -> str:
     description = _node_description(node)
     success = _node_success(node)
     role = node.get("role") or node.get("agent_config") or "executor"
+    goal_block = (
+        ""
+        if not goal
+        else (
+            "GOAL (big picture):\n"
+            f"{goal}\n"
+            "\n"
+            "SCOPE NOTE:\n"
+            "The goal is the overall destination. Your scope is only the TASK below "
+            "— complete that task as part of reaching this goal. Do not expand scope."
+        )
+    )
+    ac_block = _acceptance_criteria_block(node)
     parts = [
         f"ROLE: You are the team lead and sole implementer for this node ({role}).",
         "",
+    ]
+    if goal_block:
+        parts.extend([goal_block, ""])
+    parts.extend([
         "TASK:",
         description,
         "",
         "REQUIREMENTS:",
         f"- Complete the task directly in the workspace.",
         f"- Satisfy this success criterion exactly: {success}",
+    ])
+    if ac_block:
+        parts.extend(["", ac_block])
+    parts.extend([
         "- Use the existing codebase patterns and keep changes focused.",
         "- Do NOT ask clarifying questions or request approval. Decide autonomously and execute.",
         "- You have full authority to create, modify, or delete files in the workspace.",
@@ -136,5 +190,5 @@ def build_single_agent_lead_brief(
         "",
         "DEPENDENCY CONTEXT (already-completed prior work):",
         dep_context or "(none)",
-    ]
+    ])
     return "\n".join(parts)

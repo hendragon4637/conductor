@@ -355,6 +355,7 @@ async def ratify_plan(plan_id: str, req: RatifyRequest):
             decision.plan_goal_review,
             decision.l2_judgments,
             decision.hard_failures,
+            raw_response=decision.raw_response,
         )
         set_ratified(plan_id)
         # Persist nodes from in-memory plan to DB

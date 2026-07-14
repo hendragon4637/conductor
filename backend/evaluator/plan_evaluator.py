@@ -21,6 +21,7 @@ import psycopg
 from backend.evaluator.rubrics import load_rubric
 from backend.planning.meta_planner.llm import call_llm_structured, get_meta_planner_model
 from pydantic import BaseModel, Field
+from contracts.feedback import validate_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,10 @@ class JudgeItemResponse(BaseModel):
     """A single rubric item judged by the plan-level L2."""
     id: str = Field(description="Rubric item ID (covers_goal, right_sized, deps_correct, measurable)")
     met: bool = Field(description="True if this rubric criterion is satisfied by the plan")
+    what: str | None = Field(default=None, description="Which specific criterion aspect failed")
+    where: str | None = Field(default=None, description="Which node(s) or field(s) are problematic")
+    why: str | None = Field(default=None, description="Root cause in one sentence")
+    how: str | None = Field(default=None, description="Concrete action to fix the issue")
 
 class PlanJudgeResponse(BaseModel):
     """All rubric items judged by the plan-level L2."""
@@ -211,7 +216,13 @@ Staffing (assigned agent_config per node with capabilities):
 Rubric:
 {rubric}
 
-For each rubric item, determine whether the plan satisfies it. Return the judgments as a JSON object with an "items" array, each with "id" and "met" (boolean)."""
+For each rubric item, determine whether the plan satisfies it. Return the judgments as a JSON object with an "items" array, each with:
+  - "id": rubric item ID
+  - "met": true/false
+  - "what" (optional): which specific aspect failed
+  - "where" (optional): which node(s) or field(s) are problematic  
+  - "why" (optional): root cause in one sentence
+  - "how" (optional): concrete action to fix"""
 
 # ── Data classes ────────────────────────────────────────────────────
 
@@ -230,6 +241,7 @@ class PlanL2Result:
     score: float = 0.0
     judgments: list[dict] = field(default_factory=list)
     hard_failures: list[dict] = field(default_factory=list)
+    raw_response: str | None = None
 
 
 @dataclass
@@ -476,8 +488,10 @@ def plan_l2(
     )
 
     try:
-        model_cfg = get_meta_planner_model()
-        resp = call_llm_structured(prompt, PlanJudgeResponse, model_cfg=model_cfg)
+        resp, raw_text = call_llm_structured(
+            prompt, PlanJudgeResponse, model_cfg=None,
+            role="l2_judge", include_raw=True,
+        )
     except Exception as exc:
         logger.warning("Plan L2 LLM call failed: %s — returning score 0", exc)
         return PlanL2Result(score=0.0)
@@ -494,16 +508,26 @@ def plan_l2(
         judged = judged_map.get(item_id)
         met = bool(judged.met) if judged else False
         detail = "met" if judged else "missing from L2 response"
+        what = getattr(judged, "what", None) or ""
+        where = getattr(judged, "where", None) or ""
+        why = getattr(judged, "why", None) or ""
+        how = getattr(judged, "how", None) or ""
         total_weight += weight
         if met:
             met_weight += weight
-        judgment = {"id": item_id, "met": met, "weight": weight, "detail": detail}
+        judgment = {
+            "id": item_id, "met": met, "weight": weight, "detail": detail,
+            "what": what, "where": where, "why": why, "how": how,
+        }
         judgments.append(judgment)
         if not met:
             hard_failures.append(judgment)
 
     score = met_weight / total_weight if total_weight > 0 else 0.0
-    return PlanL2Result(score=score, judgments=judgments, hard_failures=hard_failures)
+    return PlanL2Result(
+        score=score, judgments=judgments, hard_failures=hard_failures,
+        raw_response=raw_text,
+    )
 
 
 def evaluate_plan(
@@ -570,6 +594,7 @@ class PlanGateDecision:
     feedback_text: str = ""
     l2_judgments: list[dict] = field(default_factory=list)
     hard_failures: list[dict] = field(default_factory=list)
+    raw_response: str | None = None
 
 
 def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE_THRESHOLD) -> PlanGateDecision:
@@ -598,6 +623,12 @@ def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE
         score = result.plan_goal_review
         l2_judgments = result.l2.judgments if result.l2 else []
         hard_failures = result.hard_failures
+        # Validate hard_failure feedback against DimFeedback; mark degraded if filler
+        for hf in hard_failures:
+            hf_fb = {k: hf.get(k, "") for k in ("what", "where", "why", "how")}
+            validated, _ = validate_feedback(hf_fb)
+            if validated is None and hf_fb.get("what"):
+                hf["detail"] = hf.get("detail", "") + " [feedback degraded]"
         if hard_failures:
             reason = {"L2": "hard gate failed", "score": score, "hard_failures": hard_failures, "judgments": l2_judgments}
             feedback = "Plan quality hard gate failed: " + "; ".join(f"{f.get('id')}: {f.get('detail', 'not met')}" for f in hard_failures)
@@ -616,6 +647,7 @@ def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE
         action="ratify",
         plan_goal_review=result.plan_goal_review,
         l2_judgments=result.l2.judgments if result.l2 else [],
+        raw_response=result.l2.raw_response if result.l2 else None,
     )
 
 

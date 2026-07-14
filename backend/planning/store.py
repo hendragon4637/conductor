@@ -77,8 +77,9 @@ def update_plan_gate_result(
     plan_goal_review: float,
     l2_judgments: list[dict[str, Any]],
     hard_failures: list[dict[str, Any]],
+    raw_response: str | None = None,
 ) -> None:
-    """Persist plan-level evaluator score and per-item L2 judgments."""
+    """Persist plan-level evaluator score, per-item L2 judgments, and raw LLM response."""
     db_url = _get_db()
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
@@ -86,13 +87,15 @@ def update_plan_gate_result(
                 """UPDATE plans
                       SET plan_goal_review = %s,
                           plan_l2_judgments = %s::jsonb,
-                          plan_l2_hard_failures = %s::jsonb
+                          plan_l2_hard_failures = %s::jsonb,
+                          plan_l2_raw_response = %s
                     WHERE plan_id = %s
                 """,
                 (
                     plan_goal_review,
                     json.dumps(l2_judgments),
                     json.dumps(hard_failures),
+                    raw_response,
                     plan_id,
                 ),
             )
@@ -118,17 +121,26 @@ def get_plan(plan_id: str) -> dict[str, Any] | None:
 # ── Run persistence ───────────────────────────────────────────────
 
 def save_run(run: dict[str, Any]) -> None:
-    """Insert or update a run record."""
+    """Insert or update a run record (defense-in-depth: checks active-run limit)."""
+    project_id = run.get("project_id")
+    if not project_id:
+        raise ValueError("save_run requires project_id")
+
     db_url = _get_db()
     with psycopg.connect(db_url) as c:
+        # Defense-in-depth: reject if project already has an active run
+        _check_active_project_run(c, project_id)
+
         with c.cursor() as cur:
             cur.execute(
                 """INSERT INTO runs
-                   (id, plan_id, state, worktree_root, note, approved_at, finished_at,
+                   (id, plan_id, project_id, state, worktree_root, note,
+                    approved_at, finished_at,
                     l4_standalone, l4_acceptance, l4_status, l4_reason, run_md_present)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (id) DO UPDATE SET
                      state = EXCLUDED.state,
+                     project_id = COALESCE(EXCLUDED.project_id, runs.project_id),
                      worktree_root = COALESCE(EXCLUDED.worktree_root, runs.worktree_root),
                      approved_at = COALESCE(EXCLUDED.approved_at, runs.approved_at),
                      finished_at = COALESCE(EXCLUDED.finished_at, runs.finished_at),
@@ -142,6 +154,7 @@ def save_run(run: dict[str, Any]) -> None:
                 (
                     run.get("id"),
                     run.get("plan_id"),
+                    project_id,
                     run.get("state", "created"),
                     run.get("worktree_root"),
                     run.get("note"),
@@ -155,6 +168,48 @@ def save_run(run: dict[str, Any]) -> None:
                 ),
             )
         c.commit()
+
+
+def _check_active_project_run(conn: psycopg.Connection, project_id: str) -> None:
+    """Raise ``ValueError`` if the project already has an active (non-terminal) run.
+
+    Called by ``save_run`` and the planner endpoints as defense-in-depth.
+    The partial unique index ``idx_runs_active_project`` provides DB-level
+    enforcement; this app-layer check gives a clean error message.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT id FROM runs
+               WHERE project_id = %s
+                 AND state NOT IN ('done', 'failed', 'cancelled')
+               LIMIT 1""",
+            (project_id,),
+        )
+        existing = cur.fetchone()
+    if existing:
+        raise ValueError(
+            f"Project {project_id} already has an active run ({existing[0]}). "
+            "Complete or cancel it before starting a new one."
+        )
+
+
+def get_active_run_for_project(project_id: str) -> dict[str, Any] | None:
+    """Return an active (non-terminal) run for the project, or None.
+
+    Used by the ``/goal`` and ``/ratify`` endpoints to check early
+    before any expensive processing.
+    """
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT id, plan_id, state, project_id FROM runs
+                   WHERE project_id = %s
+                     AND state NOT IN ('done', 'failed', 'cancelled')
+                   LIMIT 1""",
+                (project_id,),
+            )
+            return cur.fetchone()
 
 
 def get_run(run_id: str) -> dict[str, Any] | None:

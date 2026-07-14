@@ -144,20 +144,22 @@ def formulate(
 # ── Convention injection (File 02) ────────────────────────────────────────
 
 
-def _user_already_addressed(raw_input: str, convention: str) -> bool:
-    """Check if a convention is already implied by the user's raw input.
+def _user_already_addressed(raw_input: str, convention: str, spec: str = "") -> bool:
+    """Check if a convention is already implied by the user's raw input or spec.
 
-    Uses simple keyword overlap: if any significant word from the convention
-    appears in the raw input, we assume the user may have addressed it.
+    Checks keyword overlap against both ``raw_input`` (original user intent)
+    and ``spec`` (which may contain previously-injected conventions from an
+    earlier retry cycle).  Returns True if any significant word from the
+    convention appears in either source.
     """
-    # Extract significant words (4+ chars, not common stopwords)
     stopwords = {"with", "that", "this", "from", "have", "been", "will", "would", "could", "should", "their", "there", "about", "which"}
     convention_lower = convention.lower()
     raw_lower = raw_input.lower()
+    spec_lower = spec.lower()
     for word in convention_lower.split():
         word = word.strip(".,;:!?()[]{}'\"")
         if len(word) >= 4 and word not in stopwords:
-            if word in raw_lower:
+            if word in raw_lower or word in spec_lower:
                 return True
     return False
 
@@ -198,10 +200,14 @@ def enrich_with_conventions(meta_goal: MetaGoal, raw_input: str) -> MetaGoal:
         logger.warning("No domain profile found for '%s' — skipping convention injection", domain)
         return meta_goal
 
-    # Inject only UNSTATED conventions
+    # Avoid re-injecting conventions already present in spec (retry cycles)
+    CONVENTIONS_MARKER = "Conventions (auto-applied, confirm)"
+    if CONVENTIONS_MARKER in meta_goal.spec:
+        return meta_goal
+
     injected: list[str] = []
     for conv in profile.conventions:
-        if not _user_already_addressed(raw_input, conv):
+        if not _user_already_addressed(raw_input, conv, spec=meta_goal.spec):
             injected.append(conv)
 
     if injected:

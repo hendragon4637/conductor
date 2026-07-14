@@ -109,6 +109,82 @@ bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 ```
 One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 4 microservices. Health check runs at end.
 
+### Step-by-step: clean re-run a plan (after code or config changes)
+
+Full teardown + restart sequence. Use when you changed evaluator code, rubric presets, agent configs, or event bus wiring and want a clean cycle.
+
+```bash
+# 0. Variables
+PLAN_ID="plan_09f23fe0"
+declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 )
+
+# 1. Kill running microservices
+for port in 8091 8092 8093 8094; do
+    fuser -k "${port}/tcp" 2>/dev/null || true
+done
+
+# 2. Clean Conductor DB (stale runs, node_sessions, outbox, processed_events)
+docker exec postgres psql -U aipc -d aipc_conductor -c "
+  DELETE FROM node_sessions;
+  DELETE FROM runs;
+  DELETE FROM processed_events;
+  DELETE FROM outbox;
+  UPDATE plans SET ratified = false;
+"
+
+# 3. Clean AionUi SQLite DB (purge stale conversations, messages, teams)
+sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db "
+    DELETE FROM messages;
+    DELETE FROM conversations;
+    DELETE FROM assistant_sessions;
+    DELETE FROM team_tasks;
+    DELETE FROM teams;
+    VACUUM;
+"
+
+# 4. Clean conductor workspace dirs
+find /opt/aipc/conductor/workspace -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+
+# 5. Kill lingering opencode ACP processes
+pkill -f "opencode acp" 2>/dev/null || true
+sleep 1
+
+# 6. Purge RabbitMQ queues (load secrets first for auth)
+set -a; source /opt/aipc/scripts/load-secrets.sh; source /opt/aipc/conductor/.env; set +a
+RABBIT_PASS="$(echo "$RABBIT_URL" | sed 's/.*:\([^@]*\)@.*/\1/')"
+RABBIT_AUTH="conductor:${RABBIT_PASS}"
+for queue in planner.q executor.q watcher.q evaluator.q; do
+    curl -s -u "$RABBIT_AUTH" -X DELETE \
+        "http://127.0.0.1:15672/api/queues/staging/${queue}/contents" > /dev/null
+done
+
+# 7. Restart all 4 microservices
+for svc in executor watcher planner evaluator; do
+    port=${PORTS[$svc]}
+    set -a
+    source /opt/aipc/scripts/load-secrets.sh 2>/dev/null
+    source /opt/aipc/conductor/services/${svc}/.env
+    set +a
+    cd /opt/aipc/conductor
+    setsid uv run uvicorn services.${svc}.main:app \
+        --host 0.0.0.0 --port "${port}" \
+        > /tmp/${svc}-svc.log 2>&1 &
+    echo "${svc}-svc started on :${port} (PID $!)"
+done
+
+sleep 5
+
+# 8. Health check
+for p in 8091 8092 8093 8094; do
+    echo -n ":${p} "
+    curl -sfm 3 "http://127.0.0.1:${p}/health" 2>/dev/null || echo "DOWN"
+done
+
+# 9. Re-ratify with 300s timeout
+curl -s --max-time 300 -X POST "http://127.0.0.1:8093/ratify/${PLAN_ID}" \
+  -H 'Content-Type: application/json' | python3 -m json.tool
+```
+
 ### Manual E2E cycle
 ```bash
 # 1. Submit goal
@@ -317,6 +393,8 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration 
 - `v6_040_family_array.sql` — migrates `capabilities.family` from TEXT to JSONB array, adds GIN index
 - `v6_060_stress_goals.sql` — creates `stress_goals` table for generated heterogeneous stress test goals
 - `v6_070_skills_store.sql` — adds `store_path`, `has_scripts`, `requires_setup` columns to `skills` table for per-skill folder storage
+- `v6_080_plan_l2_raw_response.sql` — adds `plan_l2_raw_response` TEXT column to `plan_eval_detailed` table for raw LLM response capture
+- `v6_090_runs_project_id.sql` — adds `project_id` column to `runs` table, backfills from plans, adds partial unique index for active-run-per-project constraint
 - Run via: `docker exec -i postgres psql -U aipc -d aipc_conductor < backend/migrations/<filename>.sql`
 
 ## Environment

@@ -194,7 +194,7 @@ Propose a new capability as JSON:
     {{"id": "dim_id", "dimension": "what it checks", "kind": "objective"|"subjective"}}
   ],
   "required_tools": ["tool1", "tool2"]
-}
+}}
 
 Dimensions: objective -> L1 (deterministic), subjective -> L2 (judge).
 Every capability needs at least one objective and one subjective dimension.

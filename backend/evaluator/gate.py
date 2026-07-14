@@ -69,6 +69,8 @@ def evaluate_gate(
     """
     from backend.evaluator.l1_checks import run_l1
 
+    print(f"[GATE] evaluate_gate called: worktree={worktree} threshold={threshold} prev_l1_ids={prev_l1_passed_ids} has_changes={has_changes_since_prev}", flush=True)
+
     # --- L1: deterministic checks ---
     l1 = run_l1(check_list, worktree)
     l1_passed_ids = [cid for cid, ok, _ in l1.detail if ok]
@@ -80,23 +82,32 @@ def evaluate_gate(
             l1_feedback.append(item)
 
     if not l1.passed:
-        # False-fail escalation: on remediation attempt, if changes made
-        # and no L1 improvement, run L2 probe to disambiguate.
-        if prev_l1_passed_ids is not None and has_changes_since_prev:
-            l1_improved = _l1_improved(l1_passed_ids, prev_l1_passed_ids)
-            if not l1_improved and l2_fn is not None:
-                l2_probe = l2_fn(check_list, worktree)
-                if l2_probe.score >= threshold:
-                    # L2 passes but L1 doesn't — suspected bad L1 check
-                    return GateDecision(
-                        action="remediate",
-                        l1_passed_ids=l1_passed_ids,
-                        l1_feedback=l1_feedback,
-                        l1_flagged=True,
-                        l2_passed=True,
-                        goal_review=l2_probe.score,
-                        l2_feedback=[_j_to_dict(j) for j in l2_probe.judgments],
-                    )
+        # L2-gating on remediation: when changes exist, run L2 even if L1
+        # fails. This allows the patience system to track L2 improvement
+        # and avoid failing when substantive work is being done but L1
+        # checks are mis-specified or the worktree needs an L1 pass.
+        if prev_l1_passed_ids is not None and has_changes_since_prev and l2_fn is not None:
+            l2_probe = l2_fn(check_list, worktree)
+            if l2_probe.score >= threshold:
+                # L2 passes but L1 doesn't — suspected bad L1 check
+                return GateDecision(
+                    action="remediate",
+                    l1_passed_ids=l1_passed_ids,
+                    l1_feedback=l1_feedback,
+                    l1_flagged=True,
+                    l2_passed=True,
+                    goal_review=l2_probe.score,
+                    l2_feedback=[_j_to_dict(j) for j in l2_probe.judgments],
+                )
+            # L2 also fails — include L2 score for patience tracking
+            return GateDecision(
+                action="remediate",
+                l1_passed_ids=l1_passed_ids,
+                l1_feedback=l1_feedback,
+                l2_passed=False,
+                goal_review=l2_probe.score,
+                l2_feedback=[_j_to_dict(j) for j in l2_probe.judgments],
+            )
         return GateDecision(
             action="remediate",
             l1_passed_ids=l1_passed_ids,
@@ -105,8 +116,10 @@ def evaluate_gate(
 
     # --- L2: rubric judge (only if L1 passed) ---
     if l2_fn is not None:
+        print(f"[GATE] L1 passed, calling L2 judge: worktree={worktree} threshold={threshold}", flush=True)
         l2 = l2_fn(check_list, worktree)
         l2_passed = l2.score >= threshold
+        print(f"[GATE] L2 result: score={l2.score:.4f} threshold={threshold} passed={l2_passed} items_met={l2.items_met}/{l2.rubric_count} oversize={l2.oversize}", flush=True)
         l2_fb = [_j_to_dict(j) for j in l2.judgments]
         if not l2_passed:
             return GateDecision(
@@ -150,7 +163,7 @@ def _build_l1_feedback_item(
     """Build L1 feedback dict with what/why/how/evidence."""
     on_fail = getattr(check, "on_fail", None) if check else None
     criterion = getattr(check, "criterion", "") if check else ""
-    check_cmd = getattr(check, "check_cmd", "") if check else ""
+    check_cmd = (getattr(check, "cmd", None) or getattr(check, "check_cmd", None) or "") if check else ""
 
     if on_fail:
         what = on_fail.what or f"L1 check failed: {cid}"
@@ -158,7 +171,8 @@ def _build_l1_feedback_item(
         evidence_from = on_fail.evidence_from or "stdout"
         evidence = output[:500] if evidence_from == "stdout" else f"path check failed for {worktree}"
     else:
-        what = getattr(check, "criterion", f"L1 check failed: {cid}") or f"L1 check failed: {cid}"
+        criterion_text = getattr(check, "criterion", "") or ""
+        what = criterion_text or check_cmd or f"L1 check failed: {cid}"
         how = "Review the failing check and fix the issue"
         evidence = output[:500]
 
@@ -176,16 +190,21 @@ def _build_l1_feedback_item(
 
 
 def _j_to_dict(j: Any) -> dict[str, Any]:
-    """Convert a Judgment object to dict."""
+    """Convert a Judgment object to dict, preserving structured feedback."""
     if hasattr(j, "check_id"):
+        fb = getattr(j, "feedback_raw", None) or {}
+        what = fb.get("what") or f"L2 rubric: {j.check_id}"
+        where = fb.get("where", "unspecified")
+        why = fb.get("why") or j.explanation
+        how = fb.get("how") or "Address the rubric item in the implementation"
         return {
             "check_id": j.check_id,
             "criteria_met": j.criteria_met,
             "explanation": j.explanation,
-            "what": f"L2 rubric: {j.check_id}",
-            "why": j.explanation,
-            "how": "Address the rubric item in the implementation",
-            "evidence": j.explanation,
+            "what": what,
+            "where": where,
+            "why": why,
+            "how": how,
         }
     if isinstance(j, dict):
         return j

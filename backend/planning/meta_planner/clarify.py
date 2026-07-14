@@ -150,5 +150,9 @@ def formulate_or_clarify(
         return ClarifyPending(questions=mg.questions)
 
     # resolved → proceed
-    _update_plan(plan_id, plan_status="formulated", partial_meta_goal=None)
+    # NOTE: keep partial_meta_goal — the caller invokes the LangGraph which
+    # overwrites it via _n_generate_plan.  Clearing it here creates a window
+    # where _get_meta_goal() returns empty spec/quality_intent if the graph
+    # invocation fails before _n_generate_plan writes it back.
+    _update_plan(plan_id, plan_status="formulated")
     return mg

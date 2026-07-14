@@ -82,6 +82,68 @@ class AionUiClient:
     # ------------------------------------------------------------------
     # Teams
     # ------------------------------------------------------------------
+    def _resolve_assistant_id(self, backend: str) -> str:
+        """Map a backend/engine name (e.g. ``opencode``) to a ``bare:...``
+        assistant ID by querying the assistants catalog."""
+        assistants = self.list_assistants()
+        for a in assistants:
+            agent = a.get("agent", {})
+            if agent.get("acp_backend", "").lower() == backend.lower():
+                return a["id"]
+        raise ValueError(
+            f"No assistant found for backend '{backend}' in AionUi catalog. "
+            f"Available acp_backends: {[a.get('agent', {}).get('acp_backend') for a in assistants if a.get('agent', {}).get('acp_backend')]}"
+        )
+
+    def get_team(self, team_id: str) -> dict:
+        """Fetch full team info including agents with slot_ids."""
+        resp = self._get(f"/api/teams/{team_id}")
+        data = resp.get("data", {})
+        # Normalize assistants → agents for consistency
+        if "assistants" in data and "agents" not in data:
+            data["agents"] = data.pop("assistants")
+        return data
+
+    def send_team_message(self, team_id: str, slot_id: str, text: str) -> str:
+        """Send a message to a team agent via the team messages endpoint
+        (required for team conversations in AionUi v2.1.33+).
+
+        Returns the message_id from the response.
+        """
+        resp = self._post(
+            f"/api/teams/{team_id}/agents/{slot_id}/messages",
+            {"content": text, "role": "user"},
+        )
+        return resp.get("data", {}).get("message_id", "")
+
+    def cancel_conversation(self, conversation_id: str) -> None:
+        """Cancel any running turn so a new message can be sent.
+
+        AionUi rejects POST /messages with 409 when the conversation is
+        still running.  Calls /cancel with the current turn_id and polls
+        until idle (up to 30s).
+        """
+        import time as _time
+
+        conv = self.get_conversation(conversation_id)
+        runtime = conv.get("runtime", {})
+        state = runtime.get("state", "")
+        if state != "running":
+            return
+        turn_id = runtime.get("turn_id")
+        if not turn_id:
+            return
+        self._post(f"/api/conversations/{conversation_id}/cancel", {"turn_id": turn_id})
+        for _ in range(30):
+            _time.sleep(1)
+            try:
+                poll = self.get_conversation(conversation_id)
+                pr = poll.get("runtime", {})
+                if pr.get("state") == "idle" and pr.get("can_send_message") is True:
+                    return
+            except Exception:
+                pass
+
     def create_team(
         self,
         name: str,
@@ -90,16 +152,36 @@ class AionUiClient:
     ) -> dict:
         """Create a team and return the full response data dict.
 
+        Each agent dict may contain a ``backend`` key (deprecated) or an
+        ``assistant_id`` key.  If ``assistant_id`` is absent and ``backend``
+        is present, this method automatically resolves the backend to the
+        correct ``bare:...`` assistant ID via the assistants catalog.
+
         The response includes the ``id`` (team ID) and ``agents`` array,
         where each agent has ``conversation_id``, ``name``, ``role``, etc.
         """
         body = {"name": name}
         if workspace:
             body["workspace"] = workspace
-        if agents:
-            body["agents"] = agents
+
+        resolved_agents = []
+        for agent in (agents or []):
+            agent = dict(agent)
+            if "assistant_id" not in agent and "backend" in agent:
+                agent["assistant_id"] = self._resolve_assistant_id(agent.pop("backend"))
+            elif "backend" in agent:
+                agent.pop("backend")
+            resolved_agents.append(agent)
+        if resolved_agents:
+            body["agents"] = resolved_agents
+
         resp = self._post("/api/teams", body)
-        return resp.get("data", {})
+        data = resp.get("data", {})
+
+        # v2.1.33+ returns ``assistants`` instead of ``agents``; normalise.
+        if "assistants" in data and "agents" not in data:
+            data["agents"] = data.pop("assistants")
+        return data
 
     # ------------------------------------------------------------------
     # Assistants

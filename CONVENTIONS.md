@@ -190,6 +190,29 @@
 - Scripts detection uses content-based regex (`scripts/[\w.\-/]+`) on the fetched SKILL.md body, not GitHub API (avoids rate limits)
 - Resume partial imports with `--start-batch N` (1-indexed batch number)
 
+## Planner (meta-planner)
+- `NODE_BRIEF.md` holds static reference material (role, steps, rules, schemas, roster) — written by `_write_planner_opencode_json()` at worktree setup
+- `planning_brief()` builds ONLY dynamic content (goal/spec/quality_intent/worktree path, domain-filtered capabilities/dimensions); references NODE_BRIEF.md for static content
+- `retry_brief()` calls thin `planning_brief()` + prepends ✓/FIX block — never regenerates static content
+- `_schema_text()` is called once and cached; duplicate calls have been removed
+- `_build_static_brief()` in `harness_worktree.py` composes the static brief from DB sys_prompt + role + steps + rules + schemas + roster
+
+## Run constraint (project_id)
+- Every run has a required `project_id` column (FK to plans.project_id, NOT NULL)
+- Partial unique index `idx_runs_active_project` on `runs(project_id)` WHERE state NOT IN ('done','failed','cancelled','planning') — allows multiple planning attempts before ratification but only one active run per project
+- `get_active_run_for_project(project_id)` returns any run in a non-terminal state (excludes done/failed/cancelled)
+- `save_run()` raises `ValueError` if `project_id` is missing from the run dict (defense-in-depth)
+- `/goal` endpoint checks for active project run (409) before invoking planner LangGraph
+- `/ratify` endpoint checks for active project run (409) before creating execution run
+
+## Plan evaluator (gate & judge)
+- `call_llm_structured()` accepts optional `role` param (default `"meta_planner"`) and `include_raw` param (default `False`)
+- `role="l2_judge"` routes through the gateway to the JUDGE model group — independent from the meta-planner generation model (`deepseek-planning`)
+- `include_raw=True` returns `(parsed, raw_text)` tuple; the raw response is stored in `PlanL2Result.raw_response` and persisted to `plan_l2_raw_response` TEXT column
+- `plan_l2_raw_response` is for observability only — never fed into the retry brief
+- Gate results (`gate_outcome`, `l2_score`, `feedback`, `l2_feedback`) are persisted to `node_sessions` on EVERY gate decision (both ratify and revise) in `_on_node_observed_planning()`
+- `update_plan_gate_result()` is called in the FAILURE path before retry, persisting `plan_goal_review` + `l2_judgments` + `raw_response` mid-retry for observability
+
 ## Git
 - Atomic commits with clear messages
 - Never commit .env, *.db, node_modules/, __pycache__/

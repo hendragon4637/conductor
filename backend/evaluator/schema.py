@@ -52,8 +52,12 @@ class Check(BaseModel):
     """
     id: str = Field(description="Unique check id within the node, e.g. 'det-1', 'rubric-func-completeness'")
     type: Literal["deterministic", "rubric"]
+    kind: Literal["shell", "artifact_text", "file_exists"] = Field(
+        default="shell",
+        description="Executor kind: shell (subprocess), artifact_text (in-process text assertion), file_exists (path check)",
+    )
     criterion: str = Field(description="Human-readable intent, e.g. 'all tests pass', 'endpoint returns 200'")
-    check_cmd: str | None = Field(default=None, description="Deterministic: shell command run in worktree; exit 0 = pass")
+    check_cmd: str | None = Field(default=None, description="Deterministic: shell command or artifact_text assertion spec (e.g. 'contains:Hello')")
     rubric_item: str | None = Field(default=None, description="Rubric: a single yes/no quality question for the L2 judge")
     weight: float = Field(default=1.0, ge=0.0, le=10.0, description="Relative importance within the node")
     provenance: ProvenanceType = Field(
@@ -100,6 +104,13 @@ class Check(BaseModel):
             raise ValueError(
                 f"Check {self.id}: rubric type must not have 'check_cmd'"
             )
+        if self.type == "deterministic" and self.kind not in ("shell", "artifact_text", "file_exists"):
+            raise ValueError(
+                f"Check {self.id}: unsupported deterministic kind '{self.kind}'"
+            )
+        if self.kind == "file_exists" and self.check_cmd and not self.check_cmd.startswith("test -f "):
+            # allow raw path as fallback — runner will construct the test
+            pass
         return self
 
 
@@ -109,8 +120,14 @@ class Judgment(BaseModel):
     Stored alongside the check result for auditability.
     """
     check_id: str
-    criteria_met: bool = Field(description="True = this particular rubric item was satisfied")
+    criteria_met: bool = Field(description="True = this particular rubric item was satisfied (GEval score >= threshold)")
+    score: float = Field(default=0.0, ge=0.0, le=1.0, description="Continuous GEval score (0.0-1.0) for weighted averaging")
     explanation: str = Field(description="Free-text rationale for the judgment")
+    feedback_raw: dict | None = Field(
+        default=None,
+        description="Structured feedback {what, where, why, how} parsed from GEval reason. "
+                    "Set by l2_judge.run_l2(); consumed by gate._j_to_dict() for remediation brief.",
+    )
 
 
 class NodeChecks(BaseModel):

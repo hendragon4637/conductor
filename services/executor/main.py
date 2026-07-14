@@ -116,8 +116,13 @@ def _fix_worktree_perms(wt: str) -> None:
         logger.warning("Could not fix worktree permissions for %s: %s", wt, exc)
 
 
-def _commit_worktree(run_id: str) -> None:
-    """git add -A && git commit for the run's active worktree."""
+def _commit_worktree(run_id: str, node_id: str | None = None) -> None:
+    """git add -A && git commit for the run's active worktree.
+
+    When *node_id* is provided, creates a ``node-{node_id}`` tag pointing
+    to the commit so downstream nodes can reference it via
+    ``build_node_context`` (which calls ``git show node-{node_id}``).
+    """
     from shared.db import session as db_session
     from shared.models import NodeSession as NodeSessionModel
     import subprocess
@@ -135,6 +140,7 @@ def _commit_worktree(run_id: str) -> None:
             result = subprocess.run(["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True, timeout=30)
             if result.stdout.strip():
                 subprocess.run(["git", "commit", "-m", f"auto-commit run {run_id}"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
+                _tag_worktree_commit(wt, node_id)
                 print(f"[PRINT] Auto-committed worktree changes for run {run_id}", flush=True)
             else:
                 logger.info("Nothing to commit for run %s", run_id)
@@ -145,6 +151,7 @@ def _commit_worktree(run_id: str) -> None:
                 try:
                     subprocess.run(["git", "add", "-A"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
                     subprocess.run(["git", "commit", "-m", f"auto-commit run {run_id}"], cwd=wt, capture_output=True, text=True, check=True, timeout=30)
+                    _tag_worktree_commit(wt, node_id)
                     print(f"[PRINT] Auto-committed worktree changes for run {run_id} (after permission fix)", flush=True)
                     return
                 except subprocess.CalledProcessError as retry_exc:
@@ -152,6 +159,20 @@ def _commit_worktree(run_id: str) -> None:
             else:
                 logger.warning("Auto-commit failed for run %s: %s", run_id, exc.stderr)
             print(f"[PRINT] Auto-commit skipped for run {run_id}: {exc}", flush=True)
+
+
+def _tag_worktree_commit(wt: str, node_id: str | None) -> None:
+    """Create a ``node-{node_id}`` tag in the worktree git repo."""
+    if not node_id:
+        return
+    import subprocess
+    tag = f"node-{node_id}"
+    try:
+        subprocess.run(["git", "tag", "-d", tag], cwd=wt, capture_output=True, text=True, timeout=15)
+        subprocess.run(["git", "tag", tag], cwd=wt, capture_output=True, text=True, check=True, timeout=15)
+        print(f"[PRINT] Tagged commit as {tag}", flush=True)
+    except subprocess.CalledProcessError as exc:
+        logger.warning("Failed to tag %s: %s", tag, exc.stderr)
 
 
 def _finalize_or_advance(run_id: str, payload: dict[str, object]) -> None:
@@ -255,6 +276,10 @@ def _finalize_or_advance(run_id: str, payload: dict[str, object]) -> None:
         if not isinstance(members_raw, list):
             members_raw = [str(members_raw)]
 
+        from backend.builtins.handoff import build_node_context as _build_dep_context
+        dep_ids = next_node.get("depends_on", [])
+        dep_context = _build_dep_context(worktree_path, dep_ids) if worktree_path and dep_ids else ""
+
         try:
             conv_map = spawn_node_team(
                 node=next_node,
@@ -263,7 +288,7 @@ def _finalize_or_advance(run_id: str, payload: dict[str, object]) -> None:
                 aionui=aionui,
                 wm=wm,
                 members=members_raw,
-                dep_context="",
+                dep_context=dep_context,
                 workspace_root=_WORKSPACE_ROOT,
                 auto_approve=plan_data.get("auto_approve", True),
             )
@@ -346,21 +371,30 @@ def _handle_gate_evaluated(session, payload):
     On other outcomes -> log and let the DAG advancement decide.
     """
     from backend.worktree.lifecycle import finalize_success, finalize_failure, _update_run
+    from shared.db import session as _db_session
+    from shared.models import NodeSession as _NodeSessionModel
 
     run_id = payload["run_id"]
     gate_outcome = payload.get("gate_outcome", "")
     node_session_id = payload.get("node_session_id", "")
 
+    _node_id: str | None = None
+    if node_session_id:
+        with _db_session() as s:
+            _ns_row = s.query(_NodeSessionModel).filter(_NodeSessionModel.id == node_session_id).first()
+            if _ns_row:
+                _node_id = str(_ns_row.node_id)
+
     if gate_outcome in ("pass", "done"):
         logger.info("Gate passed for run %s (%s) -- committing + checking DAG", run_id, gate_outcome)
         print(f"[PRINT] Gate passed for run {run_id} ({gate_outcome})", flush=True)
-        _commit_worktree(run_id)
+        _commit_worktree(run_id, node_id=_node_id)
         _finalize_or_advance(run_id, payload)
     elif gate_outcome in ("fail", "failed"):
         logger.warning("Gate failed for run %s -- finalizing failure", run_id)
         print(f"[PRINT] Gate failed for run {run_id}", flush=True)
         try:
-            _commit_worktree(run_id)
+            _commit_worktree(run_id, node_id=_node_id)
             finalize_failure(run_id, reason="gate_evaluated_fail", workspace_root=_WORKSPACE_ROOT)
             _update_run(run_id, state="failed")
             print(f"[PRINT] Run {run_id} quarantined and marked failed", flush=True)
@@ -379,6 +413,161 @@ def _handle_gate_evaluated(session, payload):
             run_id,
         )
         _finalize_or_advance(run_id, payload)
+
+
+def _handle_node_steer(session, payload):
+    """Reuse the existing AionUi conversation and send a steering brief.
+
+    Instead of spawning a brand new team (remediation), this handler:
+    1. Loads the previous node_session and reuses its aionui_conversation_id.
+    2. Builds a steering brief from evaluator feedback.
+    3. Sends the brief as a message to the existing conversation.
+    4. Creates a new node_session with steering_count+1 (same conv_id).
+    5. Emits NodeSpawned so watcher-svc resumes polling the conversation.
+    """
+    from backend.evaluator.steering import build_steering_brief
+    from backend.planning.store import get_plan
+    from services.executor.aionui_client import AionUiClient
+    from shared.db import session as db_session
+    from shared.models import NodeSession as NodeSessionModel
+    from sqlalchemy.sql import func
+    from contracts.events import NodeSpawned
+    from shared.outbox import emit
+    import uuid
+
+    run_id = payload["run_id"]
+    node_id = payload["node_id"]
+    prev_session_id = payload.get("session_id", "")
+    feedback_ref = payload.get("feedback_ref", prev_session_id)
+    worktree = payload.get("worktree", "")
+    steering_count = payload.get("steering_count", 0)
+
+    logger.info(
+        "Steering node %s run %s (steering_count=%d, prev_session=%s)",
+        node_id, run_id, steering_count, prev_session_id,
+    )
+
+    # 1. Load previous session to get conversation_id
+    with db_session() as s:
+        prev_ns = s.query(NodeSessionModel).filter(NodeSessionModel.id == prev_session_id).first()
+        if prev_ns is None:
+            logger.error("Previous session %s not found — cannot steer", prev_session_id)
+            return
+        conv_id = prev_ns.aionui_conversation_id
+        if not conv_id:
+            logger.error("Previous session %s has no aionui_conversation_id — cannot steer", prev_session_id)
+            return
+
+        # Extract values needed outside the session before it closes
+        prev_attempt = prev_ns.attempt
+        prev_team_id = prev_ns.aionui_team_id
+
+        # Close previous session with gate_outcome='steer'
+        s.query(NodeSessionModel).filter(NodeSessionModel.id == prev_session_id).update({
+            NodeSessionModel.gate_outcome: "steer",
+            NodeSessionModel.finished_at: func.now(),
+        })
+        s.commit()
+
+    # 2. Load plan and find the node definition
+    plan_id = payload.get("plan_id", "")
+    if not plan_id:
+        from shared.models import Run as RunModel
+        with db_session() as s:
+            run_row = s.query(RunModel).filter(RunModel.id == run_id).first()
+            plan_id = run_row.plan_id if run_row else run_id
+    plan_data = get_plan(plan_id)
+    if not plan_data:
+        logger.error("Plan %s not found for steering", plan_id)
+        return
+    dag = plan_data.get("dag", plan_data.get("nodes", []))
+    node_data = next((n for n in dag if n.get("id") == node_id), None)
+    if not node_data:
+        logger.error("Node %s not found in plan %s", node_id, plan_id)
+        return
+
+    # 3. Load feedback and build steering brief
+    feedback = {}
+    with db_session() as s:
+        fb_ns = s.query(NodeSessionModel).filter(NodeSessionModel.id == feedback_ref).first()
+        if fb_ns is not None and fb_ns.feedback is not None:
+            raw = fb_ns.feedback
+            if isinstance(raw, dict):
+                feedback = raw
+    original_task = (node_data.get("task") or {}).get("text", "")
+    success_criterion = (node_data.get("success") or {}).get("text", "")
+    brief = build_steering_brief(original_task, success_criterion, feedback, steering_count)
+    logger.info("Built steering brief for node %s (steering attempt %d)", node_id, steering_count + 1)
+
+    # 4. Create new node_session with steering_count+1 and same conversation_id
+    new_ns_id = f"ns_{uuid.uuid4().hex[:8]}"
+    backend = node_data.get("backend", "opencode")
+    with db_session() as s:
+        new_ns = NodeSessionModel(
+            id=new_ns_id,
+            run_id=run_id,
+            node_id=node_id,
+            backend=backend,
+            verdict="running",
+            worktree=worktree,
+            attempt=prev_attempt,
+            steering_count=steering_count + 1,
+            remediation_of=prev_session_id,
+            aionui_conversation_id=conv_id,
+            aionui_team_id=prev_team_id,
+            feedback=feedback,
+        )
+        s.add(new_ns)
+        s.commit()
+        logger.info(
+            "Created steering session %s (steering_count=%d) reusing conv=%s",
+            new_ns_id, steering_count + 1, conv_id,
+        )
+
+    # 5. Cancel any running turn so AionUi doesn't reject with 409
+    aionui = AionUiClient(_AIONUI_HOST)
+    aionui.cancel_conversation(conv_id)
+
+    # 6. Send steering brief to the existing conversation
+    team_id = prev_team_id
+    try:
+        if team_id:
+            team_info = aionui.get_team(team_id)
+            slot_id = ""
+            for agent in team_info.get("agents", []):
+                if agent.get("conversation_id") == conv_id:
+                    slot_id = agent.get("slot_id", "")
+                    break
+            if slot_id:
+                aionui.send_team_message(team_id, slot_id, brief)
+            else:
+                logger.warning(
+                    "No slot_id for conv %s in team %s — fallback to direct message",
+                    conv_id, team_id,
+                )
+                aionui.send_message(conv_id, brief)
+        else:
+            aionui.send_message(conv_id, brief)
+        logger.info("Sent steering brief to conv=%s for session %s", conv_id, new_ns_id)
+    except Exception:
+        logger.exception("Failed to send steering brief to conv=%s", conv_id)
+        return
+
+    # 6. Emit NodeSpawned so watcher-svc picks up the new session
+    with db_session() as s:
+        emit(s, NodeSpawned(
+            node_session_id=new_ns_id,
+            backend=backend,
+            backend_ref=conv_id,
+            worktree=worktree,
+            ts=time.time(),
+        ))
+        s.commit()
+
+    logger.info(
+        "Steering complete for node %s run %s — session %s reusing conv=%s",
+        node_id, run_id, new_ns_id, conv_id,
+    )
 
 
 def _handle_node_remediate(session, payload):
@@ -401,7 +590,13 @@ def _handle_node_remediate(session, payload):
 
     run_id = payload["run_id"]
     node_id = payload["node_id"]
-    plan_id = payload.get("plan_id", run_id)
+    plan_id = payload.get("plan_id")
+    if not plan_id:
+        from shared.models import Run as RunModel
+        from shared.db import session as db_session
+        with db_session() as s:
+            run_row = s.query(RunModel).filter(RunModel.id == run_id).first()
+            plan_id = run_row.plan_id if run_row else run_id
     prev_session_id = payload.get("prev_session_id", "")
     attempt_next = payload.get("attempt_next", 1)
     feedback_ref = payload.get("feedback_ref", prev_session_id)
@@ -489,13 +684,25 @@ def _handle_node_remediate(session, payload):
     node_with_brief = dict(node_data)
     node_with_brief["task"] = {"text": brief}
 
+    # Extract members from the original plan node so spawn_node_team resolves
+    # the correct agent_config (e.g. python-development-fastapi-pro) instead
+    # of falling back to "opencode:backend-executor".  The node dict has no
+    # top-level agent_config key — it lives inside members[].agent_config.
+    members_raw = node_data.get("members", [node_data.get("agent_config", "opencode:backend-executor")])
+    if not isinstance(members_raw, list):
+        members_raw = [str(members_raw)]
+
     aionui = AionUiClient(_AIONUI_HOST)
     wm = WorktreeManager(_WORKSPACE_ROOT)
 
     # Ensure spawn reuses existing worktree (fix-forward, do NOT create new)
     plan_data["worktree_path"] = worktree
 
-    # 6. Spawn fix-forward remediation team
+    from backend.builtins.handoff import build_node_context as _build_dep_context
+    dep_ids = node_data.get("depends_on", [])
+    dep_context = _build_dep_context(worktree, dep_ids) if worktree and dep_ids else ""
+
+    # 6. Spawn fix-forward remediation team (same members+config as original node)
     try:
         conv_map = spawn_node_team(
             node=node_with_brief,
@@ -503,6 +710,10 @@ def _handle_node_remediate(session, payload):
             session_id=run_id,
             aionui=aionui,
             wm=wm,
+            members=members_raw,
+            dep_context=dep_context,
+            workspace_root=_WORKSPACE_ROOT,
+            auto_approve=plan_data.get("auto_approve", True),
         )
     except Exception:
         logger.exception("Failed to spawn remediation for node %s run %s", node_id, run_id)
@@ -552,6 +763,8 @@ def _executor_dispatcher(session, payload):
     """
     if "gate_outcome" in payload:
         _handle_gate_evaluated(session, payload)
+    elif "steering_count" in payload and "session_id" in payload:
+        _handle_node_steer(session, payload)
     elif "node_id" in payload and "attempt_next" in payload:
         _handle_node_remediate(session, payload)
     elif "plan_id" in payload:

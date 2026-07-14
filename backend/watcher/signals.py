@@ -68,8 +68,12 @@ def _run_git_diff(worktree_path: str | None) -> str:
     if not worktree_path:
         return ""
     try:
+        from contracts.paths import git_pathspec_excludes
+
+        excludes = git_pathspec_excludes()
+        cmd = ["git", "diff", "--stat", "--", "."] + excludes
         result = subprocess.run(
-            ["git", "diff", "--stat"],
+            cmd,
             cwd=worktree_path,
             capture_output=True,
             text=True,

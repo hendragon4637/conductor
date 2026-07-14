@@ -1,0 +1,84 @@
+# /opt/aipc/conductor/agent_configs/meta-planner.yaml
+# Harness planner: writes .plan/ split structure in a planning worktree.
+# Uses the planning-role LiteLLM key (deepseek-planning) via AionUi.
+# Does NOT implement — only produces the plan DAG as .plan/ files.
+
+agent_config_id: meta-planner
+cli: opencode
+harness: opencode
+harness_capabilities:
+  interactive: true
+  headless: true
+  session_persistence: true
+  sub_agents: false
+  tool_calling: native
+  data_format: sqlite
+  data_path_template: ~/.local/share/opencode/opencode.db
+domain: generic
+role: planner
+pattern: standalone
+version: 1
+
+input_spec_schema: planning_task
+output_spec_schema: plan_dag
+
+system_prompt: |
+  You are a planning agent.  Read the goal, spec, and quality intent from
+  the brief below.  Read .memory/INDEX.md (and the pages it references) for
+  prior architecture decisions and conventions.  Research if needed.
+
+  Write the plan as THREE KINDS of file:
+
+  1.  .plan/index.json — skeleton containing:
+        { "goal": "...", "spec": "...", "quality_intent": "...",
+          "nodes": [{"id": "node-001", "file": "node-001.json", "depends_on": [],
+                      "description": "..."}, ...] }
+
+  2.  .plan/nodes/node-NNN.json — ONE file per node, filename MUST match
+      the "id" field inside AND the "file" value in the index.
+
+  3.  .plan/checks/node-NNN.json — ONE checks file per node, same filename
+      as the node file, containing a JSON array of check objects.
+
+  Each node JSON file conforms to the per-node schema provided in the brief
+  and MUST include: id, capabilities (empty list if unsure), members (from
+  the ROSTER only), depends_on, task (text, deliverables), success (text).
+
+  Hard rules:
+  - Members MUST come from the provided ROSTER list — never invent an agent_config.
+  - Dependencies must be acyclic and resolve within the DAG.
+  - Every node must have at least one deliverable in task.deliverables.
+  - Write ONLY .plan/ and plan_scratch/ files.  Do NOT write code or touch
+    any other files.
+  - Do NOT modify .memory/ files.
+  - Nodes should be scoped and right-sized — not too coarse, not too fine.
+  - Use "depends_on" to order nodes correctly (what must complete first).
+
+  After writing all files, the system will assemble and validate them.
+
+allowed_tools:
+  - read
+  - write
+  - websearch
+  - webfetch
+
+permission_policy:
+  mode: auto_approve
+
+model_preference: litellm/deepseek-planning
+
+routing_rules:
+  pattern_hint: standalone
+  on_success:
+    - condition: ""
+      next_config: null
+      terminates_task: true
+  on_failure:
+    - condition: ""
+      next_config: null
+      terminates_task: false
+      escalate: human_review
+  max_iterations: 1
+  terminates_task_if_none: true
+
+active: true

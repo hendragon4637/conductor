@@ -100,7 +100,7 @@ def dedupe_key(routing_key: str, payload: dict) -> str:
 
     Uses the first available ID field + routing key.
     """
-    for field in ("node_session_id", "run_id", "plan_id", "agent_config_id"):
+    for field in ("prev_session_id", "node_session_id", "session_id", "run_id", "plan_id", "agent_config_id"):
         val = payload.get(field)
         if val:
             return f"{val}:{routing_key}"

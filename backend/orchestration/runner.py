@@ -75,7 +75,7 @@ def launch_run(
     _ensure_project_and_session(_db_url, project_id, session_id, plan_data.get("description", ""))
 
     node_id = first.get("id") or first.get("node_id")
-    backend_key = first.get("backend")
+    backend_key = _resolve_backend(first)
     if not backend_key:
         raise ValueError(f"Node {node_id} has no backend — decompose must set it")
     is_self_orch = is_self_orchestrating(backend_key)

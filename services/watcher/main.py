@@ -57,6 +57,7 @@ class SessionTrack:
         self.node_session_id = node_session_id
         self.worktree = worktree
         self.saw_change: bool = False
+        self.saw_fs_change: bool = False  # file-only changes (planning gate)
         self.last_git_sig: str | None = None
         self.last_query_sig: str | None = None
         self.last_change_ts: float | None = None
@@ -248,8 +249,9 @@ def _watch_loop() -> None:
                     continue
 
                 raw = src.query(ns)
+                v_signal = derive_from_signals(raw, time.time())
                 qsig = {
-                    "latest_sig": raw.detail.get("query_sig", ""),
+                    "latest_sig": raw.detail.get("latest_sig", ""),
                     "have_data": raw.terminal or bool(raw.last_activity_ts),
                     "any_error": raw.any_error,
                     "error_codes": raw.detail.get("error_codes", []),
@@ -261,6 +263,7 @@ def _watch_loop() -> None:
 
                 if fs_changed:
                     st.last_git_sig = git_sig
+                    st.saw_fs_change = True
                 if query_changed:
                     st.last_query_sig = query_sig
 
@@ -271,16 +274,36 @@ def _watch_loop() -> None:
                 else:
                     st.unchanged_cycles += 1
 
+                role = getattr(ns, "role", "execution")
                 quiet_for = (now - st.last_change_ts) if st.last_change_ts else None
                 stable_polls = st.unchanged_cycles >= STABLE_POLLS
-                terminal = bool(
-                    stable_polls
-                    and quiet_for is not None
-                    and quiet_for >= SETTLE_S
-                    and not fs_changed
-                    and not query_changed
-                    and (st.saw_change or qsig.get("have_data", False))
-                )
+
+                if role == "planning":
+                    # Planning: use derive_verdict as gate against premature terminal.
+                    # Agent may explore/think for long periods without writing files.
+                    # Only terminal via settle if files were written (saw_fs_change),
+                    # or if the conversation is truly stalled/errored via derive_verdict.
+                    if v_signal in ("failed", "crashed", "quota"):
+                        terminal = True
+                    elif v_signal == "stalled":
+                        terminal = True
+                    elif (v_signal == "running" and st.saw_fs_change
+                          and stable_polls and quiet_for is not None
+                          and quiet_for >= SETTLE_S
+                          and not fs_changed and not query_changed):
+                        terminal = True
+                    else:
+                        terminal = False
+                else:
+                    # Execution: current settle-time logic (unchanged)
+                    terminal = bool(
+                        stable_polls
+                        and quiet_for is not None
+                        and quiet_for >= SETTLE_S
+                        and not fs_changed
+                        and not query_changed
+                        and (st.saw_change or qsig.get("have_data", False))
+                    )
 
                 last_activity = (qsig.get("last_activity_ms", 0) / 1000.0) or st.last_change_ts or st.started_ts
 
@@ -299,6 +322,9 @@ def _watch_loop() -> None:
                     "unchanged_cycles": st.unchanged_cycles,
                     "quiet_for": quiet_for,
                     "stable_polls": stable_polls,
+                    "v_signal": v_signal,
+                    "role": role,
+                    "saw_fs_change": st.saw_fs_change,
                 }
 
                 # If not terminal and no error, skip to next
@@ -312,7 +338,10 @@ def _watch_loop() -> None:
                     # The signal source may still report terminal=False (no
                     # AionUi conversation), but the watcher's own settle-time
                     # logic is the authoritative terminal detector.
-                    verdict_str = "done_no_change"
+                    if role == "planning" and st.saw_fs_change:
+                        verdict_str = "done"
+                    else:
+                        verdict_str = "done_no_change"
                 else:
                     verdict_str = "failed"
 
