@@ -105,13 +105,31 @@ def _build_check_from_golden(item: dict) -> Check:
     )
 
 
+def _resolve_active_rubric_id(node_type: str) -> str:
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return ""
+    try:
+        import psycopg
+        with psycopg.connect(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM judge_rubrics WHERE capability = %s AND active = TRUE LIMIT 1",
+                    (node_type,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else ""
+    except Exception:
+        return ""
+
+
 def _upsert_judge_trust(
     node_type: str,
     agreement: float,
     mae: float,
     trusted: bool,
+    rubric_id: str = "",
 ) -> None:
-    """Write calibration results to the judge_trust table."""
     url = os.environ.get("DATABASE_URL", "")
     if not url:
         logger.warning("No DATABASE_URL — can't persist judge_trust")
@@ -123,19 +141,20 @@ def _upsert_judge_trust(
         with psycopg.connect(url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO judge_trust (node_type, agreement, mae, trusted, calibrated_at)
-                       VALUES (%s, %s, %s, %s, NOW())
+                    """INSERT INTO judge_trust (node_type, agreement, mae, trusted, rubric_id, calibrated_at)
+                       VALUES (%s, %s, %s, %s, %s, NOW())
                        ON CONFLICT (node_type) DO UPDATE SET
                          agreement = EXCLUDED.agreement,
                          mae = EXCLUDED.mae,
                          trusted = EXCLUDED.trusted,
+                         rubric_id = EXCLUDED.rubric_id,
                          calibrated_at = NOW()""",
-                    (node_type, agreement, mae, trusted),
+                    (node_type, agreement, mae, trusted, rubric_id),
                 )
             conn.commit()
         logger.info(
-            "judge_trust updated for %s: agreement=%.4f mae=%.4f trusted=%s",
-            node_type, agreement, mae, trusted,
+            "judge_trust updated for %s: agreement=%.4f mae=%.4f trusted=%s rubric_id=%s",
+            node_type, agreement, mae, trusted, rubric_id,
         )
     except Exception as exc:
         logger.exception("Failed to upsert judge_trust for %s: %s", node_type, exc)
@@ -189,10 +208,12 @@ def calibrate(
         # Write artifact_blob to a temp directory so collect_artifact() can read it
         tmpdir = None
         try:
-            tmpdir = tempfile.mkdtemp(prefix=f"cal-{item['id'][:12]}-")
+            tmpdir = tempfile.mkdtemp(prefix=f"cal-{str(item['id'])[:12]}-")
             artifact_path = Path(tmpdir) / "artifact.py"
             artifact_path.write_text(artifact_blob or "", encoding="utf-8")
-            result = run_l2(checks=[check], worktree=tmpdir, trace_id=None)
+            result = run_l2(checks=[check], worktree=tmpdir, trace_id=None,
+                            node_context={"deliverables": ["artifact.py"]},
+                            capability=node_type)
             judge_score = result.score
         except Exception as exc:
             logger.warning("Judge call failed for golden item %s: %s", item["id"], exc)
@@ -228,6 +249,8 @@ def calibrate(
     agreement = agreements / len(comparisons)
     trusted = (agreement >= agreement_threshold and mae <= mae_threshold)
 
+    active_rubric_id = _resolve_active_rubric_id(node_type)
+
     report = CalibrationReport(
         node_type=node_type,
         total=len(comparisons),
@@ -237,7 +260,7 @@ def calibrate(
         items=comparisons,
     )
 
-    _upsert_judge_trust(node_type, report.agreement, report.mae, report.trusted)
+    _upsert_judge_trust(node_type, report.agreement, report.mae, report.trusted, rubric_id=active_rubric_id)
 
     # Log calibration metrics to Langfuse (non-blocking)
     try:
@@ -304,13 +327,11 @@ def count_golden(node_type: str, split: str | None = None) -> int:
 
 
 def get_judge_trust(node_type: str) -> dict[str, Any]:
-    """Load judge_trust for a node_type.
-
-    Returns dict with keys: node_type, agreement, mae, trusted, calibrated_at.
-    Returns all-defaults dict if no row exists.
-    """
     url = os.environ.get("DATABASE_URL", "")
-    default = {"node_type": node_type, "agreement": 0.0, "mae": 1.0, "trusted": False, "calibrated_at": None}
+    default = {
+        "node_type": node_type, "agreement": 0.0, "mae": 1.0,
+        "trusted": False, "calibrated_at": None, "rubric_id": None,
+    }
     if not url:
         return default
     try:
@@ -319,7 +340,7 @@ def get_judge_trust(node_type: str) -> dict[str, Any]:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT node_type, agreement, mae, trusted, calibrated_at FROM judge_trust WHERE node_type = %s",
+                    "SELECT node_type, agreement, mae, trusted, calibrated_at, rubric_id FROM judge_trust WHERE node_type = %s",
                     (node_type,),
                 )
                 row = cur.fetchone()

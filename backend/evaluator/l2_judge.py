@@ -59,8 +59,71 @@ L2_RUBRIC_ANCHORS = [
 ]
 
 
+# ── Rubric config from judge_rubrics table ────────────────────────────────
 
-def build_dim_metric(dim_id: str, rubric_question: str, steps: list[str] | None = None) -> GEval:
+def load_rubric_config(capability: str) -> dict | None:
+    """Load the active rubric config for a capability from judge_rubrics.
+
+    Returns the dims dict (with ``anchors``, ``feedback_contract``, ``bundles``,
+    ``dimensions``) or None if no active rubric exists.
+    """
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return None
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        with psycopg.connect(url, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT dims FROM judge_rubrics WHERE capability = %s AND active = TRUE LIMIT 1",
+                    (capability,),
+                )
+                row = cur.fetchone()
+                return dict(row["dims"]) if row else None
+    except Exception:
+        return None
+
+
+def _dims_to_rubric_anchors(dims: dict) -> list[Rubric]:
+    anchors_raw = dims.get("anchors", L2_RUBRIC_ANCHORS_SERIAL)
+    return [
+        Rubric(score_range=a["score_range"], expected_outcome=a["expected_outcome"])
+        for a in anchors_raw
+    ]
+
+
+def _get_feedback_contract(dims: dict | None) -> str:
+    if dims and dims.get("feedback_contract"):
+        return dims["feedback_contract"]
+    return FEEDBACK_CONTRACT
+
+
+def _get_dim_config(dims: dict | None, dim_id: str) -> dict | None:
+    if not dims:
+        return None
+    for d in dims.get("dimensions", []):
+        if d.get("id") == dim_id:
+            return d
+    return None
+
+
+# Serialisable form used for DB round-trip (Rubric objects are not JSON-serialisable)
+L2_RUBRIC_ANCHORS_SERIAL = [
+    {"score_range": [0, 2], "expected_outcome": "deliverable missing or core behavior absent"},
+    {"score_range": [3, 5], "expected_outcome": "deliverable exists but the criterion's core behavior is wrong"},
+    {"score_range": [6, 8], "expected_outcome": "criterion met for the main path; edge cases unhandled"},
+    {"score_range": [9, 10], "expected_outcome": "criterion fully met incl. edge cases"},
+]
+
+
+def build_dim_metric(
+    dim_id: str,
+    rubric_question: str,
+    steps: list[str] | None = None,
+    rubric_anchors: list[Rubric] | None = None,
+    feedback_contract: str | None = None,
+) -> GEval:
     """Build a single GEval metric with explicit steps + rubric anchors.
 
     ``evaluation_steps`` replaces GEval's auto-generated vague steps;
@@ -70,15 +133,20 @@ def build_dim_metric(dim_id: str, rubric_question: str, steps: list[str] | None 
     If ``steps`` is provided, it replaces the default steps. This allows
     acceptance criteria from the shared contract to drive the judge's
     evaluation focus.
+
+    If ``rubric_anchors`` or ``feedback_contract`` are provided, they override
+    the module-level defaults — used when scoring under a versioned rubric
+    from ``judge_rubrics``.
     """
+    fc = feedback_contract or FEEDBACK_CONTRACT
     return GEval(
         name=dim_id,
         evaluation_steps=steps or [
             f"Evaluate the artifact against this criterion: {rubric_question}",
             "Identify the exact files/functions relevant to the criterion; check their actual content",
-            FEEDBACK_CONTRACT,
+            fc,
         ],
-        rubric=L2_RUBRIC_ANCHORS,
+        rubric=rubric_anchors or L2_RUBRIC_ANCHORS,
         evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
         model=JUDGE_MODEL,
         threshold=GEVAL_THRESHOLD,
@@ -415,16 +483,11 @@ def _extract_json(text: str) -> dict | None:
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-def _build_eval_steps_from_criterion(criterion: Check, node_context: dict | None = None) -> list[str]:
-    """Build GEval evaluation steps, deriving from acceptance criteria when available.
-
-    If ``node_context`` carries ``acceptance_criteria``, inject
-    criterion-specific ``where`` and ``how_verified`` into the steps.
-    """
+def _build_eval_steps_from_criterion(criterion: Check, node_context: dict | None = None, feedback_contract: str | None = None) -> list[str]:
     steps = [
         f"Evaluate the artifact against this criterion: {criterion.rubric_item or criterion.criterion}",
         "Identify the exact files/functions relevant to the criterion; check their actual content",
-        FEEDBACK_CONTRACT,
+        feedback_contract or FEEDBACK_CONTRACT,
     ]
     if node_context:
         ac_list = node_context.get("acceptance_criteria", []) or node_context.get("criteria", [])
@@ -446,6 +509,8 @@ def run_l2(
     trace_id: str | None = None,
     llm_call: Callable[[str], str] | None = None,
     node_context: dict | None = None,
+    capability: str | None = None,
+    rubric_dims: dict | None = None,
 ) -> L2Result:
     """Run rubric judge for all rubric checks on a node.
 
@@ -460,6 +525,13 @@ def run_l2(
         llm_call: Legacy override — if provided, uses raw LLM call instead of GEval.
         node_context: Optional node dict with ``acceptance_criteria`` for deriving
             evaluation steps from the shared contract.
+        capability: Optional capability name (e.g. ``"executor"``, ``"backend_api"``).
+            When provided (and ``rubric_dims`` is not), the active rubric config from
+            ``judge_rubrics`` is loaded and used for scoring. Falls back to hardcoded
+            defaults if no active rubric exists.
+        rubric_dims: Optional pre-loaded rubric dimensions dict. When provided,
+            takes priority over ``capability``. Used by the judge ratchet to score
+            with a candidate rubric during two-split validation.
 
     Returns:
         ``L2Result`` with weighted score and per-item judgments.
@@ -490,26 +562,38 @@ def run_l2(
             oversize=True,
         )
 
+    # Load rubric config from judge_rubrics if capability is known
+    if rubric_dims is None and capability:
+        rubric_dims = load_rubric_config(capability)
+    if rubric_dims:
+        active_anchors = _dims_to_rubric_anchors(rubric_dims)
+        active_fc = rubric_dims.get("feedback_contract", FEEDBACK_CONTRACT)
+        rubric_source = f"judge_rubrics/{capability}"
+    else:
+        active_anchors = L2_RUBRIC_ANCHORS
+        active_fc = FEEDBACK_CONTRACT
+        rubric_source = "hardcoded"
+
     judgments: list[Judgment] = []
     total_weight = 0.0
     score_sum = 0.0
 
     deepeval_timeout = os.environ.get("DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE", "not set")
     artifact_chars = len(artifact)
-    print(f"[L2] GEval config: model={JUDGE_MODEL.model} model_base={JUDGE_MODEL.base_url} threshold={GEVAL_THRESHOLD} deepeval_timeout={deepeval_timeout}s artifact_size={artifact_chars}chars", flush=True)
+    print(f"[L2] GEval config: model={JUDGE_MODEL.model} model_base={JUDGE_MODEL.base_url} threshold={GEVAL_THRESHOLD} deepeval_timeout={deepeval_timeout}s artifact_size={artifact_chars}chars rubric_source={rubric_source}", flush=True)
 
     for c in rubric_checks:
         question = getattr(c, "rubric_item", None) or c.criterion
         print(f"[L2] rubric check: id={c.id} weight={getattr(c, 'weight', 1.0)} question={question}", flush=True)
 
         # Build eval steps from acceptance criteria if available
-        steps = _build_eval_steps_from_criterion(c, node_context)
+        steps = _build_eval_steps_from_criterion(c, node_context, feedback_contract=active_fc)
 
         last_error: str | None = None
         judgment = None
         for attempt in range(1 + _MAX_GEVAL_RETRIES):
             try:
-                metric = build_dim_metric(c.id, question, steps=steps)
+                metric = build_dim_metric(c.id, question, steps=steps, rubric_anchors=active_anchors, feedback_contract=active_fc)
                 test_case = LLMTestCase(
                     input=question,
                     actual_output=artifact,

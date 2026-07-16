@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS parent_version INTEGER;
+
+COMMIT;

@@ -33,6 +33,7 @@ LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://localhost:4000/v1")
 # Role name → env var that holds the LiteLLM virtual key for that role
 ROLE_KEY_ENV: dict[str, str] = {
     "meta_planner": "LITELLM_KEY_PLANNING",
+    "planning": "LITELLM_KEY_PLANNING",
     "plan_evaluator": "LITELLM_KEY_PLANNING",
     "l2_judge": "LITELLM_KEY_EVALUATION",
     "l3_jury": "LITELLM_KEY_EVALUATION",
@@ -44,6 +45,7 @@ ROLE_KEY_ENV: dict[str, str] = {
 # Role name → LiteLLM model group name (defined in config.yaml)
 ROLE_MODEL: dict[str, str] = {
     "meta_planner": "deepseek-planning",
+    "planning": "deepseek-planning",
     "plan_evaluator": "deepseek-planning",
     "l2_judge": "judge",
     "l3_jury": "judge",

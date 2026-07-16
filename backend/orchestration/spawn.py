@@ -461,6 +461,24 @@ def spawn_node_team(
         wt = Path(wt_path)
         plan["worktree_path"] = str(wt)
 
+        # Capture master_commit for the run (fires once per run — first node creates worktree)
+        try:
+            import subprocess as _sp
+            _proj_dir = Path(wsr) / project_id
+            _res = _sp.run(
+                ["git", "-C", str(_proj_dir), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=15, check=True,
+            )
+            _master_commit = _res.stdout.strip()
+            from backend.db.queries import conn as _db_conn
+            with _db_conn() as _c:
+                _c.execute(
+                    "UPDATE runs SET master_commit = %s WHERE id = %s",
+                    (_master_commit, session_id),
+                )
+        except Exception:
+            pass
+
     # Install capability-scoped skills into worktree (pre-spawn)
     try:
         engine = _make_engine(_db_url)

@@ -171,12 +171,17 @@ def _on_node_observed_planning(session, payload):
         if dec.action == "ratify":
             # Persist the DAG
             _persist_harness_dag(plan_id, dag_list)
+            planning_run_id = f"plan_{plan_id}"
             with db_conn() as dbc:
                 dbc.execute(
                     "UPDATE plans SET planning_status = 'gated_ok' WHERE plan_id = %s",
                     (plan_id,),
                 )
-            logger.info("Plan %s ratified via harness", plan_id)
+                dbc.execute(
+                    "UPDATE runs SET state = 'done' WHERE id = %s AND state = 'planning'",
+                    (planning_run_id,),
+                )
+            logger.info("Plan %s ratified via harness (run %s done)", plan_id, planning_run_id)
             return
 
         errs = [dec.feedback_text]
@@ -197,12 +202,17 @@ def _on_node_observed_planning(session, payload):
 
     if attempts >= MAX_PLANNING_ATTEMPTS:
         on_planning_failed(worktree, project_id, "/opt/aipc/conductor/workspace")
+        planning_run_id = f"plan_{plan_id}"
         with db_conn() as dbc:
             dbc.execute(
                 "UPDATE plans SET planning_status = 'failed', planning_worktree = NULL WHERE plan_id = %s",
                 (plan_id,),
             )
-        logger.warning("Planning failed for %s after %d attempts", plan_id, attempts)
+            dbc.execute(
+                "UPDATE runs SET state = 'failed' WHERE id = %s AND state = 'planning'",
+                (planning_run_id,),
+            )
+        logger.warning("Planning failed for %s after %d attempts (run %s failed)", plan_id, attempts, planning_run_id)
         from shared.outbox import emit as outbox_emit
         outbox_emit(session, RunFailed(
             run_id=None, reason=f"planning failed: {errs[:3]}", ts=time.time(),

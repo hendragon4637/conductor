@@ -416,6 +416,8 @@ def _build_static_brief() -> str:
         "Each node's ``capabilities`` list MUST be a subset of the assigned member's "
         "declared capabilities (shown in the ROSTER).",
         "Write ONLY .plan/ and plan_scratch/ files. Do NOT write code or touch other files.",
+        "Node IDs MUST use the ``node-NNN`` format with zero-padded numbers (e.g. ``node-001``, ``node-002``). "
+        "Do NOT use descriptive or arbitrary IDs — the deterministic assembler relies on ``node-NNN`` naming.",
         "You MUST use the ``write`` tool — do NOT output file contents in your message.",
     ]
     for rule in rules:
@@ -472,6 +474,11 @@ def planning_brief(
     )
 
     return f"""GOAL: {meta_goal.get('goal', '')}
+
+STRICT DIRECTIVE — You are a PLAN ARCHITECT.
+Your ONLY output is .plan/ files (index.json, nodes/*, checks/*) that strictly serve this GOAL.
+Do NOT write any implementation code, source files, tests, or configuration.
+Follow the schema and rules in .conductor/NODE_BRIEF.md exactly — the deterministic evaluator checks your .plan/ structure, not the goal's domain.
 
 SPEC: {meta_goal.get('spec', '')}
 

@@ -1,0 +1,13 @@
+BEGIN;
+
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS mutation_id TEXT;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS capability TEXT;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS goal_kind TEXT;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS control_config TEXT;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS candidate_config TEXT;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS heldout_goals JSONB;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS control_results JSONB;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS candidate_results JSONB;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+
+COMMIT;

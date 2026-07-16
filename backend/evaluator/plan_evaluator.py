@@ -359,6 +359,21 @@ def run_plan_l1(dag: list[dict]) -> PlanL1Result:
         nid = n.get("id", f"node-{i}")
         missing: list[str] = []
 
+        # Validate node ID naming convention: must follow "node-NNN" pattern
+        import re as _re
+        if not _re.match(r"^node-\d+$", nid):
+            all_ok = False
+            checks.append({
+                "check": f"node_{nid}_naming",
+                "passed": False,
+                "detail": (
+                    f"Node ID '{nid}' does not follow the required naming convention. "
+                    "Node IDs MUST be in the format 'node-NNN' with zero-padded numbers "
+                    "(e.g. 'node-001', 'node-002', 'node-003'). "
+                    f"Rename '{nid}' to a numbered identifier like 'node-00X'."
+                ),
+            })
+
         if not n.get("members"):
             missing.append("members")
         if not n.get("task") or not n.get("task", {}).get("text"):

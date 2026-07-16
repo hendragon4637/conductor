@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from backend.evaluator.l2_judge import run_l2, L2Result
-from backend.evaluator.l3_calibrate import count_golden, get_judge_trust
+from backend.evaluator.l3_calibrate import count_golden, get_judge_trust, _resolve_active_rubric_id
 from backend.evaluator.schema import Check
+from backend.evaluator.ratchet_lock import acquire_ratchet_lock, release_ratchet_lock, assert_no_ratchet_lock
 
 logger = logging.getLogger(__name__)
 
@@ -656,6 +657,8 @@ def _record_experiment(
     candidate: HeldoutResult,
     decision: str,
     patterns: list[Pattern],
+    judge_model: str = "",
+    rubric_id: str = "",
 ) -> str:
     """Write experiment result to the ``experiments`` table.
 
@@ -673,8 +676,9 @@ def _record_experiment(
                     """INSERT INTO experiments
                        (experiment_id, agent_config_id, target,
                         baseline_ref, candidate_ref,
-                        baseline_score, candidate_score, decision)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                        baseline_score, candidate_score, decision,
+                        judge_model, rubric_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         experiment_id,
                         agent_config_id,
@@ -684,6 +688,8 @@ def _record_experiment(
                         baseline,
                         candidate.mean,
                         decision,
+                        judge_model,
+                        rubric_id,
                     ),
                 )
             conn.commit()
@@ -845,19 +851,39 @@ def run_experiment(
     decision = "keep" if kept else "revert"
 
     if not dry_run:
-        exp_id = _record_experiment(
-            agent_config_id, mutation, baseline_mean, candidate, decision, patterns,
-        )
-        if kept:
-            global_scope = _is_global_scope(agent_config_id)
-            if global_scope:
-                logger.info(
-                    "Global-scope agent %s — mutation queued for human approval",
-                    agent_config_id,
-                )
-            else:
-                _apply_mutation(agent_config_id, mutation)
-            _record_mutation(agent_config_id, mutation, baseline_mean, candidate.mean, kept, exp_id)
+        assert_no_ratchet_lock(node_type, "main")
+        if not acquire_ratchet_lock(node_type, "main"):
+            logger.warning("REFUSED: cannot acquire ratchet lock for %s", node_type)
+            return ExperimentResult(
+                agent_config_id=agent_config_id,
+                node_type=node_type,
+                baseline_mean=baseline_mean,
+                candidate_mean=candidate.mean,
+                kept=False,
+                mutation=mutation,
+                patterns=patterns,
+                note="Another ratchet is active on this capability",
+            )
+
+        try:
+            judge_model = os.environ.get("JUDGE_MODEL_ID", "gpt-oss-120b")
+            rubric_id = _resolve_active_rubric_id(node_type)
+            exp_id = _record_experiment(
+                agent_config_id, mutation, baseline_mean, candidate, decision, patterns,
+                judge_model=judge_model, rubric_id=rubric_id,
+            )
+            if kept:
+                global_scope = _is_global_scope(agent_config_id)
+                if global_scope:
+                    logger.info(
+                        "Global-scope agent %s — mutation queued for human approval",
+                        agent_config_id,
+                    )
+                else:
+                    _apply_mutation(agent_config_id, mutation)
+                _record_mutation(agent_config_id, mutation, baseline_mean, candidate.mean, kept, exp_id)
+        finally:
+            release_ratchet_lock(node_type, "main")
 
     note_parts = []
     if kept:

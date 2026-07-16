@@ -292,6 +292,7 @@
 - `retry_brief()` calls thin `planning_brief()` + prepends ✓/FIX block — never regenerates static content
 - `_schema_text()` is called once and cached; duplicate calls have been removed
 - `_build_static_brief()` in `harness_worktree.py` composes the static brief from DB sys_prompt + role + steps + rules + schemas + roster
+- `save_plan()` in `backend/planning/store.py` auto-creates a project row (`INSERT INTO projects ... ON CONFLICT DO NOTHING`) before persisting the plan — callers (``/goal``, ``/clarify``, ``/ratify``) never need to pre-seed projects
 
 ## Run constraint (project_id)
 - Every run has a required `project_id` column (FK to plans.project_id, NOT NULL)

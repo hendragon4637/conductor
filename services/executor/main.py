@@ -175,6 +175,25 @@ def _tag_worktree_commit(wt: str, node_id: str | None) -> None:
         logger.warning("Failed to tag %s: %s", tag, exc.stderr)
 
 
+def _persist_commit_tag(run_id: str, node_id: str | None, node_session_id: str) -> None:
+    """Write the git tag name back to node_sessions.commit_tag so the tag
+    the executor just created (e.g. ``node-004``) is traceable via the DB."""
+    if not node_id or not node_session_id:
+        return
+    from shared.models import NodeSession as _NSModel
+    from shared.db import session as _db_session
+    tag = f"node-{node_id}"
+    try:
+        with _db_session() as s:
+            s.query(_NSModel).filter(_NSModel.id == node_session_id).update(
+                {"commit_tag": tag}
+            )
+            s.commit()
+        logger.info("Persisted commit_tag=%s for node_session %s", tag, node_session_id)
+    except Exception as exc:
+        logger.warning("Failed to persist commit_tag=%s: %s", tag, exc)
+
+
 def _finalize_or_advance(run_id: str, payload: dict[str, object]) -> None:
     """Check DAG for more ready nodes; spawn next or finalize as success.
 
@@ -389,12 +408,16 @@ def _handle_gate_evaluated(session, payload):
         logger.info("Gate passed for run %s (%s) -- committing + checking DAG", run_id, gate_outcome)
         print(f"[PRINT] Gate passed for run {run_id} ({gate_outcome})", flush=True)
         _commit_worktree(run_id, node_id=_node_id)
+        # Persist commit_tag to node_sessions so git tag is traceable via DB
+        _persist_commit_tag(run_id, _node_id, node_session_id)
         _finalize_or_advance(run_id, payload)
     elif gate_outcome in ("fail", "failed"):
         logger.warning("Gate failed for run %s -- finalizing failure", run_id)
         print(f"[PRINT] Gate failed for run {run_id}", flush=True)
         try:
             _commit_worktree(run_id, node_id=_node_id)
+            # Persist commit_tag even on failure for forensic traceability
+            _persist_commit_tag(run_id, _node_id, node_session_id)
             finalize_failure(run_id, reason="gate_evaluated_fail", workspace_root=_WORKSPACE_ROOT)
             _update_run(run_id, state="failed")
             print(f"[PRINT] Run {run_id} quarantined and marked failed", flush=True)

@@ -174,7 +174,20 @@ def _n_generate_plan(state: PlanState) -> PlanState:
     else:
         brief = planning_brief(mg, wt)
 
-    # 3. Create placeholder plan + run + node_session with role='planning'
+    # 3. Capture master_commit for the planning run
+    import subprocess
+    from pathlib import Path as _Path
+    _proj_dir = _Path(workspace_root) / project_id
+    try:
+        _res = subprocess.run(
+            ["git", "-C", str(_proj_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        _master_commit = _res.stdout.strip()
+    except Exception:
+        _master_commit = None
+
+    # 4. Create placeholder plan + run + node_session with role='planning'
     from backend.db.queries import conn as db_conn
     run_id = f"plan_{plan_id}"
     ns_id = f"ns_plan_{uuid4().hex[:12]}"
@@ -186,10 +199,10 @@ def _n_generate_plan(state: PlanState) -> PlanState:
             (plan_id, project_id, state.get("raw_input", mg.get("goal", "")), mg.get("goal", "")),
         )
         conn.execute(
-            """INSERT INTO runs (id, plan_id, state)
-               VALUES (%s, %s, 'planning')
+            """INSERT INTO runs (id, plan_id, project_id, state, master_commit)
+               VALUES (%s, %s, %s, 'planning', %s)
                ON CONFLICT (id) DO NOTHING""",
-            (run_id, plan_id),
+            (run_id, plan_id, project_id, _master_commit),
         )
         conn.execute(
             """INSERT INTO node_sessions (id, run_id, node_id, role, backend, attempt, worktree, members)

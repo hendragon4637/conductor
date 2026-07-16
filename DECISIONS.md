@@ -1,5 +1,21 @@
 # Locked Architecture Decisions (append-only)
 
+## 2026-07-16 — save_plan auto-creates project row for unknown project_id
+
+**Status**: ACTIVE
+
+**Context**: The `/goal` and `/ratify` endpoints accept a `project_id` from the caller. If the project_id didn't exist in the `projects` table, `save_plan()` crashed with a PostgreSQL foreign-key violation since `plans.project_id` references `projects.project_id`. This forced callers to pre-seed projects before submitting goals — an unnecessary chore that broke when new project_ids were used.
+
+**Decision**:
+- `save_plan()` in `backend/planning/store.py` now runs `INSERT INTO projects ... ON CONFLICT (project_id) DO NOTHING` immediately before the plan INSERT
+- The auto-created row gets `name = project_id` and `repo_path = /opt/aipc/conductor/workspace/{project_id}`
+- If the project already exists, the upsert is a no-op — no error, no overwrite
+- Covers all callers: `/goal`, `/clarify`, BYO-DAG path, and `/ratify` (which calls `save_run()` after plan persists)
+
+**Rationale**: Eliminates a papercut where callers had to manually ensure the project row existed. The projects table is a lightweight registry — auto-creating a basic row is safe and avoids FK errors without adding ceremony.
+
+**Trade-offs**: Auto-created projects have minimal metadata (no description, no system_prompt). Callers that want a richer project entry must still create it explicitly beforehand. The hard-coded `repo_path` convention may not suit all workflows, but matches existing patterns.
+
 ## 2026-07-01 — Planner graph conditional entry point (clarify → continue)
 
 **Status**: ACTIVE

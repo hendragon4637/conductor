@@ -20,6 +20,9 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
     """Persist a plan to the database (insert or update).
 
     v5.1: stores goal + success JSONB; no session_id.
+    v7.1: auto-creates the project row if the project_id doesn't exist yet,
+          preventing FK violations when /goal receives a new project_id.
+
     Args:
         plan: The plan object to persist.
         ratified: Whether the plan's checks/spec have been ratified.
@@ -32,6 +35,12 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
     needs_usage_sim = getattr(plan, "needs_usage_sim", False)
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO projects (project_id, name, repo_path)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (project_id) DO NOTHING""",
+                (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
+            )
             cur.execute(
                 """INSERT INTO plans
                    (plan_id, project_id, user_intent, goal, success, dag, ratified, version, needs_usage_sim)
