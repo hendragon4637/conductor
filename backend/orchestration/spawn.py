@@ -278,9 +278,17 @@ def spawn_team(
 
 
 def _ensure_plan_in_db(db_url: str, plan: dict[str, Any], project_id: str, session_id: str | None = None) -> None:
-    """Insert or update the plan (v5.1: no session_id column)."""
+    """Insert or update the plan (v5.1: no session_id column).
+    
+    Auto-creates the project row if missing (defense-in-depth).
+    """
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO projects (project_id, name, repo_path) VALUES (%s, %s, %s) "
+                "ON CONFLICT (project_id) DO NOTHING",
+                (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
+            )
             nodes = plan.get("dag", plan.get("nodes", []))
             user_intent = plan.get("user_intent", "")
             goal = plan.get("goal", user_intent)

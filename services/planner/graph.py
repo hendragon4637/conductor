@@ -193,6 +193,12 @@ def _n_generate_plan(state: PlanState) -> PlanState:
     ns_id = f"ns_plan_{uuid4().hex[:12]}"
     with db_conn() as conn:
         conn.execute(
+            """INSERT INTO projects (project_id, name, repo_path)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (project_id) DO NOTHING""",
+            (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
+        )
+        conn.execute(
             """INSERT INTO plans (plan_id, project_id, user_intent, goal)
                VALUES (%s, %s, %s, %s)
                ON CONFLICT (plan_id) DO UPDATE SET goal = EXCLUDED.goal""",
