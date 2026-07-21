@@ -31,6 +31,7 @@ class RawSignal:
     quota_suspected: bool = False
     fs_changed: bool = False
     last_activity_ts: float | None = None
+    agent_alive: bool = False
     detail: dict[str, Any] = field(default_factory=dict)
 
 
@@ -143,12 +144,16 @@ class AionUiSignalSource(SignalSource):
             any_error=qsig.get("any_error", False),
             fs_changed=fs_dirty,
             last_activity_ts=last_activity_ts,
+            agent_alive=qsig.get("agent_alive", False),
             detail={
                 "src": "aionui",
                 "conv_ids": conv_ids,
                 "error_codes": qsig.get("error_codes", []),
                 "have_data": qsig.get("have_data", False),
                 "latest_sig": qsig.get("latest_sig"),
+                "acp_session_statuses": qsig.get("acp_session_statuses", {}),
+                "conv_statuses": qsig.get("conv_statuses", {}),
+                "agent_alive": qsig.get("agent_alive", False),
             },
         )
 

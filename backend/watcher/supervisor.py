@@ -219,10 +219,15 @@ class Watcher:
         if query_changed:
             st.last_query_sig = query_sig
 
+        agent_alive = qsig.get("agent_alive", False)
+        any_error = qsig.get("any_error", False)
+
         if fs_changed or query_changed:
             st.last_seen = now
             st.last_change_ts = now
             st.saw_change = True
+            st.unchanged_cycles = 0
+        elif agent_alive and not any_error:
             st.unchanged_cycles = 0
         else:
             st.unchanged_cycles += 1

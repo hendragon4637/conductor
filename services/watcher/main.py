@@ -42,9 +42,9 @@ if not logger.handlers:
 cfg = ServiceConfig.from_env()
 bus = EventBus(cfg)
 
-POLL_INTERVAL = int(os.environ.get("WATCHER_POLL_INTERVAL", "30"))
-SETTLE_S = int(os.environ.get("WATCHER_SETTLE_S", "30"))
-STABLE_POLLS = 2
+POLL_INTERVAL = int(os.environ.get("WATCHER_POLL_INTERVAL", "90"))
+SETTLE_S = int(os.environ.get("WATCHER_SETTLE_S", "300"))
+STABLE_POLLS = 5
 
 
 # ── Per-session tracking state ──────────────────────────────────────────────
@@ -270,6 +270,11 @@ def _watch_loop() -> None:
                 if fs_changed or query_changed:
                     st.last_change_ts = now
                     st.saw_change = True
+                    st.unchanged_cycles = 0
+                elif raw.agent_alive and not raw.any_error:
+                    # Composite liveness: agent is alive (ACP runtime running,
+                    # conversation active, or executing a tool call) even without
+                    # new messages or files — prevent false stall detection.
                     st.unchanged_cycles = 0
                 else:
                     st.unchanged_cycles += 1

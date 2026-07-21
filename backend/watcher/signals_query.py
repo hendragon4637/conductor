@@ -26,6 +26,26 @@ JOIN (
   ON m.conversation_id = last.conversation_id AND m.created_at = last.mx
 """
 
+ACP_SESSION_STATUS = """
+SELECT conversation_id, session_status, last_active_at
+FROM acp_session
+WHERE conversation_id IN ({placeholders})
+"""
+
+CONV_STATUS = """
+SELECT id, status
+FROM conversations
+WHERE id IN ({placeholders})
+"""
+
+ACTIVE_TOOL_CALLS = """
+SELECT COUNT(*)
+FROM messages
+WHERE conversation_id IN ({placeholders})
+  AND status = 'work'
+  AND type = 'acp_tool_call'
+"""
+
 
 def _ro(db_path: str) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -42,12 +62,26 @@ def node_signal(db_path: str, conv_ids: list[str]) -> dict[str, Any]:
             "terminal": False,
             "latest_sig": None,
             "rows": [],
+            "acp_session_statuses": {},
+            "conv_statuses": {},
+            "active_tool_call_count": 0,
+            "agent_alive": False,
         }
 
     placeholders = ",".join("?" for _ in conv_ids)
     conn = _ro(db_path)
     try:
         rows = conn.execute(LATEST_PER_CONV.format(placeholders=placeholders), conv_ids).fetchall()
+        # Composite liveness queries
+        acp_rows = conn.execute(
+            ACP_SESSION_STATUS.format(placeholders=placeholders), conv_ids
+        ).fetchall()
+        conv_rows = conn.execute(
+            CONV_STATUS.format(placeholders=placeholders), conv_ids
+        ).fetchall()
+        tool_rows = conn.execute(
+            ACTIVE_TOOL_CALLS.format(placeholders=placeholders), conv_ids
+        ).fetchall()
     finally:
         conn.close()
 
@@ -75,6 +109,18 @@ def node_signal(db_path: str, conv_ids: list[str]) -> dict[str, Any]:
             ).encode("utf-8")
         ).hexdigest()
 
+    # Composite liveness: agent is alive if ACP runtime is running,
+    # conversation is running, or agent is actively executing a tool call.
+    acp_statuses: dict[str, str] = {str(r[0]): str(r[1]) for r in acp_rows}
+    conv_statuses: dict[str, str] = {str(r[0]): str(r[1]) for r in conv_rows}
+    active_tool_count = sum(r[0] for r in tool_rows) if tool_rows else 0
+
+    agent_alive = (
+        any(v == "running" for v in acp_statuses.values())
+        or any(v == "running" for v in conv_statuses.values())
+        or active_tool_count > 0
+    )
+
     return {
         "have_data": bool(row_dicts),
         "any_error": any_error,
@@ -84,4 +130,8 @@ def node_signal(db_path: str, conv_ids: list[str]) -> dict[str, Any]:
         "terminal": False,
         "latest_sig": latest_sig,
         "rows": row_dicts,
+        "acp_session_statuses": acp_statuses,
+        "conv_statuses": conv_statuses,
+        "active_tool_call_count": active_tool_count,
+        "agent_alive": agent_alive,
     }
