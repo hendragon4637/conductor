@@ -87,21 +87,22 @@ Cleans state: `bash /opt/aipc/conductor/scripts/clean_e2e_state.sh`
 set -a; source /opt/aipc/scripts/load-secrets.sh; set +a
 
 # Each service sources its own .env + starts uvicorn in background
+declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 )
+
 for svc in executor watcher planner evaluator; do
-  fuser -k "809${svc}/tcp" 2>/dev/null || true
+  port=${PORTS[$svc]}
+  fuser -k "${port}/tcp" 2>/dev/null || true
   sleep 1
   set -a
   source /opt/aipc/conductor/services/${svc}/.env
   set +a
   cd /opt/aipc/conductor
   setsid uv run uvicorn services.${svc}.main:app \
-    --host 0.0.0.0 --port 809${svc} \
+    --host 0.0.0.0 --port "${port}" \
     > /tmp/${svc}-svc.log 2>&1 &
-  echo "${svc}-svc started on :809${svc} (PID $!)"
+  echo "${svc}-svc started on :${port} (PID $!)"
 done
 ```
-
-Port mapping: executor=8091, watcher=8092, planner=8093, evaluator=8094.
 
 ### Clean state + restart (microservice)
 ```bash
