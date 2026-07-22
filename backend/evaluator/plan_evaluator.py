@@ -204,6 +204,10 @@ class PlanJudgeResponse(BaseModel):
 
 PLAN_JUDGE_PROMPT = """You are evaluating a plan DAG before execution. Rate each rubric item as met or not met.
 
+SEQUENTIAL CONSTRAINT — Nodes MUST be sequential (each depends on the previous).
+Do NOT flag sequential dependencies as unnecessary. Sequential execution is required
+by design, even if it costs efficiency. Parallel DAGs are NOT allowed.
+
 Plan goal:
 {plan_goal}
 
@@ -462,13 +466,22 @@ def plan_l2(
         "items": [
             {"id": "covers_goal", "rubric_item": "Do the nodes together fully cover the plan goal?", "weight": 2.0},
             {"id": "right_sized", "rubric_item": "Is each node a bounded, single-responsibility unit?", "weight": 1.5},
-            {"id": "deps_correct", "rubric_item": "Are dependencies correct and minimal?", "weight": 1.5},
-            {"id": "measurable", "rubric_item": "Does each node have a measurable success criterion?", "weight": 1.0},
+            {"id": "deps_correct", "rubric_item": "Are dependencies sequential and correctly ordered? Each node must depend on the previous (no parallel branches).", "weight": 1.5},
+            {"id": "measurable", "rubric_item": "Does each node have a measurable success criterion appropriate to its domain? Code nodes need deterministic checks; design/visual nodes may use rubric-based quality checks.", "weight": 1.0},
             {"id": "checks_scoped", "rubric_item": "Is each node's checks scoped to its task (no irrelevant checks on unrelated nodes)?", "weight": 1.0},
             {"id": "staffing_capable", "rubric_item": "Is each node staffed by an agent_config actually capable of its task (no strategic-operational mismatch)?", "weight": 2.0},
             {"id": "checks_match_capabilities", "rubric_item": "Do each node's checks match its capabilities' dimensions (objective -> L1, subjective -> L2)?", "weight": 1.5},
         ],
     }
+
+    # Augment with domain standard rubric item (planning standard)
+    try:
+        from backend.planning.planning_standard import get_gate_rubric_item
+        extra = get_gate_rubric_item()
+        if not any(item["id"] == extra["id"] for item in rubric["items"]):
+            rubric["items"].append(extra)
+    except Exception:
+        pass
 
     plan_nodes = "\n".join(
         json.dumps({
@@ -646,7 +659,21 @@ def gate_plan(dag: list[dict], plan_goal: str = "", threshold: float = PLAN_GATE
                 hf["detail"] = hf.get("detail", "") + " [feedback degraded]"
         if hard_failures:
             reason = {"L2": "hard gate failed", "score": score, "hard_failures": hard_failures, "judgments": l2_judgments}
-            feedback = "Plan quality hard gate failed: " + "; ".join(f"{f.get('id')}: {f.get('detail', 'not met')}" for f in hard_failures)
+            parts: list[str] = []
+            for f in hard_failures:
+                detail = f.get('detail', 'not met')
+                degraded = "degraded" in detail
+                what = f.get('what', '').strip()
+                why = f.get('why', '').strip()
+                msg = f"{f.get('id')}: not met"
+                if what:
+                    msg += f" — {what}"
+                if why and not what:
+                    msg += f" ({why})"
+                if degraded:
+                    msg += " [feedback degraded]"
+                parts.append(msg)
+            feedback = "Plan quality hard gate failed: " + "; ".join(parts)
         else:
             reason = {"L2": "below threshold", "score": score, "judgments": l2_judgments}
             feedback = f"Plan quality review score ({score:.2f}) is below required threshold ({threshold:.2f}). Review and refine the plan decomposition."

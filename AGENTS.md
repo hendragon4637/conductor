@@ -92,6 +92,9 @@
 | **NODE_BRIEF.md** | Static reference brief file written to the worktree by `_write_planner_opencode_json()`. Contains role, steps, rules, schemas, roster — the durable material that does NOT change between planning retries. |
 | **plan_l2_raw_response** | `TEXT` column on the `plan_l2_judgments` table storing the raw (pre-Pydantic-parse) LLM response from the L2 plan judge. Observability-only; never fed into retry briefs. |
 | **JUDGE_MODEL** | The model group identifier used for L2 plan evaluation, distinct from the meta-planner generation model (`deepseek-planning`). Set via `role="l2_judge"` in `call_llm_structured()`. |
+| **RAW ERRORS merge** | `_extract_fix_files_from_raw_errors()` in `harness_worktree.py` parses `node-NNN:` references from staffing error lines and merges the corresponding `.plan/nodes/node-NNN.json` and `.plan/checks/node-NNN.json` paths into the `FIX THESE` file set, so the meta-planner sees scoped file references even when file structure is valid but GATE policy fails. |
+| **Sequential constraint** | The `PLAN_JUDGE_PROMPT` requirement that nodes MUST be in sequential order (each depends on the previous). Added to prevent the L2 judge from flagging linear dependencies as "spurious edges." Parallel DAGs are not allowed. |
+| **Feedback text preservation** | `gate_plan()` now includes the LLM's `what`/`why`/`how` feedback text in the gate feedback string, appending `[feedback degraded]` as a qualifier rather than replacing the content. Ensures the meta-planner receives actionable problem descriptions. |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -309,6 +312,10 @@
 - `plan_l2_raw_response` is for observability only — never fed into the retry brief
 - Gate results (`gate_outcome`, `l2_score`, `feedback`, `l2_feedback`) are persisted to `node_sessions` on EVERY gate decision (both ratify and revise) in `_on_node_observed_planning()`
 - `update_plan_gate_result()` is called in the FAILURE path before retry, persisting `plan_goal_review` + `l2_judgments` + `raw_response` mid-retry for observability
+- **RAW ERRORS merge**: `retry_brief()` in `harness_worktree.py` calls `_extract_fix_files_from_raw_errors()` to parse `node-NNN:` patterns from staffing error lines and merge those file paths into `fix_files`. This ensures `FIX THESE` includes scoped references even when structure is clean but GATE fails.
+- **Feedback text preservation**: `gate_plan()` MUST include the LLM's `what`/`why`/`how` text in the feedback string. The `[feedback degraded]` marker is an appendix qualifier, NOT a replacement — never emit only `[feedback degraded]`.
+- **Sequential DAGs**: Nodes MUST be sequential (each depends on previous). The L2 judge prompt prohibits flagging sequential dependencies as unnecessary. Parallel DAGs are not allowed.
+- **Domain-appropriate measurable rubric**: The `measurable` rubric item must accept rubric-based quality checks for design/visual domains (`visual_design`, `design_layout`) — not all domains have deterministic success criteria.
 
 ## Git
 - Atomic commits with clear messages

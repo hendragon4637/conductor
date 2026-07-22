@@ -214,6 +214,25 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 
 **Trade-offs**: Not real user goals — edge cases may differ from production. Large goals (5+ capabilities) are expensive to run end-to-end. The `expected_capabilities` field is LLM-generated and may hallucinate capabilities not in the registry.
 
+## 2026-07-22 — Plan-level L2 steering feedback fix (RAW ERRORS merge + deps_correct + measurable rubric + feedback text)
+
+**Status**: ACTIVE
+
+**Context**: The planner's revise loop produced contradictory feedback: `CORRECT` listed files with valid structure while `RAW ERRORS` said to fix them, because `render_deterministic_feedback()` only checks JSON structure, not GATE/policy outcomes. Additionally, the plan L2 judge flagged sequential dependencies as "spurious edges" since the judge prompt had no sequential constraint. Design/visual domains (`visual_design`, `design_layout`) had no matching rubric profile, causing L2 judge failures. Finally, `gate_plan()` emitted opaque `"[feedback degraded]"` strings instead of the LLM's actual `what`/`why`/`how` feedback, starving the meta-planner of actionable guidance.
+
+**Decision**:
+- `_extract_fix_files_from_raw_errors()` in `harness_worktree.py` parses `node-NNN:` patterns from staffing error lines via `re.finditer(r"(node-\d{3}):", line)`, mapping to `.plan/nodes/node-NNN.json` + `.plan/checks/node-NNN.json` paths.
+- `retry_brief()` merges RAW ERROR file paths into the `fix_files` set, so `FIX THESE` includes scoped file references even when structure is clean but GATE fails.
+- Instruction text updated: "Fix ONLY FIX THESE (includes files referenced in RAW ERRORS). Do NOT touch CORRECT unless also in RAW ERRORS."
+- `PLAN_JUDGE_PROMPT` updated with SEQUENTIAL CONSTRAINT: "Nodes MUST be sequential (each depends on previous). Do NOT flag sequential dependencies as unnecessary."
+- `deps_correct` rubric updated: "Are dependencies sequential and correctly ordered? Each node must depend on the previous (no parallel branches)."
+- `measurable` rubric updated: "Does each node have a measurable success criterion appropriate to its domain? Code nodes need deterministic checks; design/visual nodes may use rubric-based quality checks."
+- `gate_plan()` feedback string now includes `what`/`why` text instead of opaque `"[feedback degraded]"` — format: `"deps_correct: not met — dependencies include spurious edges [feedback degraded]"`. The degraded marker is an appendix, not a replacement.
+
+**Rationale**: Fixing the feedback contradiction ensures the meta-planner receives reliable, actionable signals. Sequential constraint and domain-appropriate rubrics prevent false gate failures on valid linear DAGs and design deliverables. Preservation of `what`/`why` text ensures the meta-planner can act on gate feedback even when DimFeedback rejects the plan-level `where` format.
+
+**Trade-offs**: The `_extract_fix_files_from_raw_errors` parsing is regex-based and depends on the `node-NNN: cap needs tools` error format — changes to staffing error messages may require regex updates. Sequential constraint trades potential parallelism for deterministic linear execution. Design domains remain harder to evaluate objectively.
+
 ## 2026-07-02 — Example-generated data marking convention
 
 **Status**: ACTIVE
