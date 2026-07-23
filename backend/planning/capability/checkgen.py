@@ -35,6 +35,14 @@ subjective quality dimensions, produce rubric (L2) checks for this node.
 
 Each L2 check must be a yes/no quality question for the L2 judge.
 Specialize the wording to the node's specific task.
+- CRITICAL: L2 rubric items MUST be answerable from the visible artifact
+  (source files, configuration, manifests, documentation, build scripts, and
+  other text-format outputs present in the snapshot). Never create items that
+  require inspecting non-text deliverables, compiled binaries, build outputs,
+  generated assets, runtime behavior, installed artifacts, or any output that
+  would not appear in a source-tree snapshot — those are invisible to the
+  judge and will always score 0. Instead, evaluate the configuration, code,
+  and documentation that defines or produces those outputs.
 
 Subjective dimensions to specialize:
 {subjective_dims}
@@ -106,7 +114,37 @@ def generate_capability_checks(node: dict[str, Any]) -> list[dict[str, Any]]:
     for item in l2_checks:
         item["confidence"] = confidence
 
-    return l1_checks + l2_checks
+    checks = l1_checks + l2_checks
+
+    # 3. Augment with standard-derived L1 checks
+    try:
+        from backend.standards.l1_spec_checks import build_spec_l1_checks
+        from backend.standards.loader import get_standard
+
+        cap_names = node.get("capabilities") or []
+        if cap_names:
+            cap_name = cap_names[0] if isinstance(cap_names[0], str) else (cap_names[0].get("name", "") if isinstance(cap_names[0], dict) else "")
+            from backend.standards.loader import get_capability_standard
+            slug = get_capability_standard(cap_name) if cap_name else None
+            if slug:
+                standard = get_standard(slug)
+                if standard:
+                    spec_checks = build_spec_l1_checks(standard)
+                    for sc in spec_checks:
+                        if not any(c.get("id") == sc["id"] for c in checks):
+                            checks.append(sc)
+
+                if not any(c.get("id") == "gates_green" for c in checks):
+                    checks.append({
+                        "id": "gates_green",
+                        "type": "deterministic",
+                        "criterion": "All verification gates pass; see AGENTS.md for gate definitions",
+                        "check_cmd": "bash gates.sh",
+                    })
+    except Exception:
+        pass
+
+    return checks
 
 
 def _generate_l1(

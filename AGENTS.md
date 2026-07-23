@@ -95,6 +95,8 @@
 | **RAW ERRORS merge** | `_extract_fix_files_from_raw_errors()` in `harness_worktree.py` parses `node-NNN:` references from staffing error lines and merges the corresponding `.plan/nodes/node-NNN.json` and `.plan/checks/node-NNN.json` paths into the `FIX THESE` file set, so the meta-planner sees scoped file references even when file structure is valid but GATE policy fails. |
 | **Sequential constraint** | The `PLAN_JUDGE_PROMPT` requirement that nodes MUST be in sequential order (each depends on the previous). Added to prevent the L2 judge from flagging linear dependencies as "spurious edges." Parallel DAGs are not allowed. |
 | **Feedback text preservation** | `gate_plan()` now includes the LLM's `what`/`why`/`how` feedback text in the gate feedback string, appending `[feedback degraded]` as a qualifier rather than replacing the content. Ensures the meta-planner receives actionable problem descriptions. |
+| **Artifact-answerability constraint** | Prompt-level rule in `check_generator.py` and `checkgen.py` that prohibits L2 rubric items from requiring inspection of invisible artifacts (binaries, compiled outputs, build assets, runtime behavior, installed artifacts). Ensures every rubric item is answerable from the repomix text snapshot. |
+| **ARTIFACT_SKIP_PARTS** | Set of file patterns in `l2_judge.py` that are excluded from the repomix snapshot sent to the L2 judge. Includes `.git`, `AGENTS.md`, and `opencode.json` — infra files that waste tokens and dilute the product signal. |
 
 ## Conventions
 # Conductor Coding Conventions

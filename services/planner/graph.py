@@ -34,9 +34,14 @@ class PlanState(TypedDict):
 
 def _n_formulate(state: PlanState) -> PlanState:
     """Call the LLM formulator, detect clarification needs."""
+    from backend.planning.domain_profile import list_domain_names
     from backend.planning.meta_planner.goal_formulator import formulate
 
-    mg = formulate(raw_input=state["raw_input"], origin=state["origin"])
+    mg = formulate(
+        raw_input=state["raw_input"],
+        origin=state["origin"],
+        valid_domains=list_domain_names(),
+    )
     merged = {**state, "meta_goal": mg.model_dump()}
     if mg.needs_clarification:
         merged["status"] = "awaiting_clarification"
@@ -157,9 +162,9 @@ def _n_generate_plan(state: PlanState) -> PlanState:
     project_id = state.get("project_id") or mg.get("project_id", "default")
     workspace_root = os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace")
 
-    # 1. Create or reuse planning worktree
+    # 1. Create or reuse planning worktree (pass meta_goal for domain-filtered brief)
     wm = WorktreeManager(workspace_root)
-    wt = create_planning_worktree(plan_id, project_id, workspace_root)
+    wt = create_planning_worktree(plan_id, project_id, workspace_root, meta_goal=mg)
 
     # 2. Build brief (with retry feedback if this is a re-spawn)
     prior_feedback_raw = state.get("gate_feedback")
@@ -238,7 +243,7 @@ def _n_generate_plan(state: PlanState) -> PlanState:
             if row:
                 prev_conv = row["aionui_conversation_id"]
                 prev_steer = row["steering_count"] or 0
-                if prev_conv and prev_steer < 5:
+                if prev_conv and prev_steer < 10:
                     reuse_conv_id = str(prev_conv)
                     reuse_steer_count = int(prev_steer or 0)
 

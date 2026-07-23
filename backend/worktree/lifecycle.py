@@ -106,6 +106,17 @@ def _git_merge(project_dir: str, branch: str, message: str) -> str:
         ["git", "-C", project_dir, "checkout", "master"],
         check=True, capture_output=True, timeout=30,
     )
+    # Stash any dirty state so the merge doesn't fail on uncommitted changes
+    dirty = subprocess.run(
+        ["git", "-C", project_dir, "status", "--porcelain"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if dirty.stdout.strip():
+        logger.info("Main repo dirty — stashing %d change(s) before merge", len(dirty.stdout.strip().split("\n")))
+        subprocess.run(
+            ["git", "-C", project_dir, "stash", "--include-untracked"],
+            check=True, capture_output=True, timeout=30,
+        )
     # Merge
     result = subprocess.run(
         ["git", "-C", project_dir, "merge", "--no-ff", branch, "-m", message],

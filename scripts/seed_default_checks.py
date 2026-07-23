@@ -1,8 +1,8 @@
-"""Seed default_checks into the finance-fullstack-executor agent_config."""
+"""Seed default_checks into an active python-backend agent_config."""
 import json
 import os
 
-import psycopg2
+import psycopg
 
 default_checks = {
     "l1": [
@@ -47,11 +47,11 @@ if not db_url:
     exit(1)
 
 dc_json = json.dumps(default_checks)
-conn = psycopg2.connect(db_url)
+conn = psycopg.connect(db_url)
 cur = conn.cursor()
 cur.execute(
     "UPDATE agent_configs SET default_checks = %s::jsonb WHERE agent_config_id = %s",
-    (dc_json, "finance-fullstack-executor"),
+    (dc_json, "python-development-fastapi-pro"),
 )
 conn.commit()
 print(f"Updated {cur.rowcount} row(s)")

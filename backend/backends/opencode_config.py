@@ -73,17 +73,11 @@ def write_worktree_config(
     if permissions:
         oc["permission"] = permissions
 
-    # Appended instructions — write NODE_BRIEF.md and reference it
+    # Appended instructions — write NODE_BRIEF.md so agent can read it via [[AION_FILES]]
     brief_path = conductor_dir / "NODE_BRIEF.md"
     current_brief = brief_path.read_text(encoding="utf-8") if brief_path.exists() else ""
     if appended_prompt and appended_prompt != current_brief:
         brief_path.write_text(appended_prompt, encoding="utf-8")
-
-    instructions = []
-    if brief_path.exists():
-        instructions.append("{file:./.conductor/NODE_BRIEF.md}")
-    if instructions:
-        oc["instructions"] = instructions
 
     # Agent definition for THIS node
     agent_def: dict[str, Any] = {
@@ -93,8 +87,6 @@ def write_worktree_config(
         agent_def["model"] = model
     if permissions:
         agent_def["permission"] = permissions
-    if brief_path.exists():
-        agent_def["prompt"] = "{file:./.conductor/NODE_BRIEF.md}"
     oc["agent"] = {agent_name: agent_def}
 
     # CRITICAL: default_agent makes the defined agent the default

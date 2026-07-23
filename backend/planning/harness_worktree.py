@@ -80,24 +80,23 @@ def _get_active_standard(slug: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-# Domain → standard slug mapping (mirrors stamp_run_standard in seeder.py)
-_DOMAIN_STANDARD_MAP: dict[str, str] = {
-    "software_app": "python-backend",
-    "api_service": "python-backend",
-    "cli_script": "python-backend",
-    "data_pipeline": "python-backend",
-    "backend": "python-backend",
-    "software": "python-backend",
-    "frontend": "react-frontend",
-    "design": "react-frontend",
-    "gui_app": "python-gui",
-    "embedded_firmware": "arduino",
-    "design_layout": "design-layout",
+# Domain → standard slug(s) mapping.
+# Each domain maps to a list of standard slugs (multi-engine projects get one
+# scaffold per slug in a subdirectory).  Single-slug domains scaffold at root.
+# Domains with no scaffold (research_report, generic) are omitted.
+_DOMAIN_STANDARD_MAP: dict[str, list[str]] = {
+    "software_app": ["python-backend", "react-frontend"],
+    "api_service": ["python-backend"],
+    "cli_script": ["python-backend"],
+    "data_pipeline": ["python-backend"],
+    "gui_app": ["python-gui"],
+    "embedded_firmware": ["arduino"],
+    "visual_design": ["react-frontend", "design-layout"],
 }
 
 
-def _domain_to_standard_slug(domain: str) -> str | None:
-    """Map a domain name (from MetaGoal or capability selector) to a standard slug."""
+def _domain_to_standard_slug(domain: str) -> list[str] | None:
+    """Map a domain name to a list of standard slugs (may be empty)."""
     return _DOMAIN_STANDARD_MAP.get(domain)
 
 
@@ -169,6 +168,7 @@ def generate_workspace(
     standard_slug: str,
     params: dict[str, str] | None = None,
     subdir: str = ".",
+    defer_commit: bool = False,
 ) -> dict[str, Any]:
     """Generate a scaffold workspace in *project_dir* from a domain standard.
 
@@ -180,7 +180,7 @@ def generate_workspace(
        and path segments.
     4. Writes the standard's ``conventions_md`` into ``AGENTS.md``.
     5. Writes ``.conductor/workspace.json`` manifest.
-    6. Git-commits the result with message ``"scaffold: generated workspace(s)"``.
+    6. Git-commits the result — unless ``defer_commit=True`` (caller commits).
 
     Args:
         project_dir: Root project directory (git repo).
@@ -188,6 +188,8 @@ def generate_workspace(
         params: Optional token mapping.  Auto-derived from ``project_dir.name``
             when omitted.
         subdir: Subdirectory within the project to generate into.
+        defer_commit: When True, skip the git add/commit so the caller can
+            commit all scaffolds in a single atomic commit.
 
     Returns:
         Manifest dict with keys ``standard_slug``, ``standard_id``, ``version``,
@@ -247,17 +249,18 @@ def generate_workspace(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8",
     )
 
-    # 5. Commit to master
-    subprocess.run(
-        ["git", "-C", str(project_dir), "add", "-A"],
-        check=True, capture_output=True, timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(project_dir), "commit", "-m", "scaffold: generated workspace(s)"],
-        check=True, capture_output=True, timeout=30,
-    )
+    # 5. Commit to master (unless caller defers for batch commit)
+    if not defer_commit:
+        subprocess.run(
+            ["git", "-C", str(project_dir), "add", "-A"],
+            check=True, capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["git", "-C", str(project_dir), "commit", "-m", "scaffold: generated workspace(s)"],
+            check=True, capture_output=True, timeout=30,
+        )
 
-    logger.info("Generated workspace from %s into %s (commit 0)", standard_slug, dst)
+    logger.info("Generated workspace from %s into %s (defer_commit=%s)", standard_slug, dst, defer_commit)
     return manifest
 
 
@@ -490,20 +493,38 @@ def create_planning_worktree(
     # on master BEFORE creating the planning worktree.  This ensures the
     # scaffold is commit 0 — the planning agent and later execution nodes
     # all inherit the pre-structured workspace.
+    #
+    # Each domain maps to one or more standard slugs.  Single-engine
+    # domains scaffold at the project root; multi-engine domains scaffold
+    # into subdirectories named after each slug.
     domains = (meta_goal or {}).get("domains") if meta_goal else None
     domain = domains[0] if domains else ((meta_goal or {}).get("domain") if meta_goal else None)
+    _scaffold_committed = False
     if domain and is_greenfield(project_dir):
-        standard_slug = _domain_to_standard_slug(domain)
-        if standard_slug:
-            try:
-                generate_workspace(project_dir, standard_slug)
-                logger.info(
-                    "Greenfield scaffold generated for domain=%s standard=%s",
-                    domain, standard_slug,
+        standard_slugs = _domain_to_standard_slug(domain)
+        if standard_slugs:
+            multi = len(standard_slugs) > 1
+            for slug in standard_slugs:
+                subdir = slug if multi else "."
+                try:
+                    generate_workspace(project_dir, slug, subdir=subdir, defer_commit=multi)
+                    logger.info(
+                        "Greenfield scaffold generated for domain=%s standard=%s subdir=%s",
+                        domain, slug, subdir,
+                    )
+                    _scaffold_committed = True
+                except ValueError as exc:
+                    logger.warning(
+                        "Scaffold generation skipped for %s/%s: %s", domain, slug, exc,
+                    )
+            if multi and _scaffold_committed:
+                subprocess.run(
+                    ["git", "-C", str(project_dir), "add", "-A"],
+                    check=True, capture_output=True, timeout=30,
                 )
-            except ValueError as exc:
-                logger.warning(
-                    "Scaffold generation skipped for %s: %s", domain, exc,
+                subprocess.run(
+                    ["git", "-C", str(project_dir), "commit", "-m", "scaffold: generated workspace(s)"],
+                    check=True, capture_output=True, timeout=30,
                 )
 
     # Remove prior worktree if exists

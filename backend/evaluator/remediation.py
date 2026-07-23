@@ -20,7 +20,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_PATIENCE = 3
-DEFAULT_HARD_CAP = 10
+DEFAULT_HARD_CAP = 20
 DEFAULT_MIN_DELTA = 0.02
 
 

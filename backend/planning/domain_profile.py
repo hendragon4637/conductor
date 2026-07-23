@@ -139,6 +139,89 @@ SEED_PROFILES: list[dict[str, Any]] = [
         "custom": {"format": "markdown"},
     },
     {
+        "domain": "gui_app",
+        "acceptance": {
+            "deliverables": ["GUI application code", "tests", "RUN.md", "build/packaging config"],
+            "runnable_check": "`xdg-open` or PyInstaller smoke test confirms window appears with expected content",
+            "completeness_criteria": [
+                "main window opens without crash",
+                "UI components are functional",
+                "deps installable in worktree .venv",
+                "PyInstaller build succeeds on native platform",
+            ],
+            "quality_dimensions": [
+                "correctness",
+                "UI responsiveness",
+                "error handling",
+                "packaging reliability",
+            ],
+        },
+        "conventions": [
+            "a GUI app means a window the user can interact with, not a terminal script",
+            "use PySide6 for Qt; avoid Tkinter for new projects",
+            "separate UI code from business logic (ui/ vs core/ modules)",
+            "include a --smoke flag for headless CI verification",
+            "all deps install into a worktree .venv; no host installs",
+            "include RUN.md with exact run steps and build commands",
+        ],
+        "custom": {"default_stack": "PySide6 + PyInstaller"},
+    },
+    {
+        "domain": "embedded_firmware",
+        "acceptance": {
+            "deliverables": ["firmware source", "tests", "platformio.ini config", "RUN.md"],
+            "runnable_check": "`pio test -e native` passes (Unity tests compile and run on host)",
+            "completeness_criteria": [
+                "compiles for target board (e.g. uno)",
+                "native tests pass",
+                "hardware-agnostic logic is tested separately from Arduino APIs",
+                "no hardcoded magic numbers; use constexpr in config.h",
+            ],
+            "quality_dimensions": [
+                "correctness",
+                "code size / memory efficiency",
+                "test coverage of logic",
+                "documentation of pins and protocol",
+            ],
+        },
+        "conventions": [
+            "firmware means embedded code running on a microcontroller, not a desktop program",
+            "use PlatformIO for build + test; avoid bare Arduino IDE",
+            "hardware-agnostic logic in separate modules; Arduino.h only in hardware wrappers",
+            "use millis()-based non-blocking patterns, never delay()",
+            "native test env (pio test -e native) must pass without hardware",
+            "include RUN.md with flash instructions and port hints",
+        ],
+        "custom": {"default_stack": "PlatformIO + Arduino framework + Unity tests"},
+    },
+    {
+        "domain": "visual_design",
+        "acceptance": {
+            "deliverables": ["DESIGN.md", "artifacts in exports/", "brief/BRIEF.md"],
+            "runnable_check": "exported artifacts are valid files (html, png, pdf) and DESIGN.md tokens are respected",
+            "completeness_criteria": [
+                "DESIGN.md defines palette, type scale, spacing, voice",
+                "brief/BRIEF.md is filled out with audience, purpose, constraints",
+                "final artifact matches brief point-by-point",
+                "WCAG AA contrast minimum met for all text",
+            ],
+            "quality_dimensions": [
+                "visual hierarchy",
+                "brand consistency",
+                "accessibility",
+                "brief compliance",
+            ],
+        },
+        "conventions": [
+            "design means visual layout, not code or firmware",
+            "start by defining DESIGN.md tokens (palette, type, spacing, voice)",
+            "work iteratively in work/; freeze final exports to exports/",
+            "every artifact must have a corresponding brief entry",
+            "respect WCAG AA contrast ratios (4.5:1 text, 3:1 large text)",
+        ],
+        "custom": {"format": "open-design workflow"},
+    },
+    {
         "domain": "generic",
         "acceptance": {
             "deliverables": ["the stated deliverable"],
@@ -198,6 +281,22 @@ def get_domain_profile(domain: str) -> DomainProfile:
     return _generic_fallback()
 
 
+def list_domain_names() -> list[str]:
+    """Return all domain names from the ``domain_profiles`` table.
+
+    Falls back to the hardcoded ``SEED_PROFILES`` list when the DB is
+    unavailable (e.g. before migrations have run).
+    """
+    try:
+        dsn = _get_db_url()
+        with psycopg.connect(dsn, row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute("SELECT domain FROM domain_profiles ORDER BY domain")
+            return [row["domain"] for row in cur.fetchall()]
+    except Exception:
+        logger.exception("Failed to query domain_profiles — falling back to seed list")
+        return [p["domain"] for p in SEED_PROFILES]
+
+
 def _generic_fallback() -> DomainProfile:
     for p in SEED_PROFILES:
         if p["domain"] == "generic":
@@ -222,6 +321,12 @@ def _generic_fallback() -> DomainProfile:
 def infer_domain(meta_goal_text: str) -> str:
     text = meta_goal_text.lower()
 
+    # firmware/embedded before cli (Arduino CLI could match both)
+    if any(kw in text for kw in ("firmware", "arduino", "embedded", "microcontroller", "platformio")):
+        return "embedded_firmware"
+    # GUI before software_app (a GUI app is still an app, but more specific)
+    if any(kw in text for kw in ("gui", "desktop app", "pyside6", "pyqt", "qt ", "tray icon", "system tray")):
+        return "gui_app"
     if any(kw in text for kw in ("cli", "command", "terminal")):
         return "cli_script"
     # software_app before api_service: "app"/"ui"/"frontend" > plain "api" mention
@@ -234,6 +339,9 @@ def infer_domain(meta_goal_text: str) -> str:
         return "data_pipeline"
     if any(kw in text for kw in ("report", "research", "doc")):
         return "research_report"
+    # visual design — layout keywords after research, before generic
+    if any(kw in text for kw in ("layout", "poster", "design system", "brand", "visual design", "figma")):
+        return "visual_design"
 
     return "generic"
 

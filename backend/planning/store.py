@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
 
 from backend.planning.schema import Plan
+
+logger = logging.getLogger(__name__)
 
 
 def _get_db() -> str:
@@ -177,6 +180,41 @@ def save_run(run: dict[str, Any]) -> None:
                 ),
             )
         c.commit()
+
+    # ── Stamp run with domain standard after successful insert ──
+    plan_id = run.get("plan_id")
+    run_id = run.get("id")
+    if plan_id and run_id:
+        try:
+            from backend.standards.seeder import stamp_run_standard
+
+            with psycopg.connect(db_url) as c:
+                with c.cursor() as cur:
+                    cur.execute(
+                        "SELECT goal FROM plans WHERE plan_id = %s",
+                        (plan_id,),
+                    )
+                    row = cur.fetchone()
+
+            if row and row[0] is not None:
+                goal = row[0]
+                domain = None
+                if isinstance(goal, str):
+                    try:
+                        parsed = json.loads(goal)
+                        if isinstance(parsed, dict):
+                            domains = parsed.get("domains")
+                            domain = domains[0] if domains else parsed.get("domain")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                elif isinstance(goal, dict):
+                    domains = goal.get("domains")
+                    domain = domains[0] if domains else goal.get("domain")
+
+                if domain:
+                    stamp_run_standard(run_id, domain, db_url)
+        except Exception:
+            logger.exception("Failed to stamp run %s with standard", run_id)
 
 
 def _check_active_project_run(conn: psycopg.Connection, project_id: str) -> None:

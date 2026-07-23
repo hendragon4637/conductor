@@ -15,13 +15,14 @@ logger = logging.getLogger(__name__)
 
 # Domain string -> capability family mapping (deterministic pre-filter)
 DOMAIN_TO_FAMILY: dict[str, list[str]] = {
-    "software_app": ["software"],
+    # Original domain profiles
+    "software_app": ["software", "design"],
     "fullstack": ["software"],
     "frontend": ["software"],
     "backend": ["software"],
     "api": ["software"],
     "cli": ["software"],
-    "data_pipeline": ["data"],
+    "data_pipeline": ["data", "software"],
     "analytics": ["data"],
     "data": ["data"],
     "design": ["design", "creative"],
@@ -34,6 +35,14 @@ DOMAIN_TO_FAMILY: dict[str, list[str]] = {
     "business": ["business"],
     "finance": ["business"],
     "general": ["research"],
+    # Domains from seed_default_checks.py / seed_domain_profiles.py
+    "gui_app": ["software"],
+    "embedded_firmware": ["software"],
+    "visual_design": ["design", "creative"],
+    "api_service": ["software"],
+    "cli_script": ["software"],
+    "research_report": ["research"],
+    "generic": ["research"],
 }
 
 MAX_GAP_PROPOSALS = 2

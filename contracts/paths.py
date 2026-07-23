@@ -27,8 +27,8 @@ INFRA_EXCLUDES: list[str] = [
     ".mypy_cache/",
     ".ruff_cache/",
     "l4_scratch/",
-    "plan_scratch/",
     "opencode.json",
+    "*.egg-info/",
 ]
 
 # Also used by the evaluator artifact bundle
@@ -37,14 +37,12 @@ INFRA_SKIP_PARTS: set[str] = {
     ".conductor",
     ".plan",
     ".memory",
-    ".venv",
     "node_modules",
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
     "l4_scratch",
-    "plan_scratch",
 }
 
 
@@ -76,7 +74,7 @@ def worktree_gitignore_lines() -> str:
       - ``.opencode/``, ``.conductor/``, ``.plan/`` — conductor scaffolding
       - ``.venv/``, ``node_modules/`` — language runtimes
       - ``__pycache__/``, ``*.pyc`` — bytecode
-      - ``l4_scratch/``, ``plan_scratch/`` — scratch dirs
+      - ``l4_scratch/`` — scratch dirs
 
     NOTE: ``.memory/`` is deliberately NOT gitignored — it must travel
     with the repo as versioned project knowledge.

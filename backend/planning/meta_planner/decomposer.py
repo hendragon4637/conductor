@@ -124,7 +124,8 @@ def roster_enum(domain: str | None = None) -> list[dict[str, Any]]:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT agent_config_id, domain, role, harness, "
-                    "  COALESCE(execution->>'backend', harness, 'opencode') AS effective_backend "
+                    "  COALESCE(execution->>'backend', harness, 'opencode') AS effective_backend, "
+                    "  group_id "
                     "FROM agent_configs WHERE active = true ORDER BY agent_config_id"
                 )
                 rows = cur.fetchall()
@@ -136,6 +137,7 @@ def roster_enum(domain: str | None = None) -> list[dict[str, Any]]:
                 "role": r[2],
                 "harness": r[3],
                 "backend": r[4],
+                "group_id": r[5] or "",
                 "description": f"{r[1]} / {r[2]} / {r[3]}",
             })
         return result

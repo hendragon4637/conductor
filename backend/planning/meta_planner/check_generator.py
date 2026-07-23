@@ -196,7 +196,15 @@ produce evaluation checks for each node.
   (b) ADAPT a preset's wording to be more specific to this node's task
       (provenance="preset_adapted"). Keep the original intent but tailor it.
   (c) CREATE a new rubric item from the quality_intent text that is relevant
-      to this node's task (provenance="human_intent").
+       to this node's task (provenance="human_intent").
+- CRITICAL: L2 rubric items MUST be answerable from the visible artifact
+  (source files, configuration, manifests, documentation, build scripts, and
+  other text-format outputs present in the snapshot). Never create items that
+  require inspecting non-text deliverables, compiled binaries, build outputs,
+  generated assets, runtime behavior, installed artifacts, or any output that
+  would not appear in a source-tree snapshot — those are invisible to the
+  judge and will always score 0. Instead, evaluate the configuration, code,
+  and documentation that defines or produces those outputs.
 - Don't add every possible check — only what matters for the node's task.
 - Weight matters: 2.0 = critical, 1.0 = normal, 0.5 = nice-to-have.
 

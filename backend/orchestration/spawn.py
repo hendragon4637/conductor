@@ -338,6 +338,14 @@ def _create_task(db_url: str, plan: dict[str, Any], node: dict[str, Any], projec
     return task_id
 
 
+def _aion_files_block(worktree: Path) -> str:
+    """``[[AION_FILES]]`` block referencing ``.conductor/NODE_BRIEF.md`` for the executor."""
+    brief_path = worktree / ".conductor" / "NODE_BRIEF.md"
+    if brief_path.exists():
+        return f"\n\n[[AION_FILES]]\n{brief_path.absolute()}\n"
+    return ""
+
+
 def _create_aionui_link(db_url: str, task_id: uuid.UUID, conversation_id: str) -> None:
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
@@ -419,6 +427,7 @@ def _spawn_single_member_team(
             node=node, dep_context=dep_context,
             goal=plan.get("user_intent", ""),
         )
+        brief += _aion_files_block(wt)
         aionui.send_message(conv_id, brief)
 
     return {member_id: conv_id} if conv_id else {}
@@ -486,6 +495,57 @@ def spawn_node_team(
                 )
         except Exception:
             pass
+
+    # Inject domain standard scaffolding into worktree (pre-spawn)
+    try:
+        from backend.standards.loader import get_standard
+        from backend.planning.capability.selector import DOMAIN_TO_FAMILY
+
+        # Derive standard slug from node capabilities or plan domain
+        _cap_families: set[str] = set()
+        for cap in (node.get("capabilities") or []):
+            if isinstance(cap, dict):
+                for fam in (cap.get("family") or []):
+                    _cap_families.add(str(fam))
+            elif isinstance(cap, str):
+                _cap_families.add(cap)
+
+        _domain = plan.get("domain", "")
+        _slug_candidates: list[str] = []
+        if "backend" in _cap_families or "backend" in _domain.lower():
+            _slug_candidates.append("python-backend")
+        if "frontend" in _cap_families or "frontend" in _domain.lower():
+            _slug_candidates.append("react-frontend")
+
+        for slug in _slug_candidates:
+            std = get_standard(slug)
+            if not std:
+                continue
+            tree = std.get("scaffold_tree") or []
+            for entry in tree:
+                src = entry.get("source", "")
+                dst_path = entry.get("path", "")
+                if src and dst_path:
+                    src_p = Path(src)
+                    dst_p = wt / dst_path
+                    if src_p.exists() and not dst_p.exists():
+                        dst_p.parent.mkdir(parents=True, exist_ok=True)
+                        if src_p.is_file():
+                            dst_p.write_bytes(src_p.read_bytes())
+                        elif src_p.is_dir():
+                            import shutil
+                            shutil.copytree(src_p, dst_p, dirs_exist_ok=True)
+
+            manifest = std.get("tool_manifest")
+            if manifest:
+                (wt / ".conductor").mkdir(parents=True, exist_ok=True)
+                (wt / ".conductor" / "tool_manifest.json").write_text(
+                    json.dumps(manifest, indent=2) + "\n"
+                )
+
+            logger.info("Injected %s scaffolding into worktree %s", slug, wt)
+    except Exception as exc:
+        logger.debug("Standard scaffolding injection skipped: %s", exc)
 
     # Install capability-scoped skills into worktree (pre-spawn)
     try:
@@ -624,6 +684,7 @@ def spawn_node_team(
         goal=plan.get("user_intent", ""),
     )
     if orch_conv_id:
+        prompt += _aion_files_block(wt)
         slot_id = conv_to_slot.get(orch_conv_id, "")
         try:
             if team_id and slot_id:
@@ -742,7 +803,7 @@ def _spawn_self_orchestrating(
             workspace=str(wt),
         )
         conv_map[backend_key] = conv_id
-        aionui.send_message(conv_id, goal_brief)
+        aionui.send_message(conv_id, goal_brief + _aion_files_block(wt))
 
         # Set OMO env
         env = spawn_env_for("opencode_omo")

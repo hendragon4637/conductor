@@ -117,8 +117,10 @@ def _on_node_observed_planning(session, payload):
     attempts = row["planning_attempts"] or 0
 
     dec = None  # set by gate below; needed in FAIL path (Item 3.c)
+
     # 1. Deterministic assembly
-    dag_dict, errs = assemble_plan(worktree)
+    dag_dict, assemble_errs = assemble_plan(worktree)
+    errs = assemble_errs
     if not errs:
         # 2. Pydantic + roster validation
         roster_ids = _get_roster_ids()
@@ -134,7 +136,8 @@ def _on_node_observed_planning(session, payload):
 
         # 4. Check boundary validation (deterministic, replaces LLM check-gen)
         from contracts.plan_assembler import validate_check_boundaries
-        errs = validate_check_boundaries(dag_list)
+        has_standard = os.path.exists(os.path.join(worktree, "AGENTS.md"))
+        errs = validate_check_boundaries(dag_list, standard_bearing=has_standard)
 
     if not errs:
         # 5. Plan-evaluator gate (existing)

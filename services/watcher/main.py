@@ -43,8 +43,17 @@ cfg = ServiceConfig.from_env()
 bus = EventBus(cfg)
 
 POLL_INTERVAL = int(os.environ.get("WATCHER_POLL_INTERVAL", "90"))
-SETTLE_S = int(os.environ.get("WATCHER_SETTLE_S", "300"))
-STABLE_POLLS = 5
+
+_SETTLE_S_PLANNING = int(os.environ.get("WATCHER_SETTLE_S_PLANNING", "180"))
+_STABLE_POLLS_PLANNING = int(os.environ.get("WATCHER_STABLE_POLLS_PLANNING", "5"))
+_SETTLE_S_EXECUTION = int(os.environ.get("WATCHER_SETTLE_S_EXECUTION", "60"))
+_STABLE_POLLS_EXECUTION = int(os.environ.get("WATCHER_STABLE_POLLS_EXECUTION", "5"))
+
+
+_ROLE_CONFIG: dict[str, dict[str, int]] = {
+    "planning": {"settle_s": _SETTLE_S_PLANNING, "stable_polls": _STABLE_POLLS_PLANNING},
+    "execution": {"settle_s": _SETTLE_S_EXECUTION, "stable_polls": _STABLE_POLLS_EXECUTION},
+}
 
 
 # ── Per-session tracking state ──────────────────────────────────────────────
@@ -53,9 +62,13 @@ STABLE_POLLS = 5
 class SessionTrack:
     """In-memory per-session state for settle-time detection."""
 
-    def __init__(self, node_session_id: str, worktree: str | None = None):
+    def __init__(self, node_session_id: str, worktree: str | None = None, role: str = "execution"):
         self.node_session_id = node_session_id
         self.worktree = worktree
+        self.role = role
+        cfg = _ROLE_CONFIG.get(role, _ROLE_CONFIG["execution"])
+        self.settle_s: int = cfg["settle_s"]
+        self.stable_polls_threshold: int = cfg["stable_polls"]
         self.saw_change: bool = False
         self.saw_fs_change: bool = False  # file-only changes (planning gate)
         self.last_git_sig: str | None = None
@@ -78,18 +91,28 @@ def _is_spawned(ns: NodeSession) -> bool:
 
 
 def _bootstrap_tracker() -> None:
-    """Load active sessions from DB into the tracker on startup."""
+    """Load active sessions from DB into the tracker on startup.
+
+    Filters out stale sessions from old runs (>48h) to prevent watcher
+    from polling dead node_sessions left behind by previous runs.
+    """
     try:
+        from datetime import timedelta
         from sqlalchemy import or_
         with db_session() as s:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
             active = (
                 s.query(NodeSession)
-                .filter(or_(
-                    NodeSession.verdict.is_(None),
-                    NodeSession.verdict.in_(["running", "pending"]),
-                ))
+                .filter(
+                    NodeSession.created_at >= cutoff,
+                    or_(
+                        NodeSession.verdict.is_(None),
+                        NodeSession.verdict.in_(["running", "pending"]),
+                    ),
+                )
                 .all()
             )
+        bootstrapped = 0
         for ns in active:
             if not _is_spawned(ns):
                 continue
@@ -98,11 +121,12 @@ def _bootstrap_tracker() -> None:
                 _tracker[ns.id] = SessionTrack(
                     node_session_id=ns.id,
                     worktree=ns.worktree,
+                    role=getattr(ns, "role", "execution"),
                 )
                 _tracker[ns.id].last_git_sig = git_sig
                 _tracker[ns.id].last_change_ts = time.time()
-        if active:
-            logger.info("Bootstrapped %d active session(s) into tracker", len(active))
+                bootstrapped += 1
+        logger.info("Bootstrapped %d active session(s) into tracker", bootstrapped)
     except Exception:
         logger.exception("Failed to bootstrap tracker")
 
@@ -181,7 +205,9 @@ def _handle_node_spawned(session, payload):
     worktree = payload.get("worktree")
     logger.info("Node spawned: %s (backend=%s)", ns_id, payload.get("backend"))
     if ns_id and ns_id not in _tracker:
-        st = SessionTrack(node_session_id=ns_id, worktree=worktree)
+        row = session.query(NodeSession).filter(NodeSession.id == ns_id).first()
+        role = getattr(row, "role", "execution") if row else "execution"
+        st = SessionTrack(node_session_id=ns_id, worktree=worktree, role=role)
         st.last_git_sig = _git_state_signature(worktree)
         st.last_change_ts = time.time()
         _tracker[ns_id] = st
@@ -194,8 +220,10 @@ def _watch_loop() -> None:
     from backend.watcher.signals import SIGNAL_SOURCES, derive_verdict as derive_from_signals
     from backend.watcher.signals_query import node_signal, AIONUI_DB
 
-    print(f"[PRINT] Watch loop started (interval={POLL_INTERVAL}s, settle={SETTLE_S}s)", flush=True)
-    logger.info("Watch loop started (interval=%ds, settle=%ds)", POLL_INTERVAL, SETTLE_S)
+    print(f"[PRINT] Watch loop started (interval={POLL_INTERVAL}s, "
+          f"planning_settle={_SETTLE_S_PLANNING}s, execute_settle={_SETTLE_S_EXECUTION}s)", flush=True)
+    logger.info("Watch loop started (interval=%ds, planning_settle=%ds, execute_settle=%ds)",
+                POLL_INTERVAL, _SETTLE_S_PLANNING, _SETTLE_S_EXECUTION)
 
     _bootstrap_tracker()
     print("[PRINT] bootstrap_tracker() done", flush=True)
@@ -229,7 +257,11 @@ def _watch_loop() -> None:
             try:
                 # Ensure tracker entry exists
                 if ns.id not in _tracker:
-                    st = SessionTrack(node_session_id=ns.id, worktree=ns.worktree)
+                    st = SessionTrack(
+                        node_session_id=ns.id,
+                        worktree=ns.worktree,
+                        role=getattr(ns, "role", "execution"),
+                    )
                     st.last_git_sig = _git_state_signature(ns.worktree)
                     st.last_change_ts = time.time()
                     _tracker[ns.id] = st
@@ -281,7 +313,7 @@ def _watch_loop() -> None:
 
                 role = getattr(ns, "role", "execution")
                 quiet_for = (now - st.last_change_ts) if st.last_change_ts else None
-                stable_polls = st.unchanged_cycles >= STABLE_POLLS
+                stable_polls = st.unchanged_cycles >= st.stable_polls_threshold
 
                 if role == "planning":
                     # Planning: use derive_verdict as gate against premature terminal.
@@ -294,21 +326,28 @@ def _watch_loop() -> None:
                         terminal = True
                     elif (v_signal == "running" and st.saw_fs_change
                           and stable_polls and quiet_for is not None
-                          and quiet_for >= SETTLE_S
+                          and quiet_for >= st.settle_s
                           and not fs_changed and not query_changed):
                         terminal = True
                     else:
                         terminal = False
                 else:
-                    # Execution: current settle-time logic (unchanged)
-                    terminal = bool(
-                        stable_polls
-                        and quiet_for is not None
-                        and quiet_for >= SETTLE_S
-                        and not fs_changed
-                        and not query_changed
-                        and (st.saw_change or qsig.get("have_data", False))
-                    )
+                    # Execution: settle-time + v_signal terminal detection.
+                    # Respect derive_verdict signals for stalled/error states,
+                    # and use settle-time only when changes were observed.
+                    if v_signal in ("failed", "crashed", "quota"):
+                        terminal = True
+                    elif v_signal == "stalled":
+                        terminal = True
+                    else:
+                        terminal = bool(
+                            stable_polls
+                            and quiet_for is not None
+                            and quiet_for >= st.settle_s
+                            and not fs_changed
+                            and not query_changed
+                            and (st.saw_change or qsig.get("have_data", False))
+                        )
 
                 last_activity = (qsig.get("last_activity_ms", 0) / 1000.0) or st.last_change_ts or st.started_ts
 
@@ -339,11 +378,9 @@ def _watch_loop() -> None:
 
                 # Terminal or error: derive final verdict
                 if terminal:
-                    # Settle-time says terminal: use it as ground truth.
-                    # The signal source may still report terminal=False (no
-                    # AionUi conversation), but the watcher's own settle-time
-                    # logic is the authoritative terminal detector.
-                    if role == "planning" and st.saw_fs_change:
+                    # Use saw_fs_change for both roles — if files were ever
+                    # written to the worktree, the agent produced output.
+                    if st.saw_fs_change:
                         verdict_str = "done"
                     else:
                         verdict_str = "done_no_change"

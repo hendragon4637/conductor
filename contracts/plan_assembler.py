@@ -102,19 +102,22 @@ class PlanDAG(BaseModel):
     @field_validator("nodes")
     @classmethod
     def checks(cls, v: list[PlanNode]) -> list[PlanNode]:
+        errs: list[str] = []
         ids = [n.id for n in v]
         if len(ids) != len(set(ids)):
             dupes = {i for i in ids if ids.count(i) > 1}
-            raise ValueError(f"duplicate node ids: {sorted(dupes)}")
+            errs.append(f"duplicate node ids: {sorted(dupes)}")
         idset = set(ids)
         for n in v:
             for d in n.depends_on:
                 if d not in idset:
-                    raise ValueError(
+                    errs.append(
                         f"unresolved dep '{d}' in node '{n.id}'"
                     )
             if not n.task.deliverables:
-                raise ValueError(f"node '{n.id}' missing deliverables")
+                errs.append(f"node '{n.id}' missing deliverables")
+        if errs:
+            raise ValueError("; ".join(errs))
         _assert_acyclic(v)
         return v
 
@@ -300,13 +303,24 @@ def validate_assembled(
 # ── Check boundary validation ────────────────────────────────────────────
 
 
-def validate_check_boundaries(dag_nodes: list[dict]) -> list[str]:
+def validate_check_boundaries(
+    dag_nodes: list[dict],
+    standard_bearing: bool = False,
+) -> list[str]:
     """Deterministic check boundary validation on assembled nodes.
 
     - Appends ``run_md_present`` L1 check to every node that lacks it
       (mutates the list in place).
+    - Appends ``gates_green`` L1 check to every node when the workspace
+      is standard-bearing (has an AGENTS.md with verification gates).
     - Validates L1 checks have ``cmd`` and L2 checks have ``rubric_item``
       or ``criterion``.
+
+    Args:
+        dag_nodes: List of assembled node dicts (mutated in place).
+        standard_bearing: When True, the workspace has an AGENTS.md standard
+            with verification gates. The ``gates_green`` L1 check is appended
+            to every node that lacks it.
 
     Returns a list of error messages (empty = all valid).
     """
@@ -320,6 +334,14 @@ def validate_check_boundaries(dag_nodes: list[dict]) -> list[str]:
         "criterion": "RUN.md exists in the worktree root",
     }
 
+    GATES_GREEN_CHECK = {
+        "id": "gates_green",
+        "tier": "L1",
+        "kind": "deterministic",
+        "cmd": "bash gates.sh",
+        "criterion": "All verification gates pass; see AGENTS.md for gate definitions",
+    }
+
     for node in dag_nodes:
         nid = node.get("id", "?")
         checks: list[dict] = node.get("checks") or []
@@ -329,6 +351,12 @@ def validate_check_boundaries(dag_nodes: list[dict]) -> list[str]:
         if not has_run_md:
             checks.append(dict(RUN_MD_CHECK))
             node["checks"] = checks
+
+        if standard_bearing:
+            has_gates_green = any(c.get("id") == "gates_green" for c in checks)
+            if not has_gates_green:
+                checks.append(dict(GATES_GREEN_CHECK))
+                node["checks"] = checks
 
         # Structural validation per check
         for ci, c in enumerate(checks):
@@ -358,6 +386,7 @@ def validate_check_boundaries(dag_nodes: list[dict]) -> list[str]:
 # ── Structured ✓/FIX feedback for remediation ─────────────────────────────
 
 _VALID_TIERS = {"L1", "L2"}
+_VALID_KINDS = {"deterministic", "rubric"}
 
 
 def render_deterministic_feedback(worktree: str) -> str:
@@ -384,7 +413,18 @@ def render_deterministic_feedback(worktree: str) -> str:
             "- MISSING: .plan/index.json — CREATE it first (STEP 1), "
             "then nodes (STEP 2), then checks (STEP 3)."
         )
-    ok.append("index.json ✓")
+    idx_desc_ok = True
+    for n in idx.get("nodes", []):
+        nid = n.get("id", "?")
+        desc = n.get("description", "")
+        if not desc or not isinstance(desc, str) or not desc.strip():
+            bad.append(
+                f"- INDEX INCOMPLETE: .plan/index.json node '{nid}' "
+                f"has empty description. Add a brief description."
+            )
+            idx_desc_ok = False
+    if idx_desc_ok:
+        ok.append("index.json ✓")
 
     # 2. Per-node validation
     for n in idx.get("nodes", []):
@@ -407,7 +447,45 @@ def render_deterministic_feedback(worktree: str) -> str:
                     f"≠ index '{nid}'. FIX the id field."
                 )
             else:
-                ok.append(f"{nf} ✓")
+                idx_deps = n.get("depends_on") or []
+                node_deps = node.get("depends_on") or []
+                if idx_deps != node_deps:
+                    bad.append(
+                        f"- DEPENDENCY MISMATCH: {nf} depends_on={node_deps} "
+                        f"≠ index depends_on={idx_deps}. "
+                        f"Make them identical in both places."
+                    )
+
+                nbad: list[str] = []
+                caps = node.get("capabilities")
+                if not caps or not isinstance(caps, list) or len(caps) == 0:
+                    nbad.append(
+                        f"- CONTENT INCOMPLETE: {nf} `capabilities` is empty. "
+                        f"Populate with capability names from the ROSTER."
+                    )
+                members = node.get("members")
+                if not members or not isinstance(members, list) or len(members) == 0:
+                    nbad.append(
+                        f"- CONTENT INCOMPLETE: {nf} `members` is empty. "
+                        f"Assign agent_config_ids from the ROSTER."
+                    )
+                task = node.get("task") or {}
+                dels = task.get("deliverables") if isinstance(task, dict) else None
+                if not dels or not isinstance(dels, list) or len(dels) == 0:
+                    nbad.append(
+                        f"- CONTENT INCOMPLETE: {nf} `task.deliverables` is empty. "
+                        f"List concrete file paths or artifacts this node produces."
+                    )
+                task_text = task.get("text") if isinstance(task, dict) else None
+                if not task_text or not isinstance(task_text, str) or not task_text.strip():
+                    nbad.append(
+                        f"- CONTENT INCOMPLETE: {nf} `task.text` is empty. "
+                        f"Describe what work this node performs."
+                    )
+                if nbad:
+                    bad.extend(nbad)
+                else:
+                    ok.append(f"{nf} ✓")
 
         # Checks file
         check_path = os.path.join(worktree, ".plan", "checks", fname)
@@ -451,6 +529,15 @@ def render_deterministic_feedback(worktree: str) -> str:
                 cbad.append(
                     f"- INVALID TIER: {cf} items {bad_tiers} have "
                     f"tier ∉ (L1, L2). FIX tier."
+                )
+            bad_kinds = [
+                c.get("id") for c in checks_raw
+                if c.get("kind") not in _VALID_KINDS
+            ]
+            if bad_kinds:
+                cbad.append(
+                    f"- INVALID KIND: {cf} items {bad_kinds} have "
+                    f"kind ∉ (deterministic, rubric). FIX kind."
                 )
         bad.extend(cbad)
         if not cbad:

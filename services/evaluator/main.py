@@ -42,6 +42,11 @@ if not logger.handlers:
 cfg = ServiceConfig.from_env()
 bus = EventBus(cfg)
 
+# ── Configurable limits ───────────────────────────────────────────────────
+
+MAX_STEERING_ATTEMPTS = int(os.environ.get("MAX_STEERING_ATTEMPTS", "10"))
+"""Max steering attempts before switching to full remediation."""
+
 # ── Handlers ─────────────────────────────────────────────────────────────
 
 
@@ -104,7 +109,7 @@ def _non_terminal_outcome(
 
     if gate_outcome == "remediate":
         steering_count = ns.steering_count or 0
-        if steering_count < 5:
+        if steering_count < MAX_STEERING_ATTEMPTS:
             emit(s, NodeSteer(
                 run_id=ns.run_id,
                 node_id=ns.node_id,
@@ -369,7 +374,7 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
     # 8. Emit NodeSteer or NodeRemediate (steering first, then remediate)
     if gate_outcome == "remediate" and not gate_exc and not judge_error:
         steering_count = ns.steering_count or 0
-        if steering_count < 5:
+        if steering_count < MAX_STEERING_ATTEMPTS:
             steer_event = NodeSteer(
                 run_id=ns.run_id,
                 node_id=ns.node_id,

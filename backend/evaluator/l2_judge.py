@@ -35,10 +35,10 @@ L2_MAX_CHARS = int(os.environ.get("L2_MAX_INPUT_CHARS", "24000"))
 GEVAL_THRESHOLD = 0.5
 """Score threshold for per-item criteria_met conversion."""
 
-from contracts.paths import INFRA_EXCLUDES, INFRA_SKIP_PARTS
+from contracts.paths import INFRA_EXCLUDES, INFRA_SKIP_PARTS, is_infra
 from contracts.feedback import get_dim_feedback, parse_feedback, try_validate_feedback
 
-ARTIFACT_SKIP_PARTS = INFRA_SKIP_PARTS | {".git"}
+ARTIFACT_SKIP_PARTS = INFRA_SKIP_PARTS | {".git", "AGENTS.md"}
 ARTIFACT_SKIP_SUFFIXES = {".pyc", ".pyo", ".so", ".dll", ".dylib", ".db", ".sqlite", ".sqlite3", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".tar", ".gz"}
 
 # ── Structured feedback contract (folded into evaluation_steps) ─────────────
@@ -153,29 +153,9 @@ def build_dim_metric(
         strict_mode=False,
     )
 
-_MAX_GEVAL_RETRIES = 3
-_GEVAL_RETRY_DELAY_S = 5
+_MAX_GEVAL_RETRIES = 5
+_GEVAL_RETRY_DELAY_S = 10
 
-_RETRYABLE_ERROR_PATTERNS = [
-    "rate_limit", "rate limit", "ratelimit",
-    "timeout",
-    "badrequesterror",
-    "serviceunavailable",
-    "resource_exhausted", "resourceexhausted",
-    "upstream request failed",
-    "connection", "connectionrefused", "connectionreset",
-    "internal server error",
-    "server error",
-    "429", "502", "503",
-    "api error",
-    "try again",
-]
-
-
-def _is_retryable(exc: Exception) -> bool:
-    """Return True if *exc* looks like a transient infra error."""
-    low = str(exc).lower()
-    return any(p in low for p in _RETRYABLE_ERROR_PATTERNS)
 
 # ── Legacy prompt templates (kept for ``llm_call`` backward compat) ─────────
 
@@ -231,7 +211,13 @@ class L2Result:
 
 def _artifact_skip_path(path: str) -> bool:
     p = Path(path)
-    return any(part in ARTIFACT_SKIP_PARTS for part in p.parts) or p.suffix.lower() in ARTIFACT_SKIP_SUFFIXES
+    if any(part in ARTIFACT_SKIP_PARTS for part in p.parts):
+        return True
+    if p.suffix.lower() in ARTIFACT_SKIP_SUFFIXES:
+        return True
+    if any(part.endswith(".egg-info") for part in p.parts):
+        return True
+    return False
 
 
 def _artifact_priority(path: str) -> tuple[int, str]:
@@ -258,14 +244,51 @@ def _read_artifact_text(path: Path, limit: int = 3000) -> str | None:
         return None
 
 
-def _build_repomix_snapshot(worktree: str, node_context: dict | None = None) -> str:
-    """Generate a bounded repomix snapshot of the worktree for the judge.
+def _collect_changed_files(worktree: str) -> list[str]:
+    """Return sorted, deduplicated, infra-filtered list of changed files.
 
-    Includes full content for: criterion ``where`` paths + deliverables +
-    manifests (pyproject.toml, package.json, RUN.md). Everything else is
-    a compressed tree listing (~2KB). Falls back gracefully if repomix
-    CLI is unavailable.
+    Combines uncommitted working-tree changes (``git diff --name-only``)
+    and the last-commit diff (``git diff HEAD~1..HEAD --name-only``) so
+    that both in-progress edits and recently-committed work are visible.
+    Paths matching ``is_infra()`` are excluded.
     """
+    changed: set[str] = set()
+    for cmd in (
+        ["git", "diff", "--name-only"],
+        ["git", "diff", "HEAD~1..HEAD", "--name-only"],
+    ):
+        try:
+            r = subprocess.run(cmd, cwd=worktree, capture_output=True, text=True, timeout=15)
+            for line in r.stdout.strip().splitlines():
+                line = line.strip()
+                if line and not is_infra(line):
+                    changed.add(line)
+        except Exception:
+            pass
+    return sorted(changed)
+
+
+def _build_repomix_snapshot(worktree: str, node_context: dict | None = None,
+                           extra_ignore: list[str] | None = None,
+                           extra_include_suffixes: list[str] | None = None,
+                           changed_files: list[str] | None = None) -> str:
+    """Generate a repomix snapshot targeting changed files.
+
+    When ``changed_files`` is non-empty (the common case), the snapshot
+    includes full content for those files + manifests + criterion
+    ``where`` paths + deliverables. When empty (e.g. first run with no
+    commits yet), falls back to auto-detected source directories
+    (``src/``, ``app/``, ``lib/``).
+
+    Always includes a compressed tree listing (~2KB) for overall
+    project structure context. Falls back gracefully if repomix CLI
+    is unavailable.
+
+    ``extra_ignore`` merges bundle-level exclude patterns (e.g., "node_modules")
+    into the repomix ``--ignore`` list. ``extra_include_suffixes`` adds suffix-
+    based include globs (e.g., ``**.py``, ``**.ts``) to ``--include``.
+    """
+    # ── Build include list: manifests + criteria paths always included ──
     include_paths: list[str] = ["pyproject.toml", "package.json", "requirements.txt", "RUN.md"]
     if node_context:
         for ac in (node_context.get("acceptance_criteria") or []):
@@ -273,8 +296,38 @@ def _build_repomix_snapshot(worktree: str, node_context: dict | None = None) -> 
         for d in (node_context.get("deliverables") or node_context.get("task", {}).get("deliverables", [])):
             if d not in include_paths:
                 include_paths.append(d)
-    include_paths = list(dict.fromkeys(include_paths))  # dedupe, preserve order
-    ignore_str = ",".join(INFRA_EXCLUDES)
+    include_paths = list(dict.fromkeys(include_paths))
+
+    # ── Primary: changed_files from git diff (already infra-filtered) ──
+    wt_path = Path(worktree)
+    if changed_files:
+        for f in changed_files:
+            candidate = f.removeprefix("./")
+            if _artifact_skip_path(candidate):
+                continue
+            if candidate not in include_paths and (wt_path / candidate).is_file():
+                include_paths.append(candidate)
+    else:
+        # Fallback: auto-detect source directories for fresh worktrees
+        for src_dir in ("src", "app", "lib"):
+            candidate = f"{src_dir}/**"
+            if (wt_path / src_dir).is_dir() and candidate not in include_paths:
+                include_paths.append(candidate)
+
+    # ── Merge ignore patterns ─────────────────────────────────────────
+    ignores = list(INFRA_EXCLUDES)
+    if extra_ignore:
+        for p in extra_ignore:
+            if p not in ignores:
+                ignores.append(p)
+    ignore_str = ",".join(ignores)
+
+    # ── Suffix-based include globs from bundle_rules ──────────────────
+    if extra_include_suffixes:
+        for suffix in extra_include_suffixes:
+            glob = f"**{suffix}"
+            if glob not in include_paths:
+                include_paths.append(glob)
     include_str = ",".join(include_paths)
     snapshot_path = os.path.join(worktree, ".conductor", "snapshot.md")
     os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
@@ -306,23 +359,28 @@ def _build_repomix_snapshot(worktree: str, node_context: dict | None = None) -> 
     parts: list[str] = []
     if snapshot:
         parts.append("[REPOMIX SNAPSHOT — contract paths + manifests (full content)]")
-        parts.append(snapshot[:10000])
+        parts.append(snapshot)
     if tree:
         parts.append("[REPO TREE — bounded]")
         parts.append(tree)
     return "\n".join(parts)
 
 
-def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS, node_context: dict | None = None) -> str:
+def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS,
+                     node_context: dict | None = None,
+                     bundle_rules: dict | None = None) -> str:
     """Collect evidence from the worktree for the judge to evaluate.
 
     Captures working-tree diff, last-commit diff (for committed executor
     results), tracked file listing, file contents, untracked files, and
     a bounded repomix snapshot ("what exists" alongside "what changed").
+
+    ``bundle_rules`` (from the active rubric's ``bundles`` config) controls
+    which file suffixes to prioritise (``include_suffixes``) and which path
+    parts to skip (``exclude_parts``) when building the repomix snapshot.
     """
     parts: list[str] = []
 
-    has_wt_diff = False
     try:
         result = subprocess.run(
             ["git", "diff", "--no-color"],
@@ -331,29 +389,9 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS, node_context:
         diff = result.stdout.strip()
         if diff:
             parts.append("[Git diff working tree]")
-            parts.append(diff[:max_chars // 2])
-            has_wt_diff = True
+            parts.append(diff)
     except Exception:
         parts.append("[Git diff: unavailable]")
-
-    # Report existence of important directories that would otherwise be
-    # excluded from the artifact (e.g., .venv), so the L2 judge has
-    # evidence they exist without including their full contents.
-    for _marker_dir in (".venv",):
-        if (Path(worktree) / _marker_dir).is_dir():
-            parts.append(f"[Directory exists: {_marker_dir}/]")
-
-    try:
-        result = subprocess.run(
-            ["git", "ls-files"],
-            cwd=worktree, capture_output=True, text=True, timeout=15,
-        )
-        tracked = [f for f in result.stdout.strip().splitlines() if f.strip()]
-        if tracked:
-            parts.append("[Tracked files]")
-            parts.append("\n".join(tracked[:30]))
-    except Exception:
-        pass
 
     try:
         result = subprocess.run(
@@ -364,7 +402,6 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS, node_context:
         untracked = result.stdout.strip()
         if untracked:
             all_lines = [f for f in untracked.splitlines() if f.strip()]
-            # Log what was excluded
             excluded = [f for f in all_lines if _artifact_skip_path(f)]
             if excluded:
                 print(f"[ARTIFACT] excluded {len(excluded)} files (skip path): {excluded[:5]}...", flush=True)
@@ -396,7 +433,7 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS, node_context:
             committed_diff = result.stdout.strip()
             if committed_diff:
                 parts.append("[Last commit diff]")
-                parts.append(committed_diff[:max_chars // 3])
+                parts.append(committed_diff)
         elif commit_count == 1:
             result = subprocess.run(
                 ["git", "show", "HEAD", "--no-color", "--stat"],
@@ -405,18 +442,24 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS, node_context:
             shown = result.stdout.strip()
             if shown:
                 parts.append("[Initial commit summary]")
-                parts.append(shown[:max_chars // 4])
+                parts.append(shown)
     except Exception:
         pass
 
-    # Append bounded repomix snapshot ("what exists" alongside "what changed")
-    snapshot = _build_repomix_snapshot(worktree, node_context)
+    # Append repomix snapshot targeting changed files (+ tree for structure)
+    extra_ignore = (bundle_rules or {}).get("exclude_parts")
+    extra_include_suffixes = (bundle_rules or {}).get("include_suffixes")
+    changed = _collect_changed_files(worktree)
+    snapshot = _build_repomix_snapshot(worktree, node_context,
+                                       extra_ignore=extra_ignore,
+                                       extra_include_suffixes=extra_include_suffixes,
+                                       changed_files=changed)
     if snapshot:
         parts.append("")
         parts.append(snapshot)
 
     full = "\n".join(parts)
-    return full[:max_chars]
+    return full
 
 
 # ── Judge model call ─────────────────────────────────────────────────────────
@@ -431,7 +474,7 @@ def _default_judge_llm(prompt: str) -> str:
         result = gateway_call("l2_judge", [
             {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
-        ], temperature=0.0, max_tokens=2048, timeout=JUDGE_TIMEOUT)
+        ], temperature=0.0, max_tokens=16386, timeout=JUDGE_TIMEOUT)
     except Exception as exc:
         raise JudgeUnavailableError(
             f"Judge model unavailable via LiteLLM gateway: {exc}"
@@ -546,33 +589,29 @@ def run_l2(
     if llm_call is not None:
         return _run_l2_legacy(rubric_checks, worktree, trace_id, llm_call)
 
-    # ── Default: deepeval GEval path ──────────────────────────────────────
-    artifact = collect_artifact(worktree, node_context=node_context)
-    print(f"[L2] artifact collected: {len(artifact)} chars for {worktree}", flush=True)
-    print(f"[L2] artifact content:\n{artifact}", flush=True)
-
-    # L2 input-size guard: oversize → flag-fail (no silent truncation)
-    if len(artifact) > L2_MAX_CHARS:
-        print(f"[L2] artifact OVERSIZE: {len(artifact)} chars > {L2_MAX_CHARS} cap for {worktree}", flush=True)
-        return L2Result(
-            score=0.0,
-            judgments=[],
-            rubric_count=len(rubric_checks),
-            items_met=0,
-            oversize=True,
-        )
-
     # Load rubric config from judge_rubrics if capability is known
+    # (MUST happen before collect_artifact so BUNDLE_RULES can filter the artifact)
     if rubric_dims is None and capability:
         rubric_dims = load_rubric_config(capability)
     if rubric_dims:
         active_anchors = _dims_to_rubric_anchors(rubric_dims)
         active_fc = rubric_dims.get("feedback_contract", FEEDBACK_CONTRACT)
         rubric_source = f"judge_rubrics/{capability}"
+        bundle_rules = rubric_dims.get("bundles") or {}
     else:
         active_anchors = L2_RUBRIC_ANCHORS
         active_fc = FEEDBACK_CONTRACT
         rubric_source = "hardcoded"
+        bundle_rules = {}
+
+    # ── Default: deepeval GEval path ──────────────────────────────────────
+    artifact = collect_artifact(worktree, node_context=node_context, bundle_rules=bundle_rules)
+    print(f"[L2] artifact collected: {len(artifact)} chars for {worktree}", flush=True)
+    print(f"[L2] artifact content: {len(artifact)} chars, showing first {L2_MAX_CHARS}\n{artifact[:L2_MAX_CHARS]}", flush=True)
+
+    # L2 input-size warning: log oversize but let judge proceed
+    if len(artifact) > L2_MAX_CHARS:
+        print(f"[L2] artifact OVERSIZE: {len(artifact)} chars > {L2_MAX_CHARS} cap for {worktree} — proceeding anyway", flush=True)
 
     judgments: list[Judgment] = []
     total_weight = 0.0
@@ -634,17 +673,17 @@ def run_l2(
             except Exception as exc:
                 exc_str = str(exc)
                 last_error = exc_str
-                if _is_retryable(exc) and attempt < _MAX_GEVAL_RETRIES:
+                if attempt < _MAX_GEVAL_RETRIES:
                     delay = _GEVAL_RETRY_DELAY_S * (2 ** attempt)
                     print(f"[L2] GEval transient error (attempt {attempt+1}), retrying in {delay}s: {exc_str[:200]}", flush=True)
                     _time.sleep(delay)
                 else:
-                    print(f"[L2] GEval permanent error (attempt {attempt+1}): {exc_str[:300]}", flush=True)
+                    print(f"[L2] GEval retries exhausted (attempt {attempt+1}): {exc_str[:300]}", flush=True)
                     judgment = Judgment(
                         check_id=c.id,
                         criteria_met=False,
                         score=0.0,
-                        explanation=f"GEval error ({'retries exhausted' if attempt > 0 else 'permanent'}): {exc}",
+                        explanation=f"GEval error (retries exhausted): {exc}",
                     )
                     break
 
@@ -683,7 +722,7 @@ def _run_l2_legacy(
     """Legacy code path: raw LLM call per rubric item (used when ``llm_call`` is injected for tests)."""
     artifact = collect_artifact(worktree)
     if len(artifact) > L2_MAX_CHARS:
-        return L2Result(score=0.0, judgments=[], rubric_count=len(rubric_checks), items_met=0, oversize=True)
+        print(f"[L2] legacy artifact OVERSIZE: {len(artifact)} chars > {L2_MAX_CHARS} — proceeding anyway", flush=True)
 
     judgments: list[Judgment] = []
     total_weight = 0.0

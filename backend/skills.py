@@ -318,7 +318,7 @@ def install_global_agents(engine, renderer: HarnessRenderer) -> int:
                 SELECT agent_config_id, role, domain, system_prompt,
                        tools, new_capabilities, source
                 FROM agent_configs
-                WHERE source = 'imported'
+                WHERE source = 'imported' AND active = true
                 ORDER BY agent_config_id
             """)
         ).mappings()
