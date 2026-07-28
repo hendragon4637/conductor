@@ -18,16 +18,18 @@ import stat
 import subprocess
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import pika
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from contracts.events import GateEvaluated, NodeSteer, NodeRemediate, CalibrateTrigger
-from shared.bus import EventBus
+from contracts.events import GateEvaluated, NodeSteer, NodeRemediate, CalibrateTrigger, L4Findings
+from shared.bus import EventBus, RequeueHandled
 from shared.config import ServiceConfig
 from shared.db import init_db
 from shared.outbox import emit
@@ -46,6 +48,9 @@ bus = EventBus(cfg)
 
 MAX_STEERING_ATTEMPTS = int(os.environ.get("MAX_STEERING_ATTEMPTS", "10"))
 """Max steering attempts before switching to full remediation."""
+
+STAGNATION_LIMIT = int(os.environ.get("STAGNATION_LIMIT", "3"))
+"""Consecutive ``done_no_change`` verdicts with no L2 improvement before forced failure."""
 
 # ── Handlers ─────────────────────────────────────────────────────────────
 
@@ -178,8 +183,14 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
         return
 
     # Role filter: planning sessions are handled by planner-svc, not evaluator
-    if getattr(ns, "role", "execution") == "planning":
+    role = getattr(ns, "role", "execution")
+    if role == "planning":
         logger.info("NodeSession %s is role=planning — evaluator skips", node_session_id)
+        return
+    # L4 sessions have their own handler (watcher-observed)
+    if role == "l4":
+        from services.evaluator.l4_runner import _on_l4_observed
+        _on_l4_observed(s, payload)
         return
 
     worktree: str | None = ns.worktree
@@ -246,16 +257,27 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
     prev_l1_passed_ids: list[str] | None = (
         prev_session.l1_passed_ids if prev_session else None
     )
+
+    ns.verdict = verdict
+
+    # Load partial judgments from previous re-queue (if any)
+    existing_judgments = _deserialize_partial_judgments(ns.l2_partial_judgments)
+    best_chunk_idx = ns.l2_best_chunk_idx or 0
+    node_context_with_chunk = dict(existing_judgments=existing_judgments, best_chunk_idx=best_chunk_idx)
+
     try:
         decision = evaluate_gate(
             check_list=check_list,
             worktree=worktree,
             l2_fn=lambda checks, wt: run_l2(
                 checks, wt, trace_id=ns.langfuse_trace_id,
+                node_context=node_context_with_chunk,
+                existing_judgments=existing_judgments,
             ),
             threshold=0.7,
             prev_l1_passed_ids=prev_l1_passed_ids,
             has_changes_since_prev=bool(ns.remediation_of),
+            verdict=verdict,
         )
     except JudgeUnavailableError:
         logger.error(
@@ -280,24 +302,13 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
         gate_exc = str(exc)[:500]
         # Fall through — emit GateEvaluated with gate_outcome='error'
 
+    # ── Re-queue handling ────────────────────────────────────────────
+    if decision is not None and decision.action == "requeue":
+        _handle_requeue(s, ns, node_session_id, decision)
+        return
+
     # ── V8 observability ──────────────────────────────────────────────
     if decision is not None and decision.l1_flagged:
-        logger.warning(
-            "False-fail escalation ns=%s L1_flag=True — L2 probe passed "
-            "but L1 checks still failing",
-            node_session_id,
-        )
-        print(  # noqa: T201
-            f"[PRINT] V8 false-fail ns={node_session_id} l1_flagged=True",
-            flush=True,
-        )
-
-    # ── Determine outcome ────────────────────────────────────────────
-    if gate_exc:
-        gate_outcome = "error"
-        best = None
-        stop_reason = gate_exc
-    elif decision is not None and decision.action == "done":
         gate_outcome = "done"
         best = decision.goal_review
         stop_reason = "passed"
@@ -331,9 +342,32 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
         best = best_score(history)
 
         if not continue_bool:
-            gate_outcome = "failed"
+            gate_outcome = "failed" if stop_reason != "passed" else "done"
         else:
             gate_outcome = "remediate"
+
+    # Gap 5: Stagnation detection — N consecutive done_no_change → failed
+    if gate_outcome == "remediate" and verdict == "done_no_change" and decision is not None:
+        prior_no_change = (
+            s.query(NodeSession)
+            .filter(
+                NodeSession.run_id == ns.run_id,
+                NodeSession.node_id == ns.node_id,
+                NodeSession.id != node_session_id,
+                NodeSession.verdict == "done_no_change",
+            )
+            .count()
+        )
+        if prior_no_change >= STAGNATION_LIMIT:
+            gate_outcome = "failed"
+            stop_reason = "stagnation"
+            if decision.goal_review is None:
+                decision.goal_review = 0.0
+            print(  # noqa: T201
+                f"[PRINT] Evaluator: STAGNATION ns={node_session_id} "
+                f"prior_no_change={prior_no_change} limit={STAGNATION_LIMIT}",
+                flush=True,
+            )
 
     # 5. Persist gate results on the NodeSession
     if decision is not None:
@@ -455,6 +489,88 @@ def _record_judge_error(s, ns: "NodeSession", node_session_id: str) -> None:
         f"recorded on node_session",
         flush=True,
     )
+
+
+# ── Partial judgment helpers (chunked evaluation re-queue) ────────────────
+
+def _deserialize_partial_judgments(raw: list | None) -> list:
+    """Deserialize stored partial judgments back to Judgment objects.
+
+    Returns empty list if no partial judgments exist.
+    """
+    if not raw:
+        return []
+    from backend.evaluator.schema import Judgment as JudgementModel
+    result = []
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                result.append(JudgementModel(**item))
+            except Exception:
+                logger.warning("Skipping malformed partial judgment: %s", str(item)[:100])
+    return result
+
+
+def _handle_requeue(s, ns: Any, node_session_id: str,
+                    decision: Any) -> None:
+    """Save partial judgments and re-queue via DLX delay queue.
+
+    Called when L2 returns ``partial=True`` (retries exhausted mid-evaluation).
+    Persists completed judgments so the next delivery picks up where it
+    left off, then publishes a delayed ``node.observed`` event.
+    """
+    import random
+
+    completed = []
+    for item in (decision.l2_feedback or []):
+        if isinstance(item, dict) and item.get("check_id"):
+            completed.append(item)
+    ns.l2_partial_judgments = completed if completed else None
+    ns.l2_best_chunk_idx = getattr(decision, "l2_chunk_idx", 0) or 0
+    s.commit()
+
+    delay_ms = random.randint(120_000, 300_000)  # 2-5 min
+    logger.info(
+        "REQUEUE node_session=%s partial_judgments=%d delay=%dms",
+        node_session_id, len(completed), delay_ms,
+    )
+    print(  # noqa: T201
+        f"[PRINT] Evaluator: REQUEUE ns={node_session_id} "
+        f"partial={len(completed)} delay={delay_ms}ms",
+        flush=True,
+    )
+
+    payload = {
+        "node_session_id": node_session_id,
+        "verdict": "done",
+    }
+    publish_ok = False
+    try:
+        params = pika.URLParameters(cfg.rabbit_url)
+        conn = pika.BlockingConnection(params)
+        ch = conn.channel()
+        ch.basic_publish(
+            exchange="",
+            routing_key="evaluator.delay",
+            body=json.dumps(payload),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                expiration=str(delay_ms),
+            ),
+        )
+        conn.close()
+        publish_ok = True
+    except Exception as exc:
+        logger.exception(
+            "Failed to publish delayed retry for ns=%s: %s",
+            node_session_id, exc,
+        )
+
+    # Signal consumer to skip mark_processed so the delayed copy isn't deduped.
+    # Only raise when publish succeeded — without the delayed message there is
+    # nothing to re-deliver, so mark_processed is correct.
+    if publish_ok:
+        raise RequeueHandled()
 
 
 def on_ratchet_trigger(s, payload: dict) -> None:
@@ -605,11 +721,11 @@ def _parse_l4_install_commands(run_md: Path) -> list[str]:
     return deduped
 
 
-def _write_l4_opencode_json(dst: Path) -> None:
-    config = {
+def _write_l4_opencode_json(dst: Path, model: str | None = None) -> None:
+    config: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
         "permission": {
-            "edit": {"*": "deny", "l4_scratch/**": "allow"},
+            "edit": {"*": "allow"},
             "bash": {
                 "*": "allow",
                 "rm -rf *": "deny",
@@ -622,6 +738,7 @@ def _write_l4_opencode_json(dst: Path) -> None:
             "websearch": "deny",
         },
     }
+    config["model"] = model or "litellm/deepseek-planning"
     (dst / "opencode.json").write_text(json.dumps(config, indent=2) + "\n")
 
 
@@ -713,38 +830,24 @@ def _verify_l4_source_unchanged(dst: Path, baseline: dict[str, str]) -> None:
     raise RuntimeError(f"L4 source changed in isolated copy: {changed[:20]}")
 
 
+def _load_plan_goal(db_url: str, plan_id: str) -> str | None:
+    """Load the ``goal`` text from a plan for L4 scenario generation."""
+    if not db_url or not plan_id:
+        return None
+    try:
+        import psycopg
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT goal FROM plans WHERE plan_id = %s", (plan_id,))
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+    except Exception:
+        logger.debug("Could not load plan goal for %s", plan_id)
+        return None
+
+
 def _is_l4_runnable(product_type: str, needs_usage_sim: bool | None) -> tuple[bool, str]:
-    normalized = (product_type or "").strip().lower()
-    if normalized in {"doc", "docs", "none", "static"}:
-        return False, f"product_type={product_type!r} has no runnable surface"
-    if needs_usage_sim is False and not normalized:
-        return False, "plan.needs_usage_sim is false and no runnable product_type supplied"
     return True, ""
-
-
-def _l4_goal_brief(run_id: str, case_name: str, product_type: str, plan_success: str) -> str:
-    acceptance = ""
-    if case_name == "acceptance":
-        acceptance = (
-            "\nAcceptance focus:\n"
-            f"- Verify this success criterion as pass/fail: {plan_success or '(none provided)'}\n"
-        )
-    scenario = plan_success or "Use the product exactly as RUN.md documents."
-    return (
-        f"L4 persona simulation — Case: {case_name}\n\n"
-        f"Run ID: {run_id}\n"
-        f"Product type: {product_type or 'unknown'}\n"
-        f"Scenario: {scenario}\n"
-        f"{acceptance}\n"
-        "Instructions (mandatory):\n"
-        "1. Read RUN.md only to learn exact run/verify commands and product access details.\n"
-        "2. Run the product using RUN.md commands; dependencies are already installed by Conductor.\n"
-        "3. Exercise the scenario as a black-box user and report what worked/failed.\n"
-        "4. DO NOT modify, fix, patch, refactor, or edit product source files.\n"
-        "5. DO NOT inspect source code to diagnose bugs; observe behavior through the running product.\n"
-        "6. Write any notes, logs, screenshots, or scratch files only under l4_scratch/.\n"
-        "7. Return a structured L4 report with per-step PASS/FAIL, status/output, and overall friction.\n"
-    )
 
 
 def _prepare_l4_workspace(
@@ -764,6 +867,16 @@ def _prepare_l4_workspace(
         _cleanup_l4_workspace(dst)
     try:
         shutil.copytree(src, dst, symlinks=True)
+
+        # Make the workspace an independent git repo so the watcher's
+        # ``_git_state_signature()`` can detect file changes.
+        git_file = dst / ".git"
+        if git_file.exists() and not git_file.is_dir():
+            git_file.unlink()
+        subprocess.run(["git", "init"], cwd=str(dst), capture_output=True, timeout=30)
+        subprocess.run(["git", "add", "-A"], cwd=str(dst), capture_output=True, timeout=30)
+        subprocess.run(["git", "commit", "-m", "L4 baseline"], cwd=str(dst), capture_output=True, timeout=30)
+
         (dst / "l4_scratch").mkdir(parents=True, exist_ok=True)
         _write_l4_opencode_json(dst)
         install_commands = _parse_l4_install_commands(dst / "RUN.md")
@@ -774,34 +887,6 @@ def _prepare_l4_workspace(
     except Exception:
         _cleanup_l4_workspace(dst)
         raise
-
-
-def _l4_score_via_deepeval(report_text: str, task_description: str) -> float:
-    """Score L4 report using deepeval TaskCompletionMetric.
-
-    Replaces the heuristic keyword-counting approach with an LLM judge
-    that evaluates whether the report demonstrates task completion.
-    """
-    from deepeval.metrics import TaskCompletionMetric
-    from deepeval.test_case import LLMTestCase
-    from shared.eval_models import JUDGE as JUDGE_MODEL
-
-    try:
-        metric = TaskCompletionMetric(
-            task=task_description,
-            model=JUDGE_MODEL,
-            threshold=0.5,
-            include_reason=True,
-        )
-        test_case = LLMTestCase(
-            input=task_description,
-            actual_output=report_text,
-        )
-        metric.measure(test_case)
-        return round(float(metric.score), 4)
-    except Exception as exc:
-        logger.warning("L4 TaskCompletionMetric failed: %s", exc)
-        return 0.5  # neutral fallback
 
 
 def on_run_completed(s, payload: dict) -> None:
@@ -846,8 +931,8 @@ def on_run_completed(s, payload: dict) -> None:
     plan_success = ""
     needs_usage_sim: bool | None = None
     product_type = str(payload.get("product_type") or "")
+    db_url = os.environ.get("DATABASE_URL", "")
     try:
-        db_url = os.environ.get("DATABASE_URL", "")
         if db_url:
             with psycopg.connect(db_url) as p_conn:
                 with p_conn.cursor() as cur:
@@ -872,86 +957,37 @@ def on_run_completed(s, payload: dict) -> None:
         return
 
     l4_workspace: Path | None = None
+    ns_id: str | None = None
     try:
         l4_workspace, install_logs, source_baseline = _prepare_l4_workspace(run_id, worktree)
         logger.info("Prepared isolated L4 workspace for run=%s at %s installs=%s", run_id, l4_workspace, install_logs)
 
-        l4_standalone: float | None = None
-        l4_acceptance: float | None = None
-        case_notes: list[str] = []
-        timed_out = False
+        goal = _load_plan_goal(db_url, plan_id)
 
-        from backend.aionui.client import AionUiClient
-        aionui = AionUiClient(os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+        from services.evaluator.l4_runner import run_l4_phase
 
-        for case_name in ("standalone", "acceptance"):
-            goal_brief = _l4_goal_brief(run_id, case_name, product_type, plan_success)
-            conv_id = aionui.create_conversation(
-                preset_agent_type="acp",
-                workspace=str(l4_workspace),
-                backend="opencode",
-            )
-            aionui.send_message(conv_id, goal_brief)
-            logger.info("L4 case=%s conv=%s workspace=%s", case_name, conv_id, l4_workspace)
-
-            deadline = time.monotonic() + int(os.environ.get("L4_CASE_TIMEOUT_S", "300"))
-            l4_text = "L4 agent timed out"
-            while time.monotonic() < deadline:
-                time.sleep(10)
-                try:
-                    msgs = aionui.get_messages(conv_id)
-                    assistant_responses = [
-                        m for m in (msgs or [])
-                        if m.get("type") == "text" and m.get("position") == "left"
-                    ]
-                    if not assistant_responses:
-                        continue
-                    raw_content = assistant_responses[-1].get("content", "{}")
-                    try:
-                        parsed = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
-                        l4_text = parsed.get("content", str(raw_content)) if isinstance(parsed, dict) else str(raw_content)
-                    except (json.JSONDecodeError, TypeError):
-                        l4_text = str(raw_content)
-                    score = _l4_score_via_deepeval(l4_text, goal_brief)
-                    if case_name == "standalone":
-                        l4_standalone = score
-                    else:
-                        l4_acceptance = score
-                    case_notes.append(f"{case_name}: conv={conv_id} score={score}")
-                    print(f"[PRINT] L4 case={case_name} score={score} conv={conv_id}", flush=True)
-                    break
-                except Exception as exc:
-                    logger.debug("L4 poll failed for conv=%s: %s", conv_id, exc)
-            else:
-                timed_out = True
-                case_notes.append(f"{case_name}: conv={conv_id} timeout")
-                break
-
-        _verify_l4_source_unchanged(l4_workspace, source_baseline)
-
-        with db_session() as db:
-            r = db.query(RunModel).filter(RunModel.id == run_id).first()
-            if r:
-                r.l4_standalone = l4_standalone
-                r.l4_acceptance = l4_acceptance
-                r.l4_status = "run_failed" if timed_out else "scored"
-                r.l4_reason = "; ".join(case_notes)
-                db.commit()
-
-        logger.info(
-            "L4 done for run=%s status=%s standalone=%s acceptance=%s",
-            run_id, "run_failed" if timed_out else "scored", l4_standalone, l4_acceptance,
+        ns_id = run_l4_phase(
+            s=s,
+            run_id=run_id,
+            plan_id=plan_id,
+            worktree=worktree,
+            product_type=product_type,
+            goal=goal,
+            spec=plan_success,
+            l4_workspace=l4_workspace,
         )
+
+        logger.info("L4 spawned for run=%s ns=%s — watcher will handle completion", run_id, ns_id)
     except Exception as exc:
-        logger.exception("L4 isolated execution failed for run=%s", run_id)
+        logger.exception("L4 spawn failed for run=%s", run_id)
         with db_session() as db:
             r = db.query(RunModel).filter(RunModel.id == run_id).first()
             if r:
-                r.l4_status = "run_failed"
+                r.l4_status = "spawn_failed"
                 r.l4_reason = str(exc)[:500]
                 db.commit()
-    finally:
-        if l4_workspace is not None:
+        # Clean up workspace only if NodeSpawned was never emitted
+        if l4_workspace is not None and ns_id is None:
             _cleanup_l4_workspace(l4_workspace)
 
 
@@ -1094,6 +1130,134 @@ def calibrate_endpoint(node_type: str) -> CalibrateResponse:
         total=report.total,
         note=report.note,
     )
+
+
+# ── Manual L4 endpoint ────────────────────────────────────────────
+
+class ManualL4Request(BaseModel):
+    parent_run_id: str
+    plan_id: str = ""
+    verdict: str  # pass | partial | fail
+    scenario_results: list[dict] = []
+    findings: list[dict] = []
+    observations: list[str] = []
+
+
+class ManualL4Response(BaseModel):
+    l4_run_id: str
+    structural: str
+    published: bool
+    message: str
+
+
+@app.post("/l4/manual", response_model=ManualL4Response)
+def manual_l4(body: ManualL4Request) -> ManualL4Response:
+    """Accept a human-authored L4 report, validate it, and publish if qualifying.
+
+    Uses the same ``L4Report`` schema + consistency checks as the automated
+    harness path.  The only difference is ``labeled_by='human'``.
+    """
+    from services.evaluator.l4_runner import (
+        SEVERITY_RANK,
+        MIN_SEVERITY_RANK,
+        _should_publish,
+        _validate_report,
+    )
+    from services.evaluator.l4_scenarios import make_spec_hash
+    from shared.l4_models import Scenario
+
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return ManualL4Response(
+            l4_run_id="", structural="error",
+            published=False, message="DATABASE_URL not set",
+        )
+
+    l4_run_id = f"l4_manual_{uuid.uuid4().hex[:8]}"
+    project_id = "manual"
+
+    seeded = [
+        Scenario(id=sr.get("scenario_id", f"s{i}"), source="seeded",
+                 as_a="manual user", wants="manual scenario", success_looks_like="verified")
+        for i, sr in enumerate(body.scenario_results)
+    ]
+
+    import tempfile
+    worktree = Path(tempfile.mkdtemp(prefix="l4_manual_"))
+    try:
+        (worktree / "l4_scratch").mkdir(parents=True, exist_ok=True)
+
+        report_data = {
+            "verdict": body.verdict,
+            "scenario_results": body.scenario_results,
+            "findings": body.findings,
+            "observations": body.observations,
+        }
+        report_path = worktree / "l4_scratch" / "report.json"
+        report_path.write_text(json.dumps(report_data))
+
+        structural, report = _validate_report(report_path, seeded, str(worktree))
+        if structural == "ok" and report:
+            spec_hash = make_spec_hash(None, None)
+            with psycopg.connect(db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO runs
+                           (id, plan_id, project_id, state, kind, parent_run_id,
+                            l4_scenarios, l4_report, l4_structural, spec_hash)
+                           VALUES (%s, %s, %s, 'completed', 'l4', %s,
+                                   %s::jsonb, %s::jsonb, %s, %s)
+                           ON CONFLICT (id) DO NOTHING""",
+                        (l4_run_id, body.plan_id or "", project_id,
+                         body.parent_run_id,
+                         json.dumps([s.model_dump() for s in seeded]),
+                         json.dumps(report_data), structural, spec_hash),
+                    )
+                conn.commit()
+
+            published = False
+            if _should_publish(report):
+                above_floor = [
+                    f for f in report.findings
+                    if SEVERITY_RANK.get(f.severity, 0) >= MIN_SEVERITY_RANK
+                ]
+                if above_floor:
+                    from contracts.events import L4Findings
+                    event = L4Findings(
+                        run_id=body.parent_run_id,
+                        plan_id=body.plan_id,
+                        project_id=project_id,
+                        findings=[f.model_dump() for f in above_floor],
+                        labeled_by="human",
+                    )
+                    routing_key = "l4.findings"
+                    with psycopg.connect(db_url) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """INSERT INTO outbox
+                                   (routing_key, payload, contracts_version)
+                                   VALUES (%s, %s::jsonb, '1.0')""",
+                                (routing_key, json.dumps(event.model_dump())),
+                            )
+                        conn.commit()
+                    published = True
+
+            return ManualL4Response(
+                l4_run_id=l4_run_id,
+                structural=structural,
+                published=published,
+                message=f"Report accepted. Published={published}",
+            )
+        else:
+            return ManualL4Response(
+                l4_run_id=l4_run_id,
+                structural=structural or "unknown",
+                published=False,
+                message=f"Validation failed: {structural}",
+            )
+    finally:
+        import shutil
+        shutil.rmtree(worktree, ignore_errors=True)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────

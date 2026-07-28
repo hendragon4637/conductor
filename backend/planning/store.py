@@ -44,10 +44,14 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
                    ON CONFLICT (project_id) DO NOTHING""",
                 (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
             )
+            origin_val = getattr(plan, "origin", "human")
+            source_ref_val = getattr(plan, "source_ref", None)
+            intake_id_val = getattr(plan, "intake_id", None)
             cur.execute(
                 """INSERT INTO plans
-                   (plan_id, project_id, user_intent, goal, success, dag, ratified, version, needs_usage_sim)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   (plan_id, project_id, user_intent, goal, success, dag, ratified, version,
+                    needs_usage_sim, origin, source_ref, intake_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (plan_id) DO UPDATE SET
                      project_id = EXCLUDED.project_id,
                      user_intent = EXCLUDED.user_intent,
@@ -55,7 +59,10 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
                      success = EXCLUDED.success,
                      dag = EXCLUDED.dag,
                      ratified = EXCLUDED.ratified,
-                     needs_usage_sim = EXCLUDED.needs_usage_sim
+                     needs_usage_sim = EXCLUDED.needs_usage_sim,
+                     origin = EXCLUDED.origin,
+                     source_ref = EXCLUDED.source_ref,
+                     intake_id = EXCLUDED.intake_id
                 """,
                 (
                     plan.plan_id,
@@ -67,6 +74,9 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
                     ratified,
                     plan.version,
                     needs_usage_sim,
+                    origin_val,
+                    source_ref_val,
+                    intake_id_val,
                 ),
             )
         c.commit()
@@ -148,8 +158,10 @@ def save_run(run: dict[str, Any]) -> None:
                 """INSERT INTO runs
                    (id, plan_id, project_id, state, worktree_root, note,
                     approved_at, finished_at,
-                    l4_standalone, l4_acceptance, l4_status, l4_reason, run_md_present)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    l4_standalone, l4_acceptance, l4_status, l4_reason, run_md_present,
+                    kind, parent_run_id, l4_scenarios, l4_report, l4_structural, spec_hash)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (id) DO UPDATE SET
                      state = EXCLUDED.state,
                      project_id = COALESCE(EXCLUDED.project_id, runs.project_id),
@@ -161,7 +173,13 @@ def save_run(run: dict[str, Any]) -> None:
                      l4_acceptance = COALESCE(EXCLUDED.l4_acceptance, runs.l4_acceptance),
                      l4_status = COALESCE(EXCLUDED.l4_status, runs.l4_status),
                      l4_reason = COALESCE(EXCLUDED.l4_reason, runs.l4_reason),
-                     run_md_present = COALESCE(EXCLUDED.run_md_present, runs.run_md_present)
+                     run_md_present = COALESCE(EXCLUDED.run_md_present, runs.run_md_present),
+                     kind = COALESCE(EXCLUDED.kind, runs.kind),
+                     parent_run_id = COALESCE(EXCLUDED.parent_run_id, runs.parent_run_id),
+                     l4_scenarios = COALESCE(EXCLUDED.l4_scenarios, runs.l4_scenarios),
+                     l4_report = COALESCE(EXCLUDED.l4_report, runs.l4_report),
+                     l4_structural = COALESCE(EXCLUDED.l4_structural, runs.l4_structural),
+                     spec_hash = COALESCE(EXCLUDED.spec_hash, runs.spec_hash)
                 """,
                 (
                     run.get("id"),
@@ -177,6 +195,12 @@ def save_run(run: dict[str, Any]) -> None:
                     run.get("l4_status"),
                     run.get("l4_reason"),
                     run.get("run_md_present"),
+                    run.get("kind", "execution"),
+                    run.get("parent_run_id"),
+                    json.dumps(run["l4_scenarios"]) if run.get("l4_scenarios") else None,
+                    json.dumps(run["l4_report"]) if run.get("l4_report") else None,
+                    run.get("l4_structural"),
+                    run.get("spec_hash"),
                 ),
             )
         c.commit()
@@ -223,12 +247,16 @@ def _check_active_project_run(conn: psycopg.Connection, project_id: str) -> None
     Called by ``save_run`` and the planner endpoints as defense-in-depth.
     The partial unique index ``idx_runs_active_project`` provides DB-level
     enforcement; this app-layer check gives a clean error message.
+
+    L4 runs (``kind='l4'``) are exempt — they run alongside their parent and
+    must not consume the project lock.
     """
     with conn.cursor() as cur:
         cur.execute(
             """SELECT id FROM runs
                WHERE project_id = %s
                  AND state NOT IN ('done', 'failed', 'cancelled')
+                 AND (kind IS NULL OR kind != 'l4')
                LIMIT 1""",
             (project_id,),
         )
@@ -243,6 +271,10 @@ def _check_active_project_run(conn: psycopg.Connection, project_id: str) -> None
 def get_active_run_for_project(project_id: str) -> dict[str, Any] | None:
     """Return an active (non-terminal) run for the project, or None.
 
+    L4 runs (``kind='l4'``) are excluded — they are harness runs that
+    execute alongside their parent and must not count as the project's
+    active run.
+
     Used by the ``/goal`` and ``/ratify`` endpoints to check early
     before any expensive processing.
     """
@@ -253,6 +285,7 @@ def get_active_run_for_project(project_id: str) -> dict[str, Any] | None:
                 """SELECT id, plan_id, state, project_id FROM runs
                    WHERE project_id = %s
                      AND state NOT IN ('done', 'failed', 'cancelled')
+                     AND (kind IS NULL OR kind != 'l4')
                    LIMIT 1""",
                 (project_id,),
             )

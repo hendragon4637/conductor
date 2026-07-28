@@ -1,0 +1,33 @@
+# Maturity floor configuration for tool catalog candidates
+# Tools below these thresholds are excluded from consideration.
+
+defaults:
+  min_stars: 20
+  min_age_days: 90  # at least 3 months old
+  allowed_licenses:
+    - MIT
+    - Apache-2.0
+    - BSD-2-Clause
+    - BSD-3-Clause
+    - MPL-2.0
+    - Unlicense
+    - CC0-1.0
+    - 0BSD
+  blocked_licenses:
+    - GPL-2.0
+    - GPL-3.0
+    - AGPL-3.0
+    - Proprietary
+  velocity_min_commits_per_quarter: 5
+  min_releases_per_year: 1
+
+per_kind_overrides:
+  skill:
+    min_stars: 20
+    min_age_days: 90
+  mcp:
+    min_stars: 50
+    min_age_days: 30
+  cli:
+    min_stars: 200
+    min_age_days: 180

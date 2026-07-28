@@ -1,0 +1,6 @@
+.opencode/
+.conductor/
+.plan/
+.venv/
+node_modules/
+l4_scratch/

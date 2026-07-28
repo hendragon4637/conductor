@@ -50,9 +50,13 @@ _SETTLE_S_EXECUTION = int(os.environ.get("WATCHER_SETTLE_S_EXECUTION", "60"))
 _STABLE_POLLS_EXECUTION = int(os.environ.get("WATCHER_STABLE_POLLS_EXECUTION", "5"))
 
 
+_SETTLE_S_L4 = int(os.environ.get("WATCHER_SETTLE_S_L4", "60"))
+_STABLE_POLLS_L4 = int(os.environ.get("WATCHER_STABLE_POLLS_L4", "5"))
+
 _ROLE_CONFIG: dict[str, dict[str, int]] = {
     "planning": {"settle_s": _SETTLE_S_PLANNING, "stable_polls": _STABLE_POLLS_PLANNING},
     "execution": {"settle_s": _SETTLE_S_EXECUTION, "stable_polls": _STABLE_POLLS_EXECUTION},
+    "l4": {"settle_s": _SETTLE_S_L4, "stable_polls": _STABLE_POLLS_L4},
 }
 
 

@@ -81,6 +81,7 @@ class RunCompleted(BaseModel):
 
 
 class RunFailed(BaseModel):
+    event_type: str = "run.failed"
     run_id: Optional[str] = None
     reason: str
     quarantine_tag: Optional[str] = None
@@ -122,6 +123,53 @@ class CalibrateTrigger(BaseModel):
     ts: float
 
 
+# ── Intake MVP events ───────────────────────────────────────────────────────
+
+
+class L4Findings(BaseModel):
+    """Evaluator → intake: L4 persona findings ready for improvement goal."""
+    run_id: str
+    plan_id: str
+    project_id: str
+    findings: list[dict]            # [{what, where: [...], why, severity}]
+    labeled_by: str = "harness"
+
+
+class PlanRatifiable(BaseModel):
+    """Planner → intake: generation finished, plan passed its gate."""
+    plan_id: str
+    project_id: str
+
+
+class PlanFailed(BaseModel):
+    """Planner → intake: generation finished, plan did NOT pass its gate."""
+    plan_id: str
+    project_id: str
+    error: str                      # gate diagnostics for reformulation
+
+
+class PlanRejected(BaseModel):
+    """Planner → intake: well-formed plan was REFUSED (policy or human)."""
+    plan_id: str
+    project_id: str
+    reason: str
+    rejected_by: str = "human"      # human | policy
+
+
+class RunStop(BaseModel):
+    """Planner → executor: lifecycle control — terminate the active run."""
+    run_id: str
+    project_id: str
+    reason: str
+
+
+class RunStopped(BaseModel):
+    """Executor → planner: confirmation that run was terminated."""
+    run_id: str
+    project_id: str
+    reason: str
+
+
 # ── Routing key map ─────────────────────────────────────────────────────────
 
 ROUTING: dict[type[BaseModel], str] = {
@@ -137,4 +185,11 @@ ROUTING: dict[type[BaseModel], str] = {
     PlanAwaitingClarification: "plan.awaiting_clarification",
     RatchetTrigger: "ratchet.trigger",
     CalibrateTrigger: "calibrate.trigger",
+    # Intake MVP events
+    L4Findings: "l4.findings",
+    PlanRatifiable: "plan.ratifiable",
+    PlanFailed: "plan.failed",
+    PlanRejected: "plan.rejected",
+    RunStop: "run.stop",
+    RunStopped: "run.stopped",
 }

@@ -50,26 +50,34 @@
 - L3 golden set is FROZEN and human-only; nothing in the pipeline writes `golden_set` automatically
 - L3 jury must use ≥2 different model families; single-family fallback documents the limitation in the `note` field
 - L3 drift → rubric refinement proposals are QUEUED with `status='pending'`, never auto-applied
-- L4 runs conditionally only when the product has a user-facing surface (`needs_usage_sim`)
-- L4 executes behaviors as HTTP requests against a running product server (black-box, no source reading)
-- Remediation carries verbal feedback from the gate failure: `build_feedback()` builds structured `{failed_checks, reflection}` from the gate decision; `build_remediation_brief()` builds the fix-forward prompt (original goal + failed checks + what to fix + "FIX IT — do NOT start over")
-- Remediation attempt cap is 2 (1 original + 1 retry); `remediation_of` links retry to its predecessor
-- L4 produces structured friction scores per dimension; report is surfaced for human review — NEVER auto-decides feature direction
-- L4 `L4Report` has no `auto_apply` or `decision` field — it carries observations only
-- L4 handler (`on_run_completed`) spawns AionUi ACP conversations via `aionui.create_conversation(preset_agent_type="acp")`
-- L4 polls AionUi for `type="text"` / `position="left"` messages at 10s intervals, 300s timeout per case
-- L4 scoring is heuristic: counts pass/fail/status-code keywords in agent narrative report — fragile, not semantic
-- L4 handler **must `db.commit()`** after writing `l4_standalone`/`l4_acceptance`/`l4_status`/`l4_reason` — missing commit is the #1 bug
-- L4 persona YAML files go in `backend/evaluator/l4_persona/personas/` with short names matching product type
-- L4 agent config goes in `agent_configs/l4-persona.yaml` with `acp-browser` backend
-- The `RUN.md` file in the worktree determines base URL for L4 HTTP testing (parsed from `--port` flag)
-- Event-driven L4 MUST run in an isolated copy under `workspace/l4_runs/<run_id>/`, never directly in the run worktree
-- Evaluator prepares the isolated L4 copy by copying the worktree, running deterministic install commands parsed from `RUN.md`, writing scoped `opencode.json`, then freezing product source with chmod
-- L4 local `opencode.json` denies edits except `l4_scratch/**`, denies git/destructive/sudo commands, and denies webfetch/websearch
-- L4 persona prompt must be observational-only: use the product, do not inspect/edit/fix source, write only to `l4_scratch/`
-- L4 source immutability must be checked in the isolated copy after the persona run; source mutation records `l4_status='run_failed'`
-- During P0/P1, retain `l4_scratch/l4_report.md` residue under `workspace/l4_runs/<run_id>/` for human inspection; original product worktree must remain untouched
-- Future architecture target: L4 completion should become watcher-observed rather than evaluator polling; until then evaluator polling is an accepted transitional implementation
+- L4 runs for every completed run (no `needs_usage_sim` gating — runs unconditionally)
+- Scenarios are generated from `goal+spec` BEFORE the agent session via `generate_scenarios()` in `l4_scenarios.py`
+- Scenarios are intent-level only (as_a, wants, success_looks_like) — no steps, the agent must figure out HOW from RUN.md
+- Scenarios written to `l4_scratch/scenarios.json` in the L4 workspace before agent spawn
+- Agent writes `l4_scratch/report.json` as a structured `L4Report` (Pydantic validated)
+- L4 runs stored in the `runs` table with `kind='l4'` and `parent_run_id=<parent_run_id>`
+- L4 runs are EXCLUDED from the active-run-per-project constraint (`idx_runs_active_project` filtered)
+- L4 runs that fail must NOT emit `run.failed` to the event bus (no intake noise from L4 infra failures)
+- `report_consistent()` runs 6 deterministic checks; failure = structural failure findings still emitted (loosened gate)
+- `resolve_where_paths()` ensures all `where` paths in findings exist in the worktree
+- Empty findings with `verdict=pass` is a complete correct report — never penalize clean sessions
+- 3-gate publish rule: structural=ok AND verdict∈{partial,fail} AND any finding severity≥floor (default: medium) — ORIGINAL rule. Now loosened: emit whenever report is parsed (JSON parse error still blocks). `report_consistent()` failures no longer block emit.
+- `on_run_completed()` calls `run_l4_phase()` which is spawn-only: generates scenarios, creates L4 run + node_session (`role='l4'`, `backend='opencode'`), spawns AionUi, emits NodeSpawned, and RETURNS immediately (no polling)
+- L4 completion is watcher-observed: watcher-svc polls the L4 worktree with `role='l4'` config (60s settle, 5 stable polls via `_SETTLE_S_L4` / `_STABLE_POLLS_L4` env vars)
+- Watcher emits `node.observed`; evaluator-svc `on_node_observed()` routes `role='l4'` to `_on_l4_observed()` which validates report and emits `l4.findings`
+- `_prepare_l4_workspace()` does `git init` + initial commit so watcher's `_git_state_signature()` can track file changes
+- Workspace persists until `_on_l4_observed()` cleans up — do NOT clean from `on_run_completed()` if NodeSpawned was emitted
+- L4 `opencode.json` denies edits except `l4_scratch/**`, denies git/destructive/sudo, denies webfetch/websearch
+- L4 agent must be observational-only: use the product, do not inspect/edit/fix source, write only to `l4_scratch/`
+- Max 2 adhoc scenarios per session (agent-invented scenarios beyond the seeded set)
+- Every finding must have a `scenario_id` linking it to a scenario attempt, and resolving `where` paths
+- Findings below severity floor are retained in the JSONB `l4_report` but not emitted as `l4.findings` events
+- Legacy `l4_standalone`, `l4_acceptance`, `l4_status`, `l4_reason` columns on `runs` table kept as deprecated
+- `Run` SQLAlchemy model in `shared/models.py` has `project_id = Column(String, nullable=False)` (was missing, added 2026-07-28)
+- `emit()` for L4 findings uses `shared.outbox.emit()` (not the `services.evaluator.main` module — avoids import cycle)
+- Manual override via `POST /l4/manual` — validates same `L4Report` model + `report_consistent()`, uses `labeled_by="human"`
+- L4 agent config at `agent_configs/l4-persona.yaml` — model_preference read at runtime via `_resolve_l4_model()`
+- L4 runs in isolated copy under `workspace/l4_runs/<run_id>/` prepared by `_prepare_l4_workspace()`
 
 ## L3 calibration
 - `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
@@ -149,18 +157,21 @@
 - The relay loop MUST reconnect when the channel is closed (RabbitMQ heartbeat timeout closes idle channels). Check `channel.is_closed` each cycle and recreate the connection+channel.
 - Events are emitted via `shared.outbox.emit(session, event)` INSIDE the handler's DB transaction. The relay loop publishes them asynchronously.
 - Consumers deduplicate via `processed_events` table using `dedupe_key()` (event_key = `{run_id|plan_id|node_session_id}:{routing_key}`).
-- RabbitMQ topology: topic exchange `conductor.events`, durable queues per service, bindings in `BINDINGS` dict in `shared/bus.py`.
+- RabbitMQ topology: topic exchange `conductor.events`, durable queues per service (`planner.q`, `executor.q`, `watcher.q`, `evaluator.q`, `intake.q`), bindings in `BINDINGS` dict in `shared/bus.py`.
 - When consuming monolith functions (e.g. `launch_run()`) that use UPSERT, verify all columns are in the `ON CONFLICT ... DO UPDATE SET` clause. The monolith's `save_node_session()` omits `worktree` — patch node_sessions directly after calling `launch_run()`.
 - Gate outcome values: evaluator emits `gate_outcome=done` on pass, but executor's `_handle_gate_evaluated` switches on `pass`/`fail`. Non-match falls through to "advance next node" — no finalize or quarantine fires. Both `done` and `pass`, and `fail` and `failed` are now handled.
 - The monolith watcher (`get_watcher()`) is also initialized inside executor-svc when `launch_run()` calls it. This creates a separate watcher polling in the executor process alongside the microservice watcher-svc — harmless but creates duplicate state.
 - NEVER have multiple pika consumers on the same queue. RabbitMQ round-robins messages across consumers regardless of routing key. Use a SINGLE dispatcher consumer that routes by event type (detected from payload fields).
 - Before calling `finalize_success()`, always auto-commit the worktree via `git add -A && git commit`. The agent writes files to the worktree but never commits them; the merge requires committed changes.
 - L4 handler consumes `run.completed` events — the `BINDINGS` dict in `shared/bus.py` must have `"run.completed"` in `evaluator.q` list
+- L4 now uses watcher-observed node_sessions (`role='l4'`): evaluator spawns L4 node_session, emits NodeSpawned, watcher polls, watcher emits node.observed, evaluator's `on_node_observed()` routes `role='l4'` to `_on_l4_observed()` — a separate handler path from the execution node L1/L2 gate pipeline
 - Ratchet handler consumes `ratchet.trigger` events — same binding list addition pattern
 - When adding new event consumers, add the routing key to BOTH the `BINDINGS` dict AND the microservice's dispatcher routing logic — RabbitMQ bindings alone don't route to handlers
 - The evaluator dispatcher routes by inspecting payload fields (e.g., `event_type`), not by routing key — maintain this pattern for new consumers
 - RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
 - A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
+- **Intake-svc** (`services/intake/`) follows the same pattern as other microservices: FastAPI app on `:8095`, `.env` at `services/intake/.env`, shared outbox + deduplication, dispatcher routes by `event_type` field. Intake does NOT emit events (findings sink/service).
+- When adding new event consumers to intake-svc, add the routing key to `BINDINGS["intake.q"]` AND implement a handler branch in `services/intake/main.py`'s `_dispatch_event()`.
 
 ## Capability family (JSONB array)
 - `capabilities.family` is a JSONB array of strings, not a single TEXT value

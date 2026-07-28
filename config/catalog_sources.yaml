@@ -1,0 +1,44 @@
+# Sources allowlist for the tool catalog research agent (enrich_catalog)
+# Each source defines where to search for candidate tools.
+
+github:
+  - name: awesome-agent-skills
+    type: topic
+    query: "topic:awesome-agent-skills"
+    min_stars: 10
+    max_candidates: 20
+  
+  - name: awesome-mcp-servers
+    type: topic  
+    query: "topic:awesome-mcp"
+    min_stars: 10
+    max_candidates: 20
+  
+  - name: awesome-cli-tools
+    type: topic
+    query: "topic:awesome-cli"
+    min_stars: 50
+    max_candidates: 15
+
+registries:
+  pypi:
+    enabled: true
+    max_candidates: 15
+    min_monthly_downloads: 10000
+  npm:
+    enabled: true
+    max_candidates: 15
+    min_weekly_downloads: 10000
+  cargo:
+    enabled: false
+    max_candidates: 5
+
+mcp_registries:
+  - name: mcp-servers
+    url: "https://raw.githubusercontent.com/modelcontextprotocol/servers/main/README.md"
+    enabled: true
+    max_candidates: 20
+
+global_limits:
+  max_candidates_per_run: 20
+  budget_weekly_max: 50

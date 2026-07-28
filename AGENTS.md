@@ -27,7 +27,7 @@
 | **Promotion (gated)** | Elevating a memory from session scope to project or global scope, requires human approval. |
 | **Settle time** | Minimum quiet period (seconds) before watcher marks a node terminal. |
 | **Signal** | A data point the watcher polls: git state signature or cheap DB query signature. |
-| **Meta-Evaluator** | Quality gate system between watcher "done" verdict and node commit. Four layers: L1 deterministic, L2 rubric judge, L3 jury meta-eval, L4 persona simulation. |
+| **Meta-Evaluator** | Quality gate system between watcher "done" verdict and node commit. Four layers: L1 deterministic, L2 rubric judge, L3 jury meta-eval, L4 persona simulation. L4 runs out-of-band via watcher-observed node sessions after the run completes. |
 | **Check** | A single evaluation criterion (deterministic shell command or rubric yes/no question). Generated at decompose, ratified at plan approval. |
 | **Remediation node** | A bounded retry node appended to the plan DAG when evaluator gates fail. Same checks, same members, capped attempts. |
 | **Ratchet** | One-way progress model: completed nodes cannot be re-opened. Quality scores from the evaluator inform ratchet decisions. |
@@ -45,9 +45,13 @@
 | **Jury (diverse panel)** | A panel of ≥2 different model families that independently score artifacts. Reduces correlated bias in L2 judge calibration. |
 | **Golden set** | A frozen, human-curated set of labeled (input, artifact, expected_score/criteria_met) examples per node-type. Written ONLY by human action — the anchor that prevents evaluator drift. |
 | **Rubric refinement** | A proposed edit to the L2 judge's rubric wording, triggered when L3 detects drift beyond tolerance. Always queued for human approval, never auto-applied. |
-| **L4 (persona simulation)** | Fourth evaluator layer: an agent uses the finished product as a user would (black-box) and reports UX/feature friction. Runs conditionally out-of-band for products with user-facing surfaces. |
-| **Persona (L4)** | A YAML-defined user archetype with a goal, behaviors (action sequences), and report dimensions. Defines what to try and what to expect. |
-| **L4Report** | Structured output from an L4 persona run: per-behavior results, per-dimension friction scores (0.0-1.0), and overall friction. Contains no auto-decide mechanism — observations only. |
+| **L4 (persona simulation)** | Fourth evaluator layer: runs out-of-band after the parent run completes. Generates intent-level scenarios from goal+spec pre-session, creates a watcher-observed node_session (`role='l4'`), spawns an agent to attempt each scenario black-box, validates the structured L4Report on completion, and emits `l4.findings`. Uses the same watcher-observed pattern as execution nodes instead of blocking AionUi polling. |
+| **L4Scenario** | An intent-level scenario generated from goal+spec BEFORE the agent sees the repo. No steps — the agent must figure out HOW from RUN.md. Three fields: `as_a` (user role), `wants` (goal), `success_looks_like` (expected outcome). Source is `seeded` (pre-generated) or `adhoc` (agent-invented, max 2). |
+| **L4Report** | Structured output from an L4 session (Pydantic model in `shared/l4_models.py`). Fields: `verdict` (pass/partial/fail), `scenario_results`, `findings` (things that should change), `observations` (praise, never routed). Validated via `report_consistent()` with 6 deterministic checks. |
+| **report_consistent** | Six deterministic consistency checks on an L4Report: (1) every seeded scenario has a result, (2) adhoc count ≤ 2, (3) every finding references a known scenario_id, (4) failed/blocked scenarios have at least one finding, (5) verdict=pass has empty findings, (6) verdict=partial has no high-severity findings and negative verdicts have findings. Any failure = structural failure, report cannot be published. |
+| **scenario_id** | Identifier linking each finding to the scenario attempt that produced it. Must reference a known `scenario_id` from `scenario_results`. Stable across L4 retries per project for future reuse/graduation. |
+| **spec_hash** | Deterministic 16-char SHA-256 prefix hash of `goal+spec`. Stored on the L4 run for scenario reuse tracking. Computed via `hash_spec()` in `shared/l4_models.py`. |
+| **3-gate publish rule** | L4 findings are only emitted when ALL three gates pass: (1) structural validation = `ok`, (2) verdict ∈ `{partial, fail}`, (3) at least one finding has severity ≥ floor (default: medium). Below-floor findings are retained in JSONB but not sent. |
 | **MCP (Model Context Protocol)** | Protocol for exposing tools and resources to LLM applications. Conductor and Obsidian vault are MCP servers over SSE transport. |
 | **SSE transport** | Server-Sent Events transport for MCP — used when client and server are on different machines (human PC → AIPC). |
 | **Conductor MCP** | MCP server on `127.0.0.1:8092` exposing safe plan operations (`conductor-create_plan`, `conductor-refine_plan`, `conductor-get_plan`, `conductor-list_sessions`, `conductor-search_memory`). No approve/spawn. |
@@ -69,12 +73,13 @@
 | **ExperimentResult** | Output from `run_experiment()`: agent_config_id, node_type, mutation applied (bool), validated without regression (bool), scope (project/global), winner text, experiment_id, mutation_id, heldout results. |
 | **Mutation** | A candidate agent config edit produced by `propose_mutation()`. Contains the target field, old text, new text, and a rationale string summarizing the failure cluster. |
 | **Pattern** | A mined failure cluster from `mine_failures()`: rubric_item, fail_count, example artifacts (list), and a synthesized pattern description. Input to `propose_mutation()`. |
-| **EventBus** | RabbitMQ topic exchange (`conductor.events`) with per-service durable queues (`planner.q`, `executor.q`, `watcher.q`, `evaluator.q`). Each queue binds to routing keys matching the events its service consumes. |
+| **EventBus** | RabbitMQ topic exchange (`conductor.events`) with per-service durable queues (`planner.q`, `executor.q`, `watcher.q`, `evaluator.q`, `intake.q`). Each queue binds to routing keys matching the events its service consumes. |
 | **Transactional outbox** | Reliability pattern: events are written to an `outbox` table atomically with the business DB transaction. A background relay thread (`relay_loop()`) publishes pending outbox rows to RabbitMQ and sets `published_at`. Services deduplicate via `processed_events` on consume. |
 | **Planner-svc** | Microservice on `:8093` — accepts `POST /goal`, `POST /clarify/{id}`, `POST /ratify/{id}`. Runs the planner graph (`formulate → inject → decompose → select_capabilities → generate_checks → gate`). Emits `plan.ratified`. |
 | **Executor-svc** | Microservice on `:8091` — consumes `plan.ratified`, calls monolith's `launch_run()` to create worktrees and spawn AionUi teams. Emits `node.spawned`. Consumes `gate.evaluated` (finalize or advance DAG) and `node.remediate` (fix-forward retry). |
 | **Watcher-svc** | Microservice on `:8092` — consumes `node.spawned`, polls worktrees via `_watch_loop()` (30s interval, 30s settle, 2 stable poll cycles). Sets `verdict=done_no_change` or `failed`. Emits `node.observed`. |
 | **Evaluator-svc** | Microservice on `:8094` — consumes `node.observed`, runs L1 deterministic checks then L2 rubric judge. Emits `gate.evaluated` with outcome `done`/`remediate`/`failed`. Optionally emits `node.remediate` for retry. |
+| **Intake-svc** | Microservice on `:8095` — consumes `l4.findings`, `run.failed`, `plan.awaiting_clarification`, `plan.ratifiable`, `plan.failed`, `plan.rejected`. Converts events into improvement intents stored in `intake_intents` table with `origin` set to the event source. Exposes REST API for listing and acknowledging findings. |
 | **ServiceConfig** | Pydantic model (`shared.config`) loaded from environment per microservice. Fields: `service`, `env`, `rabbit_url`, `database_url`. Each service's `.env` overrides defaults. |
 | **Outbox relay** | Background daemon thread per service that polls the `outbox` table for unpublished rows and publishes them to RabbitMQ. Uses its OWN pika connection — sharing the consumer channel corrupts the AMQP frame stream. |
 | **Planner graph** | The LangGraph-based planning flow: `formulate → inject → decompose → select_capabilities → generate_checks → gate`. Defined in `services/planner/graph.py`. The `formulate` node converts raw goal to MetaGoal; `inject` enriches with domain conventions; `decompose` produces a DAG of nodes; `select_capabilities` assigns agent_configs per node via the capability selector; `generate_checks` creates L1/L2 checks per node; `gate` runs `run_plan_gate()` for L1+L2 plan evaluation. |
@@ -151,26 +156,34 @@
 - L3 golden set is FROZEN and human-only; nothing in the pipeline writes `golden_set` automatically
 - L3 jury must use ≥2 different model families; single-family fallback documents the limitation in the `note` field
 - L3 drift → rubric refinement proposals are QUEUED with `status='pending'`, never auto-applied
-- L4 runs conditionally only when the product has a user-facing surface (`needs_usage_sim`)
-- L4 executes behaviors as HTTP requests against a running product server (black-box, no source reading)
-- Remediation carries verbal feedback from the gate failure: `build_feedback()` builds structured `{failed_checks, reflection}` from the gate decision; `build_remediation_brief()` builds the fix-forward prompt (original goal + failed checks + what to fix + "FIX IT — do NOT start over")
-- Remediation attempt cap is 2 (1 original + 1 retry); `remediation_of` links retry to its predecessor
-- L4 produces structured friction scores per dimension; report is surfaced for human review — NEVER auto-decides feature direction
-- L4 `L4Report` has no `auto_apply` or `decision` field — it carries observations only
-- L4 handler (`on_run_completed`) spawns AionUi ACP conversations via `aionui.create_conversation(preset_agent_type="acp")`
-- L4 polls AionUi for `type="text"` / `position="left"` messages at 10s intervals, 300s timeout per case
-- L4 scoring is heuristic: counts pass/fail/status-code keywords in agent narrative report — fragile, not semantic
-- L4 handler **must `db.commit()`** after writing `l4_standalone`/`l4_acceptance`/`l4_status`/`l4_reason` — missing commit is the #1 bug
-- L4 persona YAML files go in `backend/evaluator/l4_persona/personas/` with short names matching product type
-- L4 agent config goes in `agent_configs/l4-persona.yaml` with `acp-browser` backend
-- The `RUN.md` file in the worktree determines base URL for L4 HTTP testing (parsed from `--port` flag)
-- Event-driven L4 MUST run in an isolated copy under `workspace/l4_runs/<run_id>/`, never directly in the run worktree
-- Evaluator prepares the isolated L4 copy by copying the worktree, running deterministic install commands parsed from `RUN.md`, writing scoped `opencode.json`, then freezing product source with chmod
-- L4 local `opencode.json` denies edits except `l4_scratch/**`, denies git/destructive/sudo commands, and denies webfetch/websearch
-- L4 persona prompt must be observational-only: use the product, do not inspect/edit/fix source, write only to `l4_scratch/`
-- L4 source immutability must be checked in the isolated copy after the persona run; source mutation records `l4_status='run_failed'`
-- During P0/P1, retain `l4_scratch/l4_report.md` residue under `workspace/l4_runs/<run_id>/` for human inspection; original product worktree must remain untouched
-- Future architecture target: L4 completion should become watcher-observed rather than evaluator polling; until then evaluator polling is an accepted transitional implementation
+- L4 runs for every completed run (no `needs_usage_sim` gating — runs unconditionally)
+- Scenarios are generated from `goal+spec` BEFORE the agent session via `generate_scenarios()` in `l4_scenarios.py`
+- Scenarios are intent-level only (as_a, wants, success_looks_like) — no steps, the agent must figure out HOW from RUN.md
+- Scenarios written to `l4_scratch/scenarios.json` in the L4 workspace before agent spawn
+- Agent writes `l4_scratch/report.json` as a structured `L4Report` (Pydantic validated)
+- L4 runs stored in the `runs` table with `kind='l4'` and `parent_run_id=<parent_run_id>`
+- L4 runs are EXCLUDED from the active-run-per-project constraint (`idx_runs_active_project` filtered)
+- L4 runs that fail must NOT emit `run.failed` to the event bus (no intake noise from L4 infra failures)
+- `report_consistent()` runs 6 deterministic checks; failure = structural failure findings still emitted (loosened gate)
+- `resolve_where_paths()` ensures all `where` paths in findings exist in the worktree
+- Empty findings with `verdict=pass` is a complete correct report — never penalize clean sessions
+- 3-gate publish rule: structural=ok AND verdict∈{partial,fail} AND any finding severity≥floor (default: medium) — ORIGINAL rule. Now loosened: emit whenever report is parsed (JSON parse error still blocks). `report_consistent()` failures no longer block emit.
+- `on_run_completed()` calls `run_l4_phase()` which is spawn-only: generates scenarios, creates L4 run + node_session (`role='l4'`, `backend='opencode'`), spawns AionUi, emits NodeSpawned, and RETURNS immediately (no polling)
+- L4 completion is watcher-observed: watcher-svc polls the L4 worktree with `role='l4'` config (60s settle, 5 stable polls via `_SETTLE_S_L4` / `_STABLE_POLLS_L4` env vars)
+- Watcher emits `node.observed`; evaluator-svc `on_node_observed()` routes `role='l4'` to `_on_l4_observed()` which validates report and emits `l4.findings`
+- `_prepare_l4_workspace()` does `git init` + initial commit so watcher's `_git_state_signature()` can track file changes
+- Workspace persists until `_on_l4_observed()` cleans up — do NOT clean from `on_run_completed()` if NodeSpawned was emitted
+- L4 `opencode.json` denies edits except `l4_scratch/**`, denies git/destructive/sudo, denies webfetch/websearch
+- L4 agent must be observational-only: use the product, do not inspect/edit/fix source, write only to `l4_scratch/`
+- Max 2 adhoc scenarios per session (agent-invented scenarios beyond the seeded set)
+- Every finding must have a `scenario_id` linking it to a scenario attempt, and resolving `where` paths
+- Findings below severity floor are retained in the JSONB `l4_report` but not emitted as `l4.findings` events
+- Legacy `l4_standalone`, `l4_acceptance`, `l4_status`, `l4_reason` columns on `runs` table kept as deprecated
+- `Run` SQLAlchemy model in `shared/models.py` has `project_id = Column(String, nullable=False)` (was missing, added 2026-07-28)
+- `emit()` for L4 findings uses `shared.outbox.emit()` (not the `services.evaluator.main` module — avoids import cycle)
+- Manual override via `POST /l4/manual` — validates same `L4Report` model + `report_consistent()`, uses `labeled_by="human"`
+- L4 agent config at `agent_configs/l4-persona.yaml` — model_preference read at runtime via `_resolve_l4_model()`
+- L4 runs in isolated copy under `workspace/l4_runs/<run_id>/` prepared by `_prepare_l4_workspace()`
 
 ## L3 calibration
 - `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
@@ -250,18 +263,21 @@
 - The relay loop MUST reconnect when the channel is closed (RabbitMQ heartbeat timeout closes idle channels). Check `channel.is_closed` each cycle and recreate the connection+channel.
 - Events are emitted via `shared.outbox.emit(session, event)` INSIDE the handler's DB transaction. The relay loop publishes them asynchronously.
 - Consumers deduplicate via `processed_events` table using `dedupe_key()` (event_key = `{run_id|plan_id|node_session_id}:{routing_key}`).
-- RabbitMQ topology: topic exchange `conductor.events`, durable queues per service, bindings in `BINDINGS` dict in `shared/bus.py`.
+- RabbitMQ topology: topic exchange `conductor.events`, durable queues per service (`planner.q`, `executor.q`, `watcher.q`, `evaluator.q`, `intake.q`), bindings in `BINDINGS` dict in `shared/bus.py`.
 - When consuming monolith functions (e.g. `launch_run()`) that use UPSERT, verify all columns are in the `ON CONFLICT ... DO UPDATE SET` clause. The monolith's `save_node_session()` omits `worktree` — patch node_sessions directly after calling `launch_run()`.
 - Gate outcome values: evaluator emits `gate_outcome=done` on pass, but executor's `_handle_gate_evaluated` switches on `pass`/`fail`. Non-match falls through to "advance next node" — no finalize or quarantine fires. Both `done` and `pass`, and `fail` and `failed` are now handled.
 - The monolith watcher (`get_watcher()`) is also initialized inside executor-svc when `launch_run()` calls it. This creates a separate watcher polling in the executor process alongside the microservice watcher-svc — harmless but creates duplicate state.
 - NEVER have multiple pika consumers on the same queue. RabbitMQ round-robins messages across consumers regardless of routing key. Use a SINGLE dispatcher consumer that routes by event type (detected from payload fields).
 - Before calling `finalize_success()`, always auto-commit the worktree via `git add -A && git commit`. The agent writes files to the worktree but never commits them; the merge requires committed changes.
 - L4 handler consumes `run.completed` events — the `BINDINGS` dict in `shared/bus.py` must have `"run.completed"` in `evaluator.q` list
+- L4 now uses watcher-observed node_sessions (`role='l4'`): evaluator spawns L4 node_session, emits NodeSpawned, watcher polls, watcher emits node.observed, evaluator's `on_node_observed()` routes `role='l4'` to `_on_l4_observed()` — a separate handler path from the execution node L1/L2 gate pipeline
 - Ratchet handler consumes `ratchet.trigger` events — same binding list addition pattern
 - When adding new event consumers, add the routing key to BOTH the `BINDINGS` dict AND the microservice's dispatcher routing logic — RabbitMQ bindings alone don't route to handlers
 - The evaluator dispatcher routes by inspecting payload fields (e.g., `event_type`), not by routing key — maintain this pattern for new consumers
 - RabbitMQ `StreamLostError: ConnectionResetError(104)` can occur during high-throughput relay + publish. The relay loop must reconnect on channel close. The consumer thread reconnection uses the same loop in `bus.py`.
 - A background outbox relay can crash under connection pressure; the relay reconnect loop logs "Relay channel closed — reconnecting" and re-establishes.
+- **Intake-svc** (`services/intake/`) follows the same pattern as other microservices: FastAPI app on `:8095`, `.env` at `services/intake/.env`, shared outbox + deduplication, dispatcher routes by `event_type` field. Intake does NOT emit events (findings sink/service).
+- When adding new event consumers to intake-svc, add the routing key to `BINDINGS["intake.q"]` AND implement a handler branch in `services/intake/main.py`'s `_dispatch_event()`.
 
 ## Capability family (JSONB array)
 - `capabilities.family` is a JSONB array of strings, not a single TEXT value
@@ -408,15 +424,15 @@ Cleans state: `bash /opt/aipc/conductor/scripts/clean_e2e_state.sh`
 
 ## Microservices (event-driven architecture)
 
-### Restart all 4 microservices
+### Restart all 5 microservices
 ```bash
 # Load secrets once
 set -a; source /opt/aipc/scripts/load-secrets.sh; set +a
 
 # Each service sources its own .env + starts uvicorn in background
-declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 )
+declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 ["intake"]=8095 )
 
-for svc in executor watcher planner evaluator; do
+for svc in executor watcher planner evaluator intake; do
   port=${PORTS[$svc]}
   fuser -k "${port}/tcp" 2>/dev/null || true
   sleep 1
@@ -435,7 +451,7 @@ done
 ```bash
 bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 ```
-One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 4 microservices. Health check runs at end.
+One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 5 microservices. Health check runs at end.
 
 ### Step-by-step: clean re-run a plan (after code or config changes)
 
@@ -444,10 +460,10 @@ Full teardown + restart sequence. Use when you changed evaluator code, rubric pr
 ```bash
 # 0. Variables
 PLAN_ID="plan_09f23fe0"
-declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 )
+declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 ["intake"]=8095 )
 
 # 1. Kill running microservices
-for port in 8091 8092 8093 8094; do
+for port in 8091 8092 8093 8094 8095; do
     fuser -k "${port}/tcp" 2>/dev/null || true
 done
 
@@ -486,8 +502,8 @@ for queue in planner.q executor.q watcher.q evaluator.q; do
         "http://127.0.0.1:15672/api/queues/staging/${queue}/contents" > /dev/null
 done
 
-# 7. Restart all 4 microservices
-for svc in executor watcher planner evaluator; do
+# 7. Restart all 5 microservices
+for svc in executor watcher planner evaluator intake; do
     port=${PORTS[$svc]}
     set -a
     source /opt/aipc/scripts/load-secrets.sh 2>/dev/null
@@ -503,7 +519,7 @@ done
 sleep 5
 
 # 8. Health check
-for p in 8091 8092 8093 8094; do
+for p in 8091 8092 8093 8094 8095; do
     echo -n ":${p} "
     curl -sfm 3 "http://127.0.0.1:${p}/health" 2>/dev/null || echo "DOWN"
 done
@@ -535,14 +551,19 @@ docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT * FROM outbox ORDER BY id"
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT * FROM processed_events ORDER BY processed_at"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, finding_type, status, created_at FROM intake_findings ORDER BY created_at DESC"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, origin, source_ref, status FROM intake_intents ORDER BY created_at DESC LIMIT 10"
 ```
 
 ### Service logs
 ```bash
-tail -f /tmp/executor-svc.log   # executor
-tail -f /tmp/watcher-svc.log    # watcher
-tail -f /tmp/planner-svc.log    # planner
-tail -f /tmp/evaluator-svc.log  # evaluator
+tail -f /tmp/executor-svc.log   # executor (:8091)
+tail -f /tmp/watcher-svc.log    # watcher (:8092)
+tail -f /tmp/planner-svc.log    # planner (:8093)
+tail -f /tmp/evaluator-svc.log  # evaluator (:8094)
+tail -f /tmp/intake-svc.log     # intake (:8095)
 ```
 
 ## L3 calibration
@@ -558,19 +579,33 @@ docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT node_type, agreement, mae, trusted, calibrated_at FROM judge_trust"
 ```
 
-## L4 persona simulation
+## L4 persona simulation (watcher-observed)
 ```bash
-# Check L4 scores on a run
+# Check L4 status on a run
 docker exec postgres psql -U aipc -d aipc_conductor \
-  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id = '<run_id>'"
+  -c "SELECT id, kind, state, l4_status, l4_structural FROM runs WHERE kind='l4' AND parent_run_id='<run_id>'"
 
-# Re-emit run.completed event (for L4 retry)
+# Check L4 node_session status
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, run_id, role, verdict, backend, finished_at FROM node_sessions WHERE role='l4' ORDER BY created_at DESC"
+
+# Re-emit run.completed event (for a fresh L4 cycle)
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "DELETE FROM processed_events WHERE event_key LIKE '%<run_id>:run.completed%'"
 docker exec postgres psql -U aipc -d aipc_conductor \
-  -c "UPDATE runs SET l4_status = NULL, l4_standalone = NULL, l4_acceptance = NULL, l4_reason = NULL WHERE id = '<run_id>'"
+  -c "DELETE FROM node_sessions WHERE role='l4' AND run_id IN (SELECT id FROM runs WHERE kind='l4' AND parent_run_id='<run_id>')"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM runs WHERE kind='l4' AND parent_run_id='<run_id>'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM processed_events WHERE event_key LIKE '%<run_id>:l4.findings%'"
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('run.completed', '{\"event_type\": \"run.completed\", \"run_id\": \"<run_id>\", \"plan_id\": \"<plan_id>\", \"product_type\": \"api\"}', '1.0', NOW())"
+
+# Re-emit l4.findings for intake (after fixing adapter code)
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM processed_events WHERE event_key='<run_id>:l4.findings'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('l4.findings', '<payload_json>', '1.0', NOW())"
 
 # Check AionUi conversation status
 curl -s http://127.0.0.1:40937/api/conversations/<conv_id> | python3 -m json.tool
@@ -583,9 +618,12 @@ sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db \
 ls -la /opt/aipc/conductor/workspace/l4_runs/<run_id>/
 cat /opt/aipc/conductor/workspace/l4_runs/<run_id>/l4_scratch/l4_report.md
 
-# Verify isolated L4 real run result
+# Verify intake created an improvement intent from L4 findings
 docker exec postgres psql -U aipc -d aipc_conductor \
-  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id='<run_id>'"
+  -c "SELECT id, origin, source_ref, status, substring(intent_text,1,80) FROM intake_intents WHERE origin='l4_findings' ORDER BY created_at DESC"
+
+# Watch L4 flow in evaluator log
+tail -f /tmp/evaluator-svc.log | grep -i "l4\|findings\|structural"
 ```
 
 ## Ratchet experiment
@@ -618,6 +656,12 @@ docker exec postgres psql -U aipc -d aipc_conductor \
 echo "=== Node Session ==="
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT id, verdict, gate_outcome, l1_pass, l2_score FROM node_sessions WHERE run_id='$RUN_ID'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, role, verdict, gate_outcome FROM node_sessions WHERE role='l4'"
+
+echo "=== Intake Intents ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, origin, status, created_at FROM intake_intents ORDER BY created_at DESC LIMIT 10"
 
 echo "=== Judge Trust ==="
 docker exec postgres psql -U aipc -d aipc_conductor \
@@ -642,6 +686,19 @@ docker exec postgres psql -U aipc -d aipc_conductor \
 echo "=== Skill Mutations ==="
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT COUNT(*) FROM skill_mutations"
+```
+
+## Intake-svc findings
+```bash
+# List open findings
+curl -s http://127.0.0.1:8095/api/intake/findings | python3 -m json.tool
+
+# Acknowledge a finding
+curl -s -X POST http://127.0.0.1:8095/api/intake/findings/<id>/ack
+
+# Query intake_findings table
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, finding_type, status, project_id, substring(payload::text, 1, 80) FROM intake_findings ORDER BY created_at DESC LIMIT 20"
 ```
 
 ## Whole-stack reset (clean state)

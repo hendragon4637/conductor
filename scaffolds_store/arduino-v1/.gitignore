@@ -1,0 +1,6 @@
+.pio/
+.opencode/
+.conductor/
+.plan/
+.venv/
+l4_scratch/

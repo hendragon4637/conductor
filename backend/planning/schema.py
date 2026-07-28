@@ -84,6 +84,9 @@ class Plan(BaseModel):
     ratified: bool = False
     version: int = 1
     needs_usage_sim: bool = False
+    origin: str = "human"
+    source_ref: str | None = None
+    intake_id: int | None = None
 
 
 # ── Run (execution instance) ──────────────────────────────────────
@@ -97,10 +100,21 @@ class Run(BaseModel):
     finished_at: str | None = None
     worktree_root: str | None = None
     note: str | None = None
+
+    # ── L4 MVP v1 (deprecated compat) ──────────────────────────────
     l4_standalone: float | None = None
     l4_acceptance: float | None = None
     l4_status: str | None = None
     l4_reason: str | None = None
+
+    # ── L4 MVP v2 ──────────────────────────────────────────────────
+    kind: str = "execution"          # execution | l4
+    parent_run_id: str | None = None
+    l4_scenarios: list[dict] | None = None
+    l4_report: dict | None = None
+    l4_structural: str | None = None
+    spec_hash: str | None = None
+
     run_md_present: bool | None = None
 
 

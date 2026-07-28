@@ -7,6 +7,8 @@ made changes and L1 did not improve, an L2 probe is run to disambiguate.
 """
 from __future__ import annotations
 
+import subprocess
+
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -29,13 +31,51 @@ class GateDecision:
     - ``goal_review``: the L2 score (0.0-1.0).
     - ``l2_feedback``: per-rubric-item reasoning.
     """
-    action: str  # "done" | "remediate"
+    action: str  # "done" | "remediate" | "requeue"
     l1_passed_ids: list[str] = field(default_factory=list)
     l1_feedback: list[dict[str, Any]] = field(default_factory=list)
     l1_flagged: bool = False
     l2_passed: bool = False
     goal_review: float | None = None
     l2_feedback: list[dict[str, Any]] = field(default_factory=list)
+    l2_chunk_idx: int = 0
+    """Chunk index from the last partial L2 result (set only when action='requeue')."""
+
+
+_NO_CHANGE_FEEDBACK: list[dict[str, Any]] = [
+    {
+        "check_id": "_no_changes",
+        "tier": "L2",
+        "what": "Node execution produced no changes or deliverables",
+        "why": (
+            "verdict=done_no_change with no git diff and prev_l1_passed_ids is set "
+            "— the agent made no modifications to the worktree"
+        ),
+        "how": "The agent must produce tangible output — code, files, or modifications",
+    },
+]
+
+
+def _is_worktree_diff_empty(worktree: str) -> bool:
+    try:
+        r1 = subprocess.run(
+            ["git", "diff", "--quiet"],
+            cwd=worktree,
+            capture_output=True,
+            timeout=15,
+        )
+        if r1.returncode != 0:
+            return False
+        r2 = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return r2.stdout.strip() == ""
+    except Exception:
+        return False
 
 
 def evaluate_gate(
@@ -45,6 +85,7 @@ def evaluate_gate(
     threshold: float = 0.7,
     prev_l1_passed_ids: list[str] | None = None,
     has_changes_since_prev: bool = False,
+    verdict: str | None = None,
 ) -> GateDecision:
     """Run evaluator gates for a node.
 
@@ -116,8 +157,31 @@ def evaluate_gate(
 
     # --- L2: rubric judge (only if L1 passed) ---
     if l2_fn is not None:
+        # Gap 4: Empty-diff short-circuit — skip L2 when node produced no changes
+        if prev_l1_passed_ids is not None and verdict == "done_no_change" and _is_worktree_diff_empty(worktree):
+            print(f"[GATE] Empty-diff short-circuit: worktree={worktree} prev_ids={prev_l1_passed_ids}", flush=True)
+            return GateDecision(
+                action="remediate",
+                l1_passed_ids=l1_passed_ids,
+                l1_feedback=l1_feedback,
+                l2_passed=False,
+                goal_review=0.0,
+                l2_feedback=_NO_CHANGE_FEEDBACK,
+            )
+
         print(f"[GATE] L1 passed, calling L2 judge: worktree={worktree} threshold={threshold}", flush=True)
         l2 = l2_fn(check_list, worktree)
+        if getattr(l2, "partial", False):
+            print(f"[GATE] L2 partial result — {len(l2.judgments)} items completed, requeuing", flush=True)
+            l2_fb = [_j_to_dict(j) for j in l2.judgments]
+            return GateDecision(
+                action="requeue",
+                l2_passed=False,
+                goal_review=0.0,
+                l2_feedback=l2_fb,
+                l2_chunk_idx=l2.best_chunk_idx,
+            )
+
         l2_passed = l2.score >= threshold
         print(f"[GATE] L2 result: score={l2.score:.4f} threshold={threshold} passed={l2_passed} items_met={l2.items_met}/{l2.rubric_count} oversize={l2.oversize}", flush=True)
         l2_fb = [_j_to_dict(j) for j in l2.judgments]

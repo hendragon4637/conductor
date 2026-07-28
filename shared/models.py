@@ -55,6 +55,7 @@ class Run(Base):
     __tablename__ = "runs"
     id = Column(String, primary_key=True)
     plan_id = Column(String, ForeignKey("plans.plan_id"), nullable=False)
+    project_id = Column(String, nullable=False)
     state = Column(String, nullable=False, default="created")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     approved_at = Column(DateTime(timezone=True), nullable=True)
@@ -65,10 +66,21 @@ class Run(Base):
     merge_commit = Column(String, nullable=True)
     quarantine_tag = Column(String, nullable=True)
     worktree_expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    # ── L4 MVP v1 (deprecated, kept for backward compat) ────────────
     l4_standalone = Column(Real, nullable=True)
     l4_acceptance = Column(Real, nullable=True)
     l4_status = Column(String, nullable=True)
     l4_reason = Column(Text, nullable=True)
+
+    # ── L4 MVP v2 ──────────────────────────────────────────────────
+    kind = Column(String, nullable=False, default="execution")   # execution | l4
+    parent_run_id = Column(String, nullable=True)                # for kind='l4': the run being critiqued
+    l4_scenarios = Column(JSON, nullable=True)                  # seeded scenarios (input)
+    l4_report = Column(JSON, nullable=True)                     # validated report (output)
+    l4_structural = Column(String, nullable=True)               # ok | missing_file | parse_error | schema_error | path_error | inconsistent
+    spec_hash = Column(String, nullable=True)                   # hash(goal+spec), future reuse
+
     run_md_present = Column(Boolean, nullable=True)
 
 
@@ -110,3 +122,9 @@ class NodeSession(Base):
     stop_reason = Column(String, nullable=True)
     role = Column(String, nullable=False, default="execution")
     steering_count = Column(Integer, nullable=False, default=0)
+    l2_partial_judgments = Column(JSON, nullable=True)
+    """Per-rubric-item judgments persisted mid-evaluation for crash recovery.
+    On re-delivery, items with saved judgments are skipped."""
+    l2_best_chunk_idx = Column(Integer, nullable=True)
+    """Chunk index that most recently passed a rubric item.
+    Used on re-delivery to try the best-known chunk first."""

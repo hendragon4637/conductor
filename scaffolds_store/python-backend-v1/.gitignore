@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.opencode/
+.conductor/
+.plan/
+node_modules/
+l4_scratch/

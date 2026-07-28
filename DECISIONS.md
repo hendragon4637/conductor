@@ -75,16 +75,17 @@ Consequence: The monolith's `launch_run()` is still imported by executor-svc ver
 
 ## 2026-06-30 — Microservice ports and service boundaries
 Status: ACTIVE
-Decision: Four microservices run on consecutive ports:
+Decision: Five microservices run on consecutive ports:
 - Planner-svc (:8093) — goal submission, clarification, ratification. Emits `plan.ratified`.
 - Executor-svc (:8091) — consumes `plan.ratified`, calls `launch_run()` to spawn worktrees + AionUi teams. Emits `node.spawned`. Also consumes `gate.evaluated` (finalize/advance) and `node.remediate` (fix-forward retry).
 - Watcher-svc (:8092) — consumes `node.spawned`, polls worktrees for stability (30s interval, 30s settle, 2 stable polls). Emits `node.observed`.
 - Evaluator-svc (:8094) — consumes `node.observed`, runs L1 deterministic + L2 rubric judge. Emits `gate.evaluated` and optionally `node.remediate`.
+- Intake-svc (:8095) — consumes `l4.findings`, `run.failed`, `plan.awaiting_clarification`, `plan.ratifiable`, `plan.failed`, `plan.rejected`. Stores findings in `intake_findings` table. Exposes `GET /api/intake/findings` and `POST /api/intake/findings/{id}/ack`.
 Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` sourcing its own `.env` from `services/<name>/.env`.
 
 ## 2026-07-02 — L4 persona simulation handler (on_run_completed)
 
-**Status**: ACTIVE
+**Status**: SUPERSEDED by 2026-07-28 L4 MVP2
 
 **Context**: L4 (persona simulation) ran conditionally for user-facing products but had no event-driven trigger. The `run.completed` binding was added to evaluator queue's BINDINGS but the handler that consumed it lacked `db.commit()` — L4 scores were computed but never persisted.
 
@@ -101,6 +102,40 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 **Rationale**: AionUi ACP conversations are the standard spawn path (same mechanism as executor spawns node agents). This reuses existing infra — no new agent orchestration.
 
 **Trade-offs**: Single-threaded consumer blocks for up to 10 minutes during L4 polling; other events queue up. The keyword scoring heuristic is fragile (false positives from "pass" in non-score contexts). Agent may refuse due to system instruction conflicts.
+
+## 2026-07-28 — L4 MVP2: structured scenarios + L4Report + deterministic validation
+
+**Status**: SUPERSEDED by 2026-07-28 L4 watcher-observed completion
+
+**Context**: L4 v1 (dual persona: standalone+acceptance, free-text `l4_report.md`, deepeval keyword scoring) produced heuristic friction scores with no structured findings, no traceability to specific scenarios, and no downstream consumer. The dual-persona approach required two AionUi sessions per run (2× lookup cost). The keyword heuristic was fragile.
+
+**Decision**:
+- Replace dual-persona with a single L4 session per run, pre-loaded with intent-level scenarios
+- Scenarios are generated from `goal+spec` BEFORE the agent session (one cheap LLM call), NOT authored as YAML
+- Agent reads scenarios from `l4_scratch/scenarios.json`, attempts each, writes `l4_scratch/report.json`
+- Report format is a Pydantic-validated `L4Report` (verdict + scenario_results + findings + observations)
+- `report_consistent()` runs 6 deterministic checks; any failure = structural failure, report cannot be published
+- `resolve_where_paths()` ensures all `where` paths in findings exist in the worktree
+- 3-gate publish rule: structural=ok AND verdict∈{partial,fail} AND severity≥medium floor
+- Retry on structural failure: MAX 2 attempts, FIX preamble naming the defect, second failure records and continues
+- Empty findings with `verdict=pass` is a complete correct report — never penalize clean sessions
+- L4 runs stored in the existing `runs` table with `kind='l4'`, `parent_run_id=<parent>`
+- L4 runs excluded from active-run-per-project constraint (`idx_runs_active_project` filtered)
+- Legacy `l4_standalone`, `l4_acceptance`, `l4_status`, `l4_reason` columns kept as deprecated
+- `spec_hash` (16-char SHA-256 of goal+spec) stored on L4 run for scenario reuse tracking
+- Migration `v7_040_l4_mvp2.sql` adds columns: `kind`, `parent_run_id`, `l4_scenarios`, `l4_report`, `l4_structural`, `spec_hash`
+- Manual override via `POST /l4/manual` — accepts same `L4Report` model+checks, uses `labeled_by='human'`
+
+**Rationale**: Structured L4Report with deterministic validation eliminates heuristic fragility. Pre-registered scenarios give the agent a clear success criterion before it sees the repo — "if you can't figure out HOW from RUN.md, that IS the finding." The 3-gate rule ensures findings are only surfaced when they meet quality and severity thresholds.
+
+**Trade-offs**: Still uses AionUi ACP polling (transitional — future should use watcher-observed sessions). Scenarios are LLM-generated and may inherit LLM biases. The fixed severity floor (medium) may miss cumulative low-severity issues. `on_run_completed` still blocks the evaluator consumer during polling.
+
+**Files**:
+- `shared/l4_models.py` — Pydantic models, `report_consistent()`, `resolve_where_paths()`, `hash_spec()`
+- `services/evaluator/l4_scenarios.py` — `generate_scenarios()`, scenario = (as_a, wants, success_looks_like)
+- `services/evaluator/l4_brief_template.py` — Jinja2 brief, "empty findings is complete" verbatim
+- `services/evaluator/l4_runner.py` — `run_l4_phase()` orchestration, `_validate_report()`, `_should_publish()`, `_emit_l4_findings()`
+- `backend/migrations/v7_040_l4_mvp2.sql` — DB migration
 
 ## 2026-07-02 — L4 isolated execution workspace
 
@@ -259,3 +294,60 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 - Tables with `source` column: `agent_configs`, `golden_set`, `experiments`, `skill_mutations`
 - Real human-labeled data uses `source = 'human'`; auto-generated production data uses appropriate source tag
 - No example-generated data survives to production; the pipe is proven and then the data is replaced
+
+## 2026-07-27 — Intake-svc microservice (L4 findings → improvement goals)
+
+**Status**: ACTIVE
+
+**Context**: L4 persona simulation produced structured friction scores but had no downstream consumer — `l4.findings` events were emitted into the void. The evaluator needed an event-driven intake service to convert findings into improvement goals without blocking the hot path.
+
+**Decision**:
+- New microservice `intake-svc` on port `:8095` consumes `l4.findings`, `run.failed`, `plan.awaiting_clarification`, `plan.ratifiable`, `plan.failed`, and `plan.rejected` events from `intake.q`
+- `Intake-svc` runs as `uv run uvicorn services.intake.main:app --port 8095` with its own `.env` at `services/intake/.env`
+- Intake stores findings in the `intake_findings` table with `source`, `finding_type`, `payload`, `project_id`, and `status='open'`
+- Intake exposes `GET /api/intake/findings` to list open findings and `POST /api/intake/findings/{id}/ack` to acknowledge/close
+- On `l4.findings` events, intake creates one finding row per entry in the findings list with `finding_type='l4_finding'`
+- On `run.failed` events, intake creates a finding with `finding_type='run_failure'`
+- Intake runs in the same RabbitMQ topology with durable queue `intake.q` bound to `conductor.events`
+- Intake uses the same shared outbox + deduplication pattern as other services
+- Intake test suite at `services/intake/tests/`
+
+**Rationale**: A dedicated intake service decouples findings ingestion from the evaluator hot path and provides a REST API for humans and tools to query open findings. Follows the same microservice pattern as planner/executor/watcher/evaluator.
+
+**Trade-offs**: Intake is read-heavy for queries but write-light for ingestion — a simple FastAPI service is sufficient. The intake_findings table is append-only until ack'd; no archival story yet.
+
+## 2026-07-28 — L4 watcher-observed completion (removed blocking AionUi polling)
+
+**Status**: ACTIVE
+
+**Context**: The original L4 MVP2 ran as a blocking synchronous poll inside `on_run_completed()` — the evaluator consumer was blocked for 10+ minutes per L4 cycle while polling AionUi ACP conversations. This was explicitly marked as "transitional" in the MVP2 decision. L4 also used ad-hoc polling (`_poll_l4_session()`) instead of the existing watcher-observed node_session pattern that meta-planner and executor nodes use.
+
+**Decision**:
+- Rewrote l4_runner.py: removed `_poll_l4_session()`, `_validate_and_publish()`, `MAX_L4_ATTEMPTS`, `L4_CASE_TIMEOUT_S`
+- `run_l4_phase()` is now spawn-only: generate scenarios → create L4 run → create node_session (`role='l4'`, `backend='opencode'`) → write scenarios → spawn AionUi → update conv_id → emit NodeSpawned → RETURN
+- NodeSpawned event is consumed by watcher-svc, which polls the L4 worktree like any other node
+- Watcher-svc has L4-specific settle config: `_SETTLE_S_L4` (60s) and `_STABLE_POLLS_L4` (5 polls) via env vars, registered in `_ROLE_CONFIG`
+- `on_node_observed()` in evaluator-svc routes `role='l4'` to `_on_l4_observed()` which validates the L4Report, runs `report_consistent()`, and emits `l4.findings`
+- Publish gate loosened: emit findings whenever report is parsed (even if structural validation fails). Only JSON parse failure blocks emit.
+- `_prepare_l4_workspace()` does `git init` + initial commit so watcher's `_git_state_signature()` can track file changes
+- Workspace persists until `_on_l4_observed()` cleans up — do NOT clean from `on_run_completed()` if NodeSpawned was emitted
+- `Run` SQLAlchemy model fixed: added missing `project_id = Column(String, nullable=False)` to `shared/models.py`
+
+**Rationale**: Reuses the same runs + node_sessions + watcher infrastructure as meta-planner and executor nodes — no ad-hoc polling, no blocking evaluator consumer. The watcher already knows how to detect terminal states. Loosened emit gate ensures structural validation failures still surface findings for human review rather than silently dropping them.
+
+**Trade-offs**: L4 now depends on watcher-svc being operational. L4-specific settle config (60s/5 polls) is longer than execution nodes (30s/2 polls) — L4 agents need more time to complete scenarios. The loosened emit gate may produce findings with inconsistent structure; downstream consumers must handle partial data gracefully.
+
+## 2026-07-28 — Intake L4 severity rank alignment
+
+**Status**: ACTIVE
+
+**Context**: The L4 report model defines severity as `Literal["low", "medium", "high"]`, but the `L4FindingsAdapter._SEVERITY_RANK` in intake used `{"fatal": 4, "critical": 3, "error": 2, "warning": 1}` with `_MIN_SEVERITY=2`. Since `"high"` was not in the rank dict, all findings mapped to rank 0 and were silently filtered out — no improvement intents were created from L4 findings.
+
+**Decision**:
+- Changed `_SEVERITY_RANK` in `services/intake/adapters/l4_findings.py` from `{fatal:4, critical:3, error:2, warning:1}` to `{high:4, medium:2, low:1}`
+- `_MIN_SEVERITY` stays at 2 — meaning `high` and `medium` findings are accepted, `low` findings are dropped
+- This matches the `report_consistent()` check #6 which also treats `"high"` as the threshold for high-severity
+
+**Rationale**: Severity labels must match between L4's output model and intake's severity filter. The old rank dict was a copy-paste from a different domain (error monitoring). Using L4's actual severity values is the correct fix.
+
+**Trade-offs**: No behavioral change for the severity floor — `medium` cutoff was always the intent, it just wasn't working because `"high"` was unrecognized. Low-severity findings are still dropped but this is by design.

@@ -415,12 +415,21 @@ def _handle_gate_evaluated(session, payload):
         logger.warning("Gate failed for run %s -- finalizing failure", run_id)
         print(f"[PRINT] Gate failed for run {run_id}", flush=True)
         try:
+            from contracts.events import RunFailed
+            from shared.outbox import emit
+
             _commit_worktree(run_id, node_id=_node_id)
             # Persist commit_tag even on failure for forensic traceability
             _persist_commit_tag(run_id, _node_id, node_session_id)
             finalize_failure(run_id, reason="gate_evaluated_fail", workspace_root=_WORKSPACE_ROOT)
             _update_run(run_id, state="failed")
-            print(f"[PRINT] Run {run_id} quarantined and marked failed", flush=True)
+            emit(session, RunFailed(
+                run_id=run_id,
+                reason="gate_evaluated_fail",
+                quarantine_tag=node_session_id or _node_id,
+                ts=time.time(),
+            ))
+            print(f"[PRINT] Run {run_id} quarantined, marked failed, RunFailed emitted", flush=True)
         except Exception as exc:
             logger.error("Failed to quarantine run %s: %s", run_id, exc)
             print(f"[PRINT] FAILED to quarantine run {run_id}: {exc}", flush=True)
@@ -772,6 +781,32 @@ def _handle_node_remediate(session, payload):
 
 
 # ── Single dispatcher consumer ──────────────────────────────────────────────
+# ── Run stop handler ──────────────────────────────────────────────────────
+
+
+def _handle_run_stop(session, payload):
+    """Handle RunStop — cancel the run, emit RunStopped back to planner."""
+    from backend.worktree.lifecycle import _update_run
+    from contracts.events import RunStopped
+    from shared.outbox import emit
+    import time
+
+    run_id = payload["run_id"]
+    project_id = payload.get("project_id", "")
+    reason = payload.get("reason", "no reason")
+
+    logger.info("RunStop received for run=%s project=%s reason=%s", run_id, project_id, reason)
+
+    _update_run(run_id, state="cancelled")
+
+    emit(session, RunStopped(
+        run_id=run_id,
+        project_id=project_id,
+        reason=reason,
+    ))
+    logger.info("Run %s cancelled and RunStopped emitted", run_id)
+
+
 # RabbitMQ round-robins messages across consumers on the same queue.
 # Having 3 separate consumers means a gate.evaluated event can land on
 # the plan-ratified handler and fail.  A single consumer dispatches by
@@ -792,6 +827,8 @@ def _executor_dispatcher(session, payload):
         _handle_node_remediate(session, payload)
     elif "plan_id" in payload:
         _handle_plan_ratified(session, payload)
+    elif "run_id" in payload and "reason" in payload:
+        _handle_run_stop(session, payload)
     else:
         logger.warning("Unknown event type on executor.q: keys=%s", list(payload.keys()))
 

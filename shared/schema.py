@@ -83,3 +83,6 @@ class Plan(BaseModel):
     ratified: bool = False
     version: int = 1
     needs_usage_sim: bool = False
+    origin: str = "human"
+    source_ref: str | None = None
+    intake_id: int | None = None

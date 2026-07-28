@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -244,3 +245,125 @@ class TestRemediation:
         """2. Node with failing L1 shows remediate action."""
         # Verified by test_failing_check_remediates above
         pass
+
+
+# ── Gap 4: Empty-diff short-circuit tests (git worktree) ──────────────────
+
+
+@pytest.fixture
+def git_worktree():
+    """Create a temporary git-initialized worktree with an empty commit."""
+    d = Path(tempfile.mkdtemp(prefix="gate_git_"))
+    subprocess.run(["git", "init"], cwd=str(d), capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test"], cwd=str(d), capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(d), capture_output=True)
+    # Create a tracked file so we can detect modifications
+    (d / "tracked.py").write_text("original\n")
+    subprocess.run(["git", "add", "-A"], cwd=str(d), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=str(d), capture_output=True)
+    yield str(d)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def rubric_only_checks():
+    from backend.evaluator.schema import Check
+    return [
+        Check(id="rubric-quality", type="rubric", criterion="Quality",
+              rubric_item="Is the implementation complete and correct?"),
+        Check(id="rubric-style", type="rubric", criterion="Style",
+              rubric_item="Does the code follow project conventions?"),
+    ]
+
+
+class TestEmptyDiffShortCircuit:
+    """Gap 4: Empty-diff short-circuit in evaluate_gate."""
+
+    def test_is_worktree_diff_empty_true(self, git_worktree):
+        """Freshly committed repo has no diff."""
+        from backend.evaluator.gate import _is_worktree_diff_empty
+        assert _is_worktree_diff_empty(git_worktree) is True
+
+    def test_is_worktree_diff_empty_modified(self, git_worktree):
+        """Modified tracked file is detected."""
+        Path(git_worktree, "tracked.py").write_text("modified\n")
+        from backend.evaluator.gate import _is_worktree_diff_empty
+        assert _is_worktree_diff_empty(git_worktree) is False
+
+    def test_is_worktree_diff_empty_untracked(self, git_worktree):
+        """New untracked file is detected."""
+        Path(git_worktree, "new_file.py").write_text("new\n")
+        from backend.evaluator.gate import _is_worktree_diff_empty
+        assert _is_worktree_diff_empty(git_worktree) is False
+
+    def test_is_worktree_diff_empty_non_git(self, tmp_path):
+        """Non-git directory returns False (safe default)."""
+        from backend.evaluator.gate import _is_worktree_diff_empty
+        assert _is_worktree_diff_empty(str(tmp_path)) is False
+
+    def test_empty_diff_short_circuit_remediates(
+        self, git_worktree, rubric_only_checks,
+    ):
+        """verdict=done_no_change + no diff + prev_l1 → short-circuit to remediate."""
+        from backend.evaluator.gate import evaluate_gate
+
+        def should_not_be_called(cl, wt):
+            raise RuntimeError("L2 should not be called on empty diff")
+
+        decision = evaluate_gate(
+            rubric_only_checks, git_worktree,
+            l2_fn=should_not_be_called, threshold=0.7,
+            prev_l1_passed_ids=["det-syntax"],
+            verdict="done_no_change",
+        )
+        assert decision.action == "remediate"
+        assert decision.l2_passed is False
+        assert decision.goal_review == 0.0
+        assert len(decision.l2_feedback) == 1
+        assert decision.l2_feedback[0]["check_id"] == "_no_changes"
+
+    def test_empty_diff_not_triggered_when_changes_exist(
+        self, git_worktree, rubric_only_checks,
+    ):
+        """Changes in worktree → normal L2 path (no short-circuit)."""
+        Path(git_worktree, "tracked.py").write_text("modified\n")
+        from backend.evaluator.gate import evaluate_gate
+
+        def stub_l2(cl, wt):
+            from backend.evaluator.l2_judge import L2Result
+            from backend.evaluator.schema import Judgment
+            return L2Result(
+                score=0.85, items_met=1, rubric_count=1,
+                judgments=[Judgment(check_id="rubric-quality", criteria_met=True, explanation="ok")],
+            )
+
+        decision = evaluate_gate(
+            rubric_only_checks, git_worktree,
+            l2_fn=stub_l2, threshold=0.7,
+            prev_l1_passed_ids=["det-syntax"],
+            verdict="done_no_change",
+        )
+        assert decision.action == "done"
+        assert decision.goal_review == 0.85
+
+    def test_empty_diff_not_triggered_without_prev_l1(
+        self, git_worktree, rubric_only_checks,
+    ):
+        """No prev_l1_passed_ids → normal path (first attempt)."""
+        from backend.evaluator.gate import evaluate_gate
+
+        def stub_l2(cl, wt):
+            from backend.evaluator.l2_judge import L2Result
+            from backend.evaluator.schema import Judgment
+            return L2Result(
+                score=0.9, items_met=1, rubric_count=1,
+                judgments=[Judgment(check_id="rubric-quality", criteria_met=True, explanation="ok")],
+            )
+
+        decision = evaluate_gate(
+            rubric_only_checks, git_worktree,
+            l2_fn=stub_l2, threshold=0.7,
+            verdict="done_no_change",
+        )
+        assert decision.action == "done"
+        assert decision.goal_review == 0.9

@@ -18,7 +18,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from contracts.events import PlanRatified, RunCompleted, RunFailed
+from contracts.events import (
+    PlanRatified, RunCompleted, RunFailed,
+    PlanRatifiable, PlanFailed as PlanFailedEvent,
+    PlanRejected, RunStop,
+)
 from shared.bus import EventBus
 from shared.config import ServiceConfig
 from shared.db import init_db
@@ -47,6 +51,9 @@ class GoalRequest(BaseModel):
     quality_intent: str | None = None
     nodes: list[dict] | None = None
     project_id: str = "default"
+    source_ref: str | None = None
+    intake_id: int | None = None
+    evidence: list[str] = []
 
 
 class ClarifyRequest(BaseModel):
@@ -185,6 +192,11 @@ def _on_node_observed_planning(session, payload):
                     (planning_run_id,),
                 )
             logger.info("Plan %s ratified via harness (run %s done)", plan_id, planning_run_id)
+            from shared.outbox import emit as outbox_emit
+            outbox_emit(session, PlanRatifiable(
+                plan_id=plan_id,
+                project_id=project_id,
+            ))
             return
 
         errs = [dec.feedback_text]
@@ -217,8 +229,10 @@ def _on_node_observed_planning(session, payload):
             )
         logger.warning("Planning failed for %s after %d attempts (run %s failed)", plan_id, attempts, planning_run_id)
         from shared.outbox import emit as outbox_emit
-        outbox_emit(session, RunFailed(
-            run_id=None, reason=f"planning failed: {errs[:3]}", ts=time.time(),
+        err_text = f"planning failed: {errs[:3]}"
+        outbox_emit(session, RunFailed(run_id=None, reason=err_text, ts=time.time()))
+        outbox_emit(session, PlanFailedEvent(
+            plan_id=plan_id, project_id=project_id, error=err_text,
         ))
     else:
         # Re-spawn via LangGraph with feedback
@@ -320,10 +334,11 @@ async def lifespan(app: FastAPI):
     def _dispatch(s, payload):
         if "node_session_id" in payload:
             _on_node_observed_planning(s, payload)
-        elif payload.get("event_type") == "run.completed" or "run_id" in payload:
-            _handle_run_completed(s, payload)
         elif payload.get("event_type") == "run.failed":
             _handle_run_failed(s, payload)
+        elif "run_id" in payload:
+            # run.completed (no event_type) or run.stopped (no event_type)
+            _handle_run_completed(s, payload)
         else:
             logger.warning("No planner handler for payload keys: %s", list(payload.keys()))
 
@@ -551,7 +566,24 @@ def submit_goal(body: GoalRequest):
             goal=body.raw_input,
             success=SuccessCriterion(text=""),
             version=1,
+            origin=body.origin,
+            source_ref=body.source_ref,
+            intake_id=body.intake_id,
         ))
+        # Emit clarification event so intake can auto-answer via source adapter
+        from shared.db import session as db_session
+        from shared.outbox import emit
+        from contracts.events import PlanAwaitingClarification
+        import time
+        with db_session() as s:
+            mg = state.get("meta_goal") or {}
+            questions = mg.get("questions", []) if isinstance(mg, dict) else []
+            emit(s, PlanAwaitingClarification(
+                plan_id=plan_id,
+                questions=questions,
+                ts=time.time(),
+            ))
+            s.commit()
         return {
             "status": "awaiting_clarification",
             "plan_id": plan_id,
@@ -571,6 +603,9 @@ def submit_goal(body: GoalRequest):
             goal=mg.get("goal", body.raw_input) if isinstance(mg, dict) else body.raw_input,
             success=SuccessCriterion(text=""),
             version=1,
+            origin=body.origin,
+            source_ref=body.source_ref,
+            intake_id=body.intake_id,
         ))
         planning_session = state.get("planning_session")
         wt = None
@@ -640,6 +675,9 @@ def submit_goal(body: GoalRequest):
         dag=dag_nodes,
         version=1,
         needs_usage_sim=needs_usage_sim,
+        origin=body.origin,
+        source_ref=body.source_ref,
+        intake_id=body.intake_id,
     ))
 
     return {
@@ -797,6 +835,15 @@ def ratify_plan(plan_id: str):
     # run_plan_gate operates on the dict directly
     gate_result = run_plan_gate(plan_dict)
     if gate_result.action != "ratify":
+        from shared.db import session as db_session
+        with db_session() as s:
+            emit(s, PlanRejected(
+                plan_id=plan_id,
+                project_id=plan_dict.get("project_id", "default"),
+                reason=gate_result.feedback_text or "gate failure",
+                rejected_by="policy",
+            ))
+            s.commit()
         return RatifyResponse(
             status="gate_failed",
             plan_id=plan_id,
@@ -848,6 +895,91 @@ def ratify_plan(plan_id: str):
         run_id=run_id,
         plan_goal_review=gate_result.plan_goal_review,
     )
+
+
+# ── Intake MVP lifecycle endpoints ──────────────────────────────────────────
+
+
+class StopRequest(BaseModel):
+    project_id: str
+    reason: str
+
+
+class ResumeRequest(BaseModel):
+    project_id: str
+
+
+@app.post("/stop")
+def stop_project(body: StopRequest):
+    """Stop the active run for a project — terminates run, pauses intake."""
+    from backend.planning.store import get_active_run_for_project
+    from shared.db import session as db_session
+    from shared.outbox import emit
+    import psycopg
+
+    active = get_active_run_for_project(body.project_id)
+    if not active:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"No active run for project {body.project_id}"},
+        )
+
+    # Emit RunStop → executor terminates the run
+    with db_session() as s:
+        emit(s, RunStop(
+            run_id=active["id"],
+            project_id=body.project_id,
+            reason=body.reason,
+        ))
+        s.commit()
+
+    # Escalate any correlated intake_intent
+    db_url = os.environ["DATABASE_URL"]
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE intake_intents
+                   SET status = 'escalated', last_error = %s, updated_at = now()
+                   WHERE plan_id = %s AND status NOT IN ('escalated', 'duplicate', 'superseded')""",
+                (f"stopped: {body.reason}", active.get("plan_id")),
+            )
+            # Set the pause flag
+            cur.execute(
+                """INSERT INTO project_flags (project_id, intake_paused, paused_reason, updated_at)
+                   VALUES (%s, true, %s, now())
+                   ON CONFLICT (project_id) DO UPDATE SET
+                     intake_paused = true,
+                     paused_reason = %s,
+                     updated_at = now()""",
+                (body.project_id, body.reason, body.reason),
+            )
+        c.commit()
+
+    logger.info("Project %s stopped: %s", body.project_id, body.reason)
+    return {"status": "stopped", "project_id": body.project_id}
+
+
+@app.post("/resume")
+def resume_project(body: ResumeRequest):
+    """Resume intake for a project — clears the pause flag."""
+    import psycopg
+
+    db_url = os.environ["DATABASE_URL"]
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO project_flags (project_id, intake_paused, updated_at)
+                   VALUES (%s, false, now())
+                   ON CONFLICT (project_id) DO UPDATE SET
+                     intake_paused = false,
+                     paused_reason = NULL,
+                     updated_at = now()""",
+                (body.project_id,),
+            )
+        c.commit()
+
+    logger.info("Project %s resumed", body.project_id)
+    return {"status": "resumed", "project_id": body.project_id}
 
 
 # ── Main ─────────────────────────────────────────────────────────────────

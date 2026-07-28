@@ -26,14 +26,25 @@ from shared.outbox import (
 
 logger = logging.getLogger(__name__)
 
+
+class RequeueHandled(Exception):
+    """Raised by a handler to signal that it has already re-queued the event.
+
+    The consumer callback catches this to skip ``mark_processed()``, allowing
+    the re-delivered copy to be consumed without deduplication.
+    """
+
+
 EXCHANGE = "conductor.events"
 
 # Queue → routing keys each service consumes
 BINDINGS: dict[str, list[str]] = {
-    "planner.q": ["run.completed", "run.failed", "node.observed"],
-    "executor.q": ["plan.ratified", "node.steer", "node.remediate", "gate.evaluated"],
+    "planner.q": ["run.completed", "run.failed", "node.observed", "run.stopped"],
+    "executor.q": ["plan.ratified", "node.steer", "node.remediate", "gate.evaluated", "run.stop"],
     "watcher.q": ["node.spawned"],
     "evaluator.q": ["node.observed", "ratchet.trigger", "calibrate.trigger", "run.completed"],
+    "intake.q": ["run.failed", "l4.findings", "plan.awaiting_clarification",
+                 "plan.ratifiable", "plan.failed", "plan.rejected"],
 }
 
 
@@ -47,6 +58,18 @@ def declare_topology(channel: pika.channel.Channel) -> None:
         channel.queue_declare(queue, durable=True)
         for key in keys:
             channel.queue_bind(queue, EXCHANGE, routing_key=key)
+
+    # Delay queue for evaluator retry with configurable per-message TTL.
+    # When the TTL expires, the message is dead-lettered back to
+    # conductor.events → routed to evaluator.q for re-consumption.
+    channel.queue_declare(
+        queue="evaluator.delay",
+        durable=True,
+        arguments={
+            "x-dead-letter-exchange": EXCHANGE,
+            "x-dead-letter-routing-key": "node.observed",
+        },
+    )
 
 
 class EventBus:
@@ -134,6 +157,12 @@ class EventBus:
                     return
                 try:
                     handler(s, payload)
+                except RequeueHandled:
+                    # Handler saved partial state and published delayed retry.
+                    # Ack the original message but skip mark_processed so the
+                    # re-delivered copy is not deduplicated.
+                    s.commit()
+                    logger.debug("RequeueHandled for %s — acked, not marking processed", key)
                 except Exception:
                     logger.exception("Handler failed for %s on %s", key, queue)
                     try:
@@ -141,8 +170,9 @@ class EventBus:
                     except Exception:
                         logger.warning("nack failed too — channel likely dead")
                     return  # keep consumer alive for next message
-                mark_processed(s, consumer_name, key)
-                s.commit()
+                else:
+                    mark_processed(s, consumer_name, key)
+                    s.commit()
             try:
                 ch.basic_ack(method.delivery_tag)
             except Exception:

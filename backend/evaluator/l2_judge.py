@@ -32,6 +32,10 @@ JUDGE_TIMEOUT = 300.0
 # L2 input-size — oversized artifacts trigger a flag-fail instead of truncation
 L2_MAX_CHARS = int(os.environ.get("L2_MAX_INPUT_CHARS", "24000"))
 
+# Chunked evaluation: artifacts above this size are split into overlapping chunks
+L2_ARTIFACT_MAX_CHUNK_SIZE = int(os.environ.get("L2_ARTIFACT_MAX_CHUNK_SIZE", "200000"))
+L2_ARTIFACT_CHUNK_OVERLAP = int(os.environ.get("L2_ARTIFACT_CHUNK_OVERLAP", "20000"))
+
 GEVAL_THRESHOLD = 0.5
 """Score threshold for per-item criteria_met conversion."""
 
@@ -154,7 +158,47 @@ def build_dim_metric(
     )
 
 _MAX_GEVAL_RETRIES = 5
-_GEVAL_RETRY_DELAY_S = 10
+_GEVAL_RETRY_DELAY_S = 70  # fixed 70s cooldown per retry
+
+
+# ── Chunked artifact evaluation ─────────────────────────────────────────────
+
+def _chunk_artifact(text: str, max_size: int = L2_ARTIFACT_MAX_CHUNK_SIZE,
+                    overlap: int = L2_ARTIFACT_CHUNK_OVERLAP) -> list[str]:
+    """Split artifact into N overlapping chunks capped at max_size chars.
+
+    Returns [text] when text fits in one chunk. Overlap ensures code spanning
+    adjacent chunks is visible in both. Split on newline boundaries.
+    """
+    n = len(text)
+    if n <= max_size:
+        return [text]
+
+    stride = max_size - overlap
+    if stride <= 0:
+        stride = max_size
+
+    chunks: list[str] = []
+    pos = 0
+    while pos < n:
+        chunk_end = min(pos + max_size, n)
+        if chunk_end < n:
+            nl = text.rfind('\n', pos, chunk_end)
+            if nl > pos + max_size // 2:
+                chunk_end = nl + 1
+        chunks.append(text[pos:chunk_end])
+        if chunk_end >= n:
+            break
+        pos += stride
+
+    return chunks
+
+
+class NeedsRequeueError(Exception):
+    """Raised when all retries for all chunks are exhausted for a rubric item
+    and no valid score (>0) was produced. The caller should save partial
+    judgments and re-queue the node for later evaluation."""
+    pass
 
 
 # ── Legacy prompt templates (kept for ``llm_call`` backward compat) ─────────
@@ -205,6 +249,12 @@ class L2Result:
     """Number of rubric items that met criteria."""
     oversize: bool = False
     """True when artifact exceeds L2_MAX_CHARS — flag-fail, not truncated."""
+    partial: bool = False
+    """True when evaluation was interrupted by retry exhaustion and needs re-queue.
+    Partial judgments for completed items are in ``judgments``."""
+    best_chunk_idx: int = 0
+    """Chunk index that most recently passed a rubric item.
+    Used on re-delivery to try the best-known chunk first."""
 
 
 # ── Artifact collection ──────────────────────────────────────────────────────
@@ -271,14 +321,20 @@ def _collect_changed_files(worktree: str) -> list[str]:
 def _build_repomix_snapshot(worktree: str, node_context: dict | None = None,
                            extra_ignore: list[str] | None = None,
                            extra_include_suffixes: list[str] | None = None,
-                           changed_files: list[str] | None = None) -> str:
-    """Generate a repomix snapshot targeting changed files.
+                           changed_files: list[str] | None = None,
+                           deliverables_only: bool = False) -> str:
+    """Generate a repomix snapshot.
 
     When ``changed_files`` is non-empty (the common case), the snapshot
     includes full content for those files + manifests + criterion
     ``where`` paths + deliverables. When empty (e.g. first run with no
     commits yet), falls back to auto-detected source directories
     (``src/``, ``app/``, ``lib/``).
+
+    When ``deliverables_only`` is True (L2 evaluation), changed_files is
+    ignored and only deliverables + manifests + tree are included. This
+    produces a smaller, focused artifact matching the design constraint
+    that rubric items must be answerable from the repomix text snapshot.
 
     Always includes a compressed tree listing (~2KB) for overall
     project structure context. Falls back gracefully if repomix CLI
@@ -298,9 +354,14 @@ def _build_repomix_snapshot(worktree: str, node_context: dict | None = None,
                 include_paths.append(d)
     include_paths = list(dict.fromkeys(include_paths))
 
-    # ── Primary: changed_files from git diff (already infra-filtered) ──
+    # ── File selection ────────────────────────────────────────────────
     wt_path = Path(worktree)
-    if changed_files:
+
+    if deliverables_only:
+        # L2 mode: only deliverables + manifests + tree, no changed files
+        pass
+    elif changed_files:
+        # Full mode: include changed files from git diff
         for f in changed_files:
             candidate = f.removeprefix("./")
             if _artifact_skip_path(candidate):
@@ -366,6 +427,30 @@ def _build_repomix_snapshot(worktree: str, node_context: dict | None = None,
     return "\n".join(parts)
 
 
+def collect_deliverables_artifact(worktree: str,
+                                   node_context: dict | None = None,
+                                   bundle_rules: dict | None = None) -> str:
+    """Collect deliverables-only artifact — no git diff or untracked files.
+
+    Only the repomix snapshot targeting deliverables + manifests + tree.
+    This is smaller and more focused for L2 rubric evaluation, matching
+    the design constraint that rubric items must be answerable from the
+    repomix text snapshot alone.
+    """
+    extra_ignore = (bundle_rules or {}).get("exclude_parts")
+    extra_include_suffixes = (bundle_rules or {}).get("include_suffixes")
+    snapshot = _build_repomix_snapshot(
+        worktree, node_context,
+        extra_ignore=extra_ignore,
+        extra_include_suffixes=extra_include_suffixes,
+        changed_files=None,
+        deliverables_only=True,
+    )
+    if not snapshot:
+        return ""
+    return snapshot
+
+
 def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS,
                      node_context: dict | None = None,
                      bundle_rules: dict | None = None) -> str:
@@ -416,33 +501,6 @@ def collect_artifact(worktree: str, max_chars: int = L2_MAX_CHARS,
                 if content is not None:
                     parts.append(f"--- {f} ---")
                     parts.append(content)
-    except Exception:
-        pass
-
-    try:
-        rc = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD"],
-            cwd=worktree, capture_output=True, text=True, timeout=15,
-        )
-        commit_count = int(rc.stdout.strip() or 0)
-        if commit_count > 1:
-            result = subprocess.run(
-                ["git", "diff", "HEAD~1..HEAD", "--no-color"],
-                cwd=worktree, capture_output=True, text=True, timeout=30,
-            )
-            committed_diff = result.stdout.strip()
-            if committed_diff:
-                parts.append("[Last commit diff]")
-                parts.append(committed_diff)
-        elif commit_count == 1:
-            result = subprocess.run(
-                ["git", "show", "HEAD", "--no-color", "--stat"],
-                cwd=worktree, capture_output=True, text=True, timeout=30,
-            )
-            shown = result.stdout.strip()
-            if shown:
-                parts.append("[Initial commit summary]")
-                parts.append(shown)
     except Exception:
         pass
 
@@ -554,6 +612,7 @@ def run_l2(
     node_context: dict | None = None,
     capability: str | None = None,
     rubric_dims: dict | None = None,
+    existing_judgments: list[Judgment] | None = None,
 ) -> L2Result:
     """Run rubric judge for all rubric checks on a node.
 
@@ -605,15 +664,26 @@ def run_l2(
         bundle_rules = {}
 
     # ── Default: deepeval GEval path ──────────────────────────────────────
-    artifact = collect_artifact(worktree, node_context=node_context, bundle_rules=bundle_rules)
+    artifact = collect_artifact(worktree)
     print(f"[L2] artifact collected: {len(artifact)} chars for {worktree}", flush=True)
-    print(f"[L2] artifact content: {len(artifact)} chars, showing first {L2_MAX_CHARS}\n{artifact[:L2_MAX_CHARS]}", flush=True)
 
-    # L2 input-size warning: log oversize but let judge proceed
-    if len(artifact) > L2_MAX_CHARS:
-        print(f"[L2] artifact OVERSIZE: {len(artifact)} chars > {L2_MAX_CHARS} cap for {worktree} — proceeding anyway", flush=True)
+    # Chunk artifact if it exceeds the max chunk size
+    chunks = _chunk_artifact(artifact) if len(artifact) > L2_ARTIFACT_MAX_CHUNK_SIZE else [artifact]
+    num_chunks = len(chunks)
+    if num_chunks > 1:
+        print(f"[L2] artifact chunked: {len(artifact)} chars -> {num_chunks} chunks (max_size={L2_ARTIFACT_MAX_CHUNK_SIZE}, overlap={L2_ARTIFACT_CHUNK_OVERLAP})", flush=True)
+    else:
+        print(f"[L2] artifact fits in 1 chunk ({len(artifact)} chars <= {L2_ARTIFACT_MAX_CHUNK_SIZE})", flush=True)
 
-    judgments: list[Judgment] = []
+    # Load existing judgments (from re-delivery with partial results)
+    existing_map: dict[str, Judgment] = {}
+    if existing_judgments:
+        for j in existing_judgments:
+            existing_map[j.check_id] = j
+        print(f"[L2] loaded {len(existing_map)} existing partial judgments, skipping on re-evaluation", flush=True)
+
+    best_chunk_idx: int = (node_context or {}).get("best_chunk_idx", 0)
+    judgments: list[Judgment] = list(existing_map.values())  # start with existing
     total_weight = 0.0
     score_sum = 0.0
 
@@ -622,83 +692,133 @@ def run_l2(
     print(f"[L2] GEval config: model={JUDGE_MODEL.model} model_base={JUDGE_MODEL.base_url} threshold={GEVAL_THRESHOLD} deepeval_timeout={deepeval_timeout}s artifact_size={artifact_chars}chars rubric_source={rubric_source}", flush=True)
 
     for c in rubric_checks:
+        # Skip already-evaluated items (from re-delivery)
+        if c.id in existing_map:
+            print(f"[L2] rubric check: id={c.id} SKIPPED (already evaluated)", flush=True)
+            w = getattr(c, "weight", 1.0) or 1.0
+            total_weight += w
+            score_sum += (existing_map[c.id].score or 0.0) * w
+            continue
+
         question = getattr(c, "rubric_item", None) or c.criterion
         print(f"[L2] rubric check: id={c.id} weight={getattr(c, 'weight', 1.0)} question={question}", flush=True)
 
         # Build eval steps from acceptance criteria if available
         steps = _build_eval_steps_from_criterion(c, node_context, feedback_contract=active_fc)
 
-        last_error: str | None = None
-        judgment = None
-        for attempt in range(1 + _MAX_GEVAL_RETRIES):
-            try:
-                metric = build_dim_metric(c.id, question, steps=steps, rubric_anchors=active_anchors, feedback_contract=active_fc)
-                test_case = LLMTestCase(
-                    input=question,
-                    actual_output=artifact,
-                )
-                if attempt == 0:
-                    print(f"[L2] GEval >>> name={c.id} steps={metric.evaluation_steps} rubric={L2_RUBRIC_ANCHORS} model={JUDGE_MODEL} threshold={GEVAL_THRESHOLD}", flush=True)
-                    print(f"[L2] GEval >>> input_len={len(artifact)} chars", flush=True)
-                t0 = _time.time()
-                metric.measure(test_case)
-                elapsed = _time.time() - t0
-                if attempt > 0:
-                    print(f"[L2] GEval retry #{attempt} succeeded id={c.id} elapsed={elapsed:.1f}s", flush=True)
-                else:
-                    print(f"[L2] GEval <<< completed id={c.id} elapsed={elapsed:.1f}s", flush=True)
+        # Best-chunk-first order: known best chunk, then remaining in natural order
+        chunk_order = [best_chunk_idx] + [i for i in range(num_chunks) if i != best_chunk_idx]
 
-                raw_reason = json.dumps(metric.reason) if isinstance(metric.reason, dict) else (metric.reason or "")
-                original_score = float(getattr(metric, "score", 0.0) or 0.0)
-                feedback, feedback_degraded = get_dim_feedback(
-                    metric, c.id, test_case, raw_reason=raw_reason,
-                )
-                met = original_score >= GEVAL_THRESHOLD
-                judgment = Judgment(
-                    check_id=c.id,
-                    criteria_met=met,
-                    score=original_score,
-                    explanation=raw_reason,
-                    feedback_raw=feedback,
-                )
-                where = feedback.get("where", "unspecified")
-                what = feedback.get("what", "")
-                print(f"[L2] {c.id} score={original_score:.4f} WHERE={where} WHAT={what}", flush=True)
-                if feedback_degraded or feedback.get("_degraded"):
-                    print(f"[L2] {c.id} WARNING: feedback failed content validation, marked degraded", flush=True)
-                elif feedback.get("_unstructured"):
-                    print(f"[L2] {c.id} WARNING: unstructured GEval reason, feedback degraded", flush=True)
-                break
+        best_score_for_item: float = -1.0
+        best_judgment_for_item: Judgment | None = None
+        had_valid_score: bool = False
+        all_chunks_failed: bool = True
 
-            except Exception as exc:
-                exc_str = str(exc)
-                last_error = exc_str
-                if attempt < _MAX_GEVAL_RETRIES:
-                    delay = _GEVAL_RETRY_DELAY_S * (2 ** attempt)
-                    print(f"[L2] GEval transient error (attempt {attempt+1}), retrying in {delay}s: {exc_str[:200]}", flush=True)
-                    _time.sleep(delay)
-                else:
-                    print(f"[L2] GEval retries exhausted (attempt {attempt+1}): {exc_str[:300]}", flush=True)
+        for chunk_idx in chunk_order:
+            chunk_text = chunks[chunk_idx]
+            finished = False
+
+            for attempt in range(1 + _MAX_GEVAL_RETRIES):
+                try:
+                    metric = build_dim_metric(c.id, question, steps=steps, rubric_anchors=active_anchors, feedback_contract=active_fc)
+                    test_case = LLMTestCase(
+                        input=question,
+                        actual_output=chunk_text,
+                    )
+                    if attempt == 0:
+                        print(f"[L2] GEval >>> name={c.id} chunk={chunk_idx}/{num_chunks} steps={metric.evaluation_steps} rubric={L2_RUBRIC_ANCHORS} model={JUDGE_MODEL} threshold={GEVAL_THRESHOLD}", flush=True)
+                        print(f"[L2] GEval >>> input_len={len(chunk_text)} chars", flush=True)
+                    t0 = _time.time()
+                    metric.measure(test_case)
+                    elapsed = _time.time() - t0
+                    if attempt > 0:
+                        print(f"[L2] GEval retry #{attempt} succeeded id={c.id} chunk={chunk_idx} elapsed={elapsed:.1f}s", flush=True)
+                    else:
+                        print(f"[L2] GEval <<< completed id={c.id} chunk={chunk_idx} elapsed={elapsed:.1f}s", flush=True)
+
+                    raw_reason = json.dumps(metric.reason) if isinstance(metric.reason, dict) else (metric.reason or "")
+                    original_score = float(getattr(metric, "score", 0.0) or 0.0)
+                    feedback, feedback_degraded = get_dim_feedback(
+                        metric, c.id, test_case, raw_reason=raw_reason,
+                    )
+
+                    # score=0 is no signal — skip to next chunk
+                    if original_score <= 0.0:
+                        print(f"[L2] {c.id} chunk={chunk_idx} score=0 (no signal), trying next chunk", flush=True)
+                        break  # break retry loop, outer loop continues to next chunk
+
+                    # Valid score (>0)
+                    had_valid_score = True
+                    met = original_score >= GEVAL_THRESHOLD
                     judgment = Judgment(
                         check_id=c.id,
-                        criteria_met=False,
-                        score=0.0,
-                        explanation=f"GEval error (retries exhausted): {exc}",
+                        criteria_met=met,
+                        score=original_score,
+                        explanation=raw_reason,
+                        feedback_raw=feedback,
                     )
-                    break
+                    where = feedback.get("where", "unspecified")
+                    what = feedback.get("what", "")
+                    print(f"[L2] {c.id} chunk={chunk_idx} score={original_score:.4f} WHERE={where} WHAT={what}", flush=True)
+                    if feedback_degraded or feedback.get("_degraded"):
+                        print(f"[L2] {c.id} WARNING: feedback failed content validation, marked degraded", flush=True)
+                    elif feedback.get("_unstructured"):
+                        print(f"[L2] {c.id} WARNING: unstructured GEval reason, feedback degraded", flush=True)
 
-        if judgment is None:
-            judgment = Judgment(
+                    if met:
+                        # Passed on this chunk — use it, update best, done with item
+                        best_chunk_idx = chunk_idx
+                        best_judgment_for_item = judgment
+                        best_score_for_item = original_score
+                        all_chunks_failed = False
+                        finished = True
+                        break
+
+                    # Valid score but below threshold — track best, try next chunk
+                    if original_score > best_score_for_item:
+                        best_score_for_item = original_score
+                        best_judgment_for_item = judgment
+                    break  # break retry loop, outer loop continues to next chunk
+
+                except Exception as exc:
+                    exc_str = str(exc)
+                    if attempt < _MAX_GEVAL_RETRIES:
+                        print(f"[L2] GEval transient error (attempt {attempt+1}) id={c.id} chunk={chunk_idx}, retrying in {_GEVAL_RETRY_DELAY_S}s: {exc_str[:200]}", flush=True)
+                        _time.sleep(_GEVAL_RETRY_DELAY_S)
+                    else:
+                        print(f"[L2] GEval retries exhausted (attempt {attempt+1}) id={c.id} chunk={chunk_idx}: {exc_str[:300]}", flush=True)
+                        break  # break retry loop, outer loop continues to next chunk
+
+            if finished:
+                break  # break chunk loop — item passed on this chunk
+
+        # ── After all chunks tried for this rubric item ──
+        if not had_valid_score:
+            # No chunk produced a valid score (>0) across all retries
+            print(f"[L2] {c.id} NO VALID SCORE — all chunks exhausted, returning partial", flush=True)
+            return L2Result(
+                partial=True,
+                judgments=judgments,
+                rubric_count=len(rubric_checks),
+                best_chunk_idx=best_chunk_idx,
+            )
+
+        if best_judgment_for_item is not None:
+            judgments.append(best_judgment_for_item)
+            w = getattr(c, "weight", 1.0) or 1.0
+            total_weight += w
+            score_sum += (best_judgment_for_item.score or 0.0) * w
+        else:
+            # All chunks returned score=0 (no signal but not exhausted)
+            fallback = Judgment(
                 check_id=c.id,
                 criteria_met=False,
                 score=0.0,
-                explanation=f"GEval error: {last_error or 'unknown'}",
+                explanation="All chunks returned score=0",
             )
-
-        judgments.append(judgment)
-        w = getattr(c, "weight", 1.0) or 1.0
-        total_weight += w
-        score_sum += (judgment.score or 0.0) * w
+            judgments.append(fallback)
+            w = getattr(c, "weight", 1.0) or 1.0
+            total_weight += w
 
     score = score_sum / total_weight if total_weight > 0 else 1.0
     items_met = sum(1 for j in judgments if j.criteria_met)
@@ -710,6 +830,7 @@ def run_l2(
         judgments=judgments,
         rubric_count=len(rubric_checks),
         items_met=items_met,
+        best_chunk_idx=best_chunk_idx,
     )
 
 

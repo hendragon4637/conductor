@@ -81,15 +81,15 @@ Cleans state: `bash /opt/aipc/conductor/scripts/clean_e2e_state.sh`
 
 ## Microservices (event-driven architecture)
 
-### Restart all 4 microservices
+### Restart all 5 microservices
 ```bash
 # Load secrets once
 set -a; source /opt/aipc/scripts/load-secrets.sh; set +a
 
 # Each service sources its own .env + starts uvicorn in background
-declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 )
+declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 ["intake"]=8095 )
 
-for svc in executor watcher planner evaluator; do
+for svc in executor watcher planner evaluator intake; do
   port=${PORTS[$svc]}
   fuser -k "${port}/tcp" 2>/dev/null || true
   sleep 1
@@ -108,7 +108,7 @@ done
 ```bash
 bash /opt/aipc/conductor/scripts/clean_microservice_state.sh
 ```
-One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 4 microservices. Health check runs at end.
+One-shot: truncates all Conductor DB tables (including `outbox`, `processed_events`), cleans workspace dirs, purges RabbitMQ queues, kills service processes, cleans AionUi DB, then restarts all 5 microservices. Health check runs at end.
 
 ### Step-by-step: clean re-run a plan (after code or config changes)
 
@@ -117,10 +117,10 @@ Full teardown + restart sequence. Use when you changed evaluator code, rubric pr
 ```bash
 # 0. Variables
 PLAN_ID="plan_09f23fe0"
-declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 )
+declare -A PORTS=( ["executor"]=8091 ["watcher"]=8092 ["planner"]=8093 ["evaluator"]=8094 ["intake"]=8095 )
 
 # 1. Kill running microservices
-for port in 8091 8092 8093 8094; do
+for port in 8091 8092 8093 8094 8095; do
     fuser -k "${port}/tcp" 2>/dev/null || true
 done
 
@@ -159,8 +159,8 @@ for queue in planner.q executor.q watcher.q evaluator.q; do
         "http://127.0.0.1:15672/api/queues/staging/${queue}/contents" > /dev/null
 done
 
-# 7. Restart all 4 microservices
-for svc in executor watcher planner evaluator; do
+# 7. Restart all 5 microservices
+for svc in executor watcher planner evaluator intake; do
     port=${PORTS[$svc]}
     set -a
     source /opt/aipc/scripts/load-secrets.sh 2>/dev/null
@@ -176,7 +176,7 @@ done
 sleep 5
 
 # 8. Health check
-for p in 8091 8092 8093 8094; do
+for p in 8091 8092 8093 8094 8095; do
     echo -n ":${p} "
     curl -sfm 3 "http://127.0.0.1:${p}/health" 2>/dev/null || echo "DOWN"
 done
@@ -208,14 +208,19 @@ docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT * FROM outbox ORDER BY id"
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT * FROM processed_events ORDER BY processed_at"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, finding_type, status, created_at FROM intake_findings ORDER BY created_at DESC"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, origin, source_ref, status FROM intake_intents ORDER BY created_at DESC LIMIT 10"
 ```
 
 ### Service logs
 ```bash
-tail -f /tmp/executor-svc.log   # executor
-tail -f /tmp/watcher-svc.log    # watcher
-tail -f /tmp/planner-svc.log    # planner
-tail -f /tmp/evaluator-svc.log  # evaluator
+tail -f /tmp/executor-svc.log   # executor (:8091)
+tail -f /tmp/watcher-svc.log    # watcher (:8092)
+tail -f /tmp/planner-svc.log    # planner (:8093)
+tail -f /tmp/evaluator-svc.log  # evaluator (:8094)
+tail -f /tmp/intake-svc.log     # intake (:8095)
 ```
 
 ## L3 calibration
@@ -231,19 +236,33 @@ docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT node_type, agreement, mae, trusted, calibrated_at FROM judge_trust"
 ```
 
-## L4 persona simulation
+## L4 persona simulation (watcher-observed)
 ```bash
-# Check L4 scores on a run
+# Check L4 status on a run
 docker exec postgres psql -U aipc -d aipc_conductor \
-  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id = '<run_id>'"
+  -c "SELECT id, kind, state, l4_status, l4_structural FROM runs WHERE kind='l4' AND parent_run_id='<run_id>'"
 
-# Re-emit run.completed event (for L4 retry)
+# Check L4 node_session status
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, run_id, role, verdict, backend, finished_at FROM node_sessions WHERE role='l4' ORDER BY created_at DESC"
+
+# Re-emit run.completed event (for a fresh L4 cycle)
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "DELETE FROM processed_events WHERE event_key LIKE '%<run_id>:run.completed%'"
 docker exec postgres psql -U aipc -d aipc_conductor \
-  -c "UPDATE runs SET l4_status = NULL, l4_standalone = NULL, l4_acceptance = NULL, l4_reason = NULL WHERE id = '<run_id>'"
+  -c "DELETE FROM node_sessions WHERE role='l4' AND run_id IN (SELECT id FROM runs WHERE kind='l4' AND parent_run_id='<run_id>')"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM runs WHERE kind='l4' AND parent_run_id='<run_id>'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM processed_events WHERE event_key LIKE '%<run_id>:l4.findings%'"
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('run.completed', '{\"event_type\": \"run.completed\", \"run_id\": \"<run_id>\", \"plan_id\": \"<plan_id>\", \"product_type\": \"api\"}', '1.0', NOW())"
+
+# Re-emit l4.findings for intake (after fixing adapter code)
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "DELETE FROM processed_events WHERE event_key='<run_id>:l4.findings'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "INSERT INTO outbox (routing_key, payload, contracts_version, created_at) VALUES ('l4.findings', '<payload_json>', '1.0', NOW())"
 
 # Check AionUi conversation status
 curl -s http://127.0.0.1:40937/api/conversations/<conv_id> | python3 -m json.tool
@@ -256,9 +275,12 @@ sqlite3 /home/aipc/.config/AionUi/aionui/aionui-backend.db \
 ls -la /opt/aipc/conductor/workspace/l4_runs/<run_id>/
 cat /opt/aipc/conductor/workspace/l4_runs/<run_id>/l4_scratch/l4_report.md
 
-# Verify isolated L4 real run result
+# Verify intake created an improvement intent from L4 findings
 docker exec postgres psql -U aipc -d aipc_conductor \
-  -c "SELECT id, l4_status, l4_standalone, l4_acceptance, l4_reason FROM runs WHERE id='<run_id>'"
+  -c "SELECT id, origin, source_ref, status, substring(intent_text,1,80) FROM intake_intents WHERE origin='l4_findings' ORDER BY created_at DESC"
+
+# Watch L4 flow in evaluator log
+tail -f /tmp/evaluator-svc.log | grep -i "l4\|findings\|structural"
 ```
 
 ## Ratchet experiment
@@ -291,6 +313,12 @@ docker exec postgres psql -U aipc -d aipc_conductor \
 echo "=== Node Session ==="
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT id, verdict, gate_outcome, l1_pass, l2_score FROM node_sessions WHERE run_id='$RUN_ID'"
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, role, verdict, gate_outcome FROM node_sessions WHERE role='l4'"
+
+echo "=== Intake Intents ==="
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, origin, status, created_at FROM intake_intents ORDER BY created_at DESC LIMIT 10"
 
 echo "=== Judge Trust ==="
 docker exec postgres psql -U aipc -d aipc_conductor \
@@ -315,6 +343,19 @@ docker exec postgres psql -U aipc -d aipc_conductor \
 echo "=== Skill Mutations ==="
 docker exec postgres psql -U aipc -d aipc_conductor \
   -c "SELECT COUNT(*) FROM skill_mutations"
+```
+
+## Intake-svc findings
+```bash
+# List open findings
+curl -s http://127.0.0.1:8095/api/intake/findings | python3 -m json.tool
+
+# Acknowledge a finding
+curl -s -X POST http://127.0.0.1:8095/api/intake/findings/<id>/ack
+
+# Query intake_findings table
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, finding_type, status, project_id, substring(payload::text, 1, 80) FROM intake_findings ORDER BY created_at DESC LIMIT 20"
 ```
 
 ## Whole-stack reset (clean state)
