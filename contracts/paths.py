@@ -29,6 +29,7 @@ INFRA_EXCLUDES: list[str] = [
     "l4_scratch/",
     "opencode.json",
     "*.egg-info/",
+    "deps/",
 ]
 
 # Also used by the evaluator artifact bundle
@@ -43,6 +44,7 @@ INFRA_SKIP_PARTS: set[str] = {
     ".mypy_cache",
     ".ruff_cache",
     "l4_scratch",
+    "deps",
 }
 
 

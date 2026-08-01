@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from services.intake.adapters.base import Answer, GoalIntent
 from services.intake.adapters.render import render_reformulation
 from services.intake.store import load_intent_by_plan
@@ -14,7 +16,7 @@ class PlanFailedAdapter:
     origin = "plan_failed"
     max_attempts = 3
 
-    def normalize(self, payload: dict) -> list[GoalIntent]:
+    def normalize(self, payload: dict[str, Any]) -> list[GoalIntent]:
         plan_id = payload.get("plan_id", "")
         prev = load_intent_by_plan(plan_id)
         if not prev:

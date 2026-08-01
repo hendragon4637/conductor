@@ -102,6 +102,12 @@
 | **Feedback text preservation** | `gate_plan()` now includes the LLM's `what`/`why`/`how` feedback text in the gate feedback string, appending `[feedback degraded]` as a qualifier rather than replacing the content. Ensures the meta-planner receives actionable problem descriptions. |
 | **Artifact-answerability constraint** | Prompt-level rule in `check_generator.py` and `checkgen.py` that prohibits L2 rubric items from requiring inspection of invisible artifacts (binaries, compiled outputs, build assets, runtime behavior, installed artifacts). Ensures every rubric item is answerable from the repomix text snapshot. |
 | **ARTIFACT_SKIP_PARTS** | Set of file patterns in `l2_judge.py` that are excluded from the repomix snapshot sent to the L2 judge. Includes `.git`, `AGENTS.md`, and `opencode.json` — infra files that waste tokens and dilute the product signal. |
+| **Worksystem** | Per-system store (File 10, guide 10.x) of every member's *published* state under `worksystem/repos/<system_id>/` — `members/<name>/` (workspace.json + _source.json provenance), regenerated `index.json`, and `compose.yml`. Derived state, gitignored, rebuilt on each publish. |
+| **Publish-on-merge** | On `run.merged`, the executor calls `publish_run()`: the standard's `publish_manifest.files`/`artifacts` are copied into the member dir (with `.conductor/workspace.json` flattened to `workspace.json`), `index.json` + `compose.yml` regenerated (never patched) and committed. Failure marks `publish_status='stale'` and never fails the run; skipped for system-less projects and assembly composers. |
+| **Worksystem snapshot** | Git worktree snapshot (`snapshot_worktree()`, detached HEAD, tag `l4/run-<run_id>`) of a worksystem repo used for system L4 — "artifacts only, no source" sandbox (guide 10.5). `_write_worksystem_opencode_json()` allows edits (compose.yml is the adjustment signal) but denies git/sudo/rm-rf/webfetch/websearch. |
+| **Adjustment-delta** | `compute_adjustments()` git-diffs compose between runs → semantic delta → recurring-adjustment finding when `same_adjustment_in_last_n_runs()` (window `RECURRENCE_WINDOW`=3) matches, escalated even on pass verdicts. |
+| **Possibly-stale finding** | `tag_possibly_stale()` tags findings naming members whose published state (per `_source.json` sha) lags master — intake drops them so fixes already on master aren't re-filed. |
+| **Partial-scope run** | An L4 system run with an explicit `members` debug subset: `runs.partial_scope=true`, never blocked by missing members, publishes nothing. |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -164,10 +170,12 @@
 - L4 runs stored in the `runs` table with `kind='l4'` and `parent_run_id=<parent_run_id>`
 - L4 runs are EXCLUDED from the active-run-per-project constraint (`idx_runs_active_project` filtered)
 - L4 runs that fail must NOT emit `run.failed` to the event bus (no intake noise from L4 infra failures)
-- `report_consistent()` runs 6 deterministic checks; failure = structural failure findings still emitted (loosened gate)
+- `report_consistent()` runs 6 deterministic checks; failure = structural failure, report never published (restored guide 06.3/06.4 gate; was temporarily loosened for e2e testing)
 - `resolve_where_paths()` ensures all `where` paths in findings exist in the worktree
 - Empty findings with `verdict=pass` is a complete correct report — never penalize clean sessions
-- 3-gate publish rule: structural=ok AND verdict∈{partial,fail} AND any finding severity≥floor (default: medium) — ORIGINAL rule. Now loosened: emit whenever report is parsed (JSON parse error still blocks). `report_consistent()` failures no longer block emit.
+- 3-gate publish rule: structural=ok AND verdict∈{partial,fail} AND any finding severity≥floor (default: medium) — all three required in `_on_l4_observed` (restored 2026-07-31; the temporary parse-only emit is removed). A parsed-but-inconsistent report never publishes.
+- L4 structural failures get ONE bounded retry: a preamble naming the defect is sent to the existing AionUi conversation and a fresh attempt-2 node_session is spawned via NodeSpawned; a second failure records and continues (guide 06.3). The workspace is NOT cleaned between attempts.
+- L4 runs always carry `merge_status='skipped'` (they never merge — the `'merged'` default would corrupt the blocked-merge queue)
 - `on_run_completed()` calls `run_l4_phase()` which is spawn-only: generates scenarios, creates L4 run + node_session (`role='l4'`, `backend='opencode'`), spawns AionUi, emits NodeSpawned, and RETURNS immediately (no polling)
 - L4 completion is watcher-observed: watcher-svc polls the L4 worktree with `role='l4'` config (60s settle, 5 stable polls via `_SETTLE_S_L4` / `_STABLE_POLLS_L4` env vars)
 - Watcher emits `node.observed`; evaluator-svc `on_node_observed()` routes `role='l4'` to `_on_l4_observed()` which validates report and emits `l4.findings`
@@ -184,6 +192,9 @@
 - Manual override via `POST /l4/manual` — validates same `L4Report` model + `report_consistent()`, uses `labeled_by="human"`
 - L4 agent config at `agent_configs/l4-persona.yaml` — model_preference read at runtime via `_resolve_l4_model()`
 - L4 runs in isolated copy under `workspace/l4_runs/<run_id>/` prepared by `_prepare_l4_workspace()`
+- L4 execution model is agent-driven (guide 05, Option B, 2026-07-31 — documented deviation): an LLM persona drives the product black-box; the deterministic run_block/driver model (guide 05.1/05.2) is NOT implemented
+- L4 install/setup commands come from the project manifest `.conductor/workspace.json` (`components[].commands.setup`), never parsed from RUN.md; each setup runs in its component's `subdir` in one `set -e` shell; assembly projects (root `workspace.json` with `services`) skip local install
+- `_prepare_l4_workspace()` persists the source signature to `l4_scratch/source_baseline.json`; `_on_l4_observed()` verifies source unchanged before publishing — a mutated source fails the run as `l4_status='run_failed'` and emits no findings
 
 ## L3 calibration
 - `calibrate(node_type)` re-scores all frozen golden artifacts for that node_type via the L2 judge, computes MAE and item-level agreement, then upserts `judge_trust`. Never modifies the golden set.
@@ -339,6 +350,16 @@
 - Atomic commits with clear messages
 - Never commit .env, *.db, node_modules/, __pycache__/
 - No force push to main
+
+## Worksystem (File 10, guide 10.x)
+- Worksystem repos live under `worksystem/repos/<system_id>/` (env `WORKSYSTEM_ROOT`); master worktrees under `workspace/` (env `WORKSPACE_ROOT`). Both dirs are gitignored — derived state, never committed.
+- Publish is derived-state regeneration: member files copied from `publish_manifest`, `index.json` + `compose.yml` regenerated via `refresh_index()`/`render_compose()` (never patched), then one git commit. `_source.json` records project_id/sha/image_tag/published_at provenance.
+- Publish-on-merge runs inside a `pg_advisory_lock` keyed `worksystem.publish.<system_id>`; failure marks `publish_status='stale'` and must never fail or block the run.
+- Publish skips when the project has no system (`system_of()` → None) or is an assembly composer (`project_kind() == 'assembly'`).
+- System L4 runs off a git worktree snapshot (detached HEAD, tag `l4/run-<run_id>`), never off the live worksystem repo — the `_source.json` sha is what staleness tagging compares against master.
+- Worksystem opencode.json permits edits (compose.yml edit is the adjustment signal) but denies `git *`, `sudo *`, `rm -rf *`, webfetch, websearch.
+- Staleness: `tag_possibly_stale()` marks findings about members whose published state lags master; intake drops `possibly_stale` findings. Recurring adjustments (`same_adjustment_in_last_n_runs`, window 3) escalate a finding even on pass verdicts.
+- `_FILE_FLATTEN` maps `.conductor/workspace.json` → member `workspace.json`; other files copy by basename. Artifacts >2 MB (`ARTIFACT_CAP_BYTES`) become `.ref` pointers, not copies.
 
 ## Key commands
 # Key Commands (Conductor development)
@@ -531,18 +552,33 @@ curl -s --max-time 300 -X POST "http://127.0.0.1:8093/ratify/${PLAN_ID}" \
 
 ### Manual E2E cycle
 ```bash
-# 1. Submit goal
+# 1. Submit goal (single project)
 curl -s -X POST http://127.0.0.1:8093/goal \
   -H 'Content-Type: application/json' \
   -d '{"raw_input":"<goal>","project_id":"default"}'
 
-# 2. Clarify (if goal needs refinement — returns formulated MetaGoal, re-invokes graph)
+# 2. Submit system goal (multi-project decomposition — returns proposal_id)
+curl -s --max-time 300 -X POST http://127.0.0.1:8093/system/goal \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_input":"<system goal>","families":null}'
+
+# 3. Ratify system proposal (materialises system + projects + queues first goals)
+curl -s -X POST http://127.0.0.1:8093/system/ratify/<proposal_id> \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+
+# 4. Clarify (if goal needs refinement — returns formulated MetaGoal, re-invokes graph)
 curl -s -X POST http://127.0.0.1:8093/clarify/<plan_id> \
   -H 'Content-Type: application/json' \
   -d '{"clarification":"<your clarification text>","human_input":"<revised goal or spec>"}'
 
-# 3. Ratify (use plan_id from step 1)
+# 5. Ratify plan (use plan_id from step 1/4)
 curl -s -X POST http://127.0.0.1:8093/ratify/<plan_id>
+
+# 6. Stop active run (cancels run, pauses intake for project)
+curl -s -X POST http://127.0.0.1:8093/stop \
+  -H 'Content-Type: application/json' \
+  -d '{"project_id":"<project_id>","reason":"<why>"}'
 
 # 4. Monitor cycle
 docker exec postgres psql -U aipc -d aipc_conductor \
@@ -786,6 +822,33 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration 
 ```bash
 /opt/aipc/conductor/.env                # monolith configuration (DB, Neo4j, LLM)
 /opt/aipc/conductor/services/*/.env     # per-microservice env overrides
+```
+
+## Worksystem (File 10 — publish-on-merge store + system L4)
+```bash
+# Worksystem layout
+ls /opt/aipc/conductor/worksystem/repos/<system_id>/          # per-system repo (derived, gitignored)
+cat /opt/aipc/conductor/worksystem/repos/<system_id>/index.json  # member manifest + compose inputs
+cat /opt/aipc/conductor/worksystem/repos/<system_id>/compose.yml # regenerated compose
+ls /opt/aipc/conductor/worksystem/repos/<system_id>/members/<project>/  # published RUN.md/workspace.json/_source.json
+
+# Inspect a system's published state
+git -C /opt/aipc/conductor/worksystem/repos/<system_id> log --oneline -5
+
+# Re-trigger publish for a merged run (executor side)
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, state, publish_status, publish_error FROM runs WHERE publish_status IS NOT NULL ORDER BY id DESC LIMIT 10"
+
+# Run on-demand system L4 against the worksystem snapshot
+curl -s -X POST http://127.0.0.1:8091/l4/trigger/system \
+  -H 'Content-Type: application/json' -d '{"system_id":"<system_id>"}'
+
+# L4 worktree snapshots (retained per L4_TAGS_RETAIN)
+ls /opt/aipc/conductor/worksystem/worktrees/
+git -C /opt/aipc/conductor/worksystem/repos/<system_id> tag -l "l4/run-*"
+
+# Worksystem tests
+cd /opt/aipc/conductor && uv run python -m pytest backend/tests/test_worksystem.py backend/tests/test_l4_isolated_execution.py backend/tests/test_workspace_manifest.py -q
 ```
 
 ## Repo structure (Repomix snapshot — read before scanning files)

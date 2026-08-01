@@ -80,6 +80,19 @@ class RunCompleted(BaseModel):
     ts: float
 
 
+class RunMerged(BaseModel):
+    """Executor → intake: a run's branch was merged to main.
+
+    Triggers drain of pending_goals whose ``wait_for`` includes this project.
+    """
+    run_id: str
+    plan_id: str
+    project_id: str
+    merge_commit: str | None = None
+    dep_shas: dict | None = None
+    ts: float
+
+
 class RunFailed(BaseModel):
     event_type: str = "run.failed"
     run_id: Optional[str] = None
@@ -121,6 +134,26 @@ class CalibrateTrigger(BaseModel):
     node_type: str
     env: str
     ts: float
+
+
+# ── System goal drain ────────────────────────────────────────────────────────
+
+
+class SystemGoalQueued(BaseModel):
+    """Planner → intake: a pending goal from a system decomposition is ready.
+
+    Intake calls ``_submit()`` which creates an ``intake_intents`` row and
+    POSTs to ``/goal``, then handles the full clarification/ratification/fail
+    lifecycle through the existing intake event handlers.
+
+    The ``ts`` field provides a unique deduplication key so that multiple
+    goals queued for different projects in the same drain cycle are each
+    processed independently.
+    """
+    project_id: str
+    raw_input: str
+    origin: str = "system_goal"
+    ts: float = 0.0
 
 
 # ── Intake MVP events ───────────────────────────────────────────────────────
@@ -181,11 +214,13 @@ ROUTING: dict[type[BaseModel], str] = {
     NodeSteer: "node.steer",
     NodeRemediate: "node.remediate",
     RunCompleted: "run.completed",
+    RunMerged: "run.merged",
     RunFailed: "run.failed",
     PlanAwaitingClarification: "plan.awaiting_clarification",
     RatchetTrigger: "ratchet.trigger",
     CalibrateTrigger: "calibrate.trigger",
     # Intake MVP events
+    SystemGoalQueued: "sys.goal_queued",
     L4Findings: "l4.findings",
     PlanRatifiable: "plan.ratifiable",
     PlanFailed: "plan.failed",

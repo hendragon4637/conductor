@@ -17,7 +17,7 @@ from backend.planning.schema import Plan, PlanNode
 from backend.planning.store import get_plan as load_persisted_plan, save_plan as persist_plan
 from backend.planning.store import save_run, get_run, list_runs, update_run_state, get_node_sessions
 from backend.planning.meta_planner import decompose, generate_checks, attach_checks_to_dag, formulate
-from backend.planning.meta_planner.goal_formulator import MetaGoal, enrich_with_conventions
+from backend.planning.meta_planner.goal_formulator import MetaGoal
 from backend.planning.meta_planner.clarify import ClarifyPending, formulate_or_clarify
 from backend.planning.meta_planner.split import split_oversized
 
@@ -498,12 +498,9 @@ def _generate_via_meta_planner(
             return []
         meta_goal = mg
 
-    # Convention injection (File 02): enrich meta-goal with domain profile
-    enriched = enrich_with_conventions(meta_goal, goal)
-    if enriched.needs_clarification:
-        logger.warning("Convention enrichment deferred: %s", enriched.questions)
-        # Still proceed — clarification is advisory for internal_drive
-    meta_goal = enriched
+    # Post-formulation enrichment already ran in run_formulation().
+    # Convention prose is not injected — it reaches the executor via
+    # AGENTS.md from scaffolding per subdir.
 
     # Stage 2: Decompose into DAG (with size_estimate from File 07)
     dag = decompose(
@@ -1042,11 +1039,20 @@ def _extract_project(description: str) -> str | None:
 def _ensure_project_in_db(db_url: str, project_id: str) -> None:
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
-            cur.execute(
-                "INSERT INTO projects (project_id, name, repo_path) VALUES (%s, %s, %s) "
-                "ON CONFLICT (project_id) DO NOTHING",
-                (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
-            )
+            row = cur.execute(
+                "SELECT system_id FROM projects WHERE project_id = %s", (project_id,)
+            ).fetchone()
+            if not row:
+                cur.execute(
+                    "INSERT INTO systems (system_id, name, description) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (project_id, project_id, f"Auto-created system-of-one for {project_id}"),
+                )
+                cur.execute(
+                    "INSERT INTO projects (project_id, name, repo_path, system_id) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (project_id) DO NOTHING",
+                    (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}", project_id),
+                )
         c.commit()
 
 

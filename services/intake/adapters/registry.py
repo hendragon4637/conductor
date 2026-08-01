@@ -24,6 +24,7 @@ from services.intake.adapters.l4_findings import L4FindingsAdapter
 from services.intake.adapters.plan_failed import PlanFailedAdapter
 from services.intake.adapters.ratify_rejected import RatifyRejectedAdapter
 from services.intake.adapters.run_failed import RunFailedAdapter
+from services.intake.adapters.system_goal import SystemGoalAdapter
 
 for _a in (
     RunFailedAdapter(),
@@ -31,5 +32,6 @@ for _a in (
     PlanFailedAdapter(),
     RatifyRejectedAdapter(),
     HumanFeedbackAdapter(),
+    SystemGoalAdapter(),
 ):
     register(_a)

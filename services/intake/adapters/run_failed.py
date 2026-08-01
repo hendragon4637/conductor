@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from backend.planning.store import get_node_sessions, get_run
 from services.intake.adapters.base import Answer, GoalIntent, SourceAdapter
 from services.intake.adapters.render import render_run_failed
@@ -18,7 +20,7 @@ class RunFailedAdapter(SourceAdapter):
     origin = "run_failed"
     max_attempts = 3
 
-    def normalize(self, payload: dict) -> list[GoalIntent]:
+    def normalize(self, payload: dict[str, Any]) -> list[GoalIntent]:
         run_id = payload.get("run_id", "")
         run = get_run(run_id) if run_id else None
         if not run:

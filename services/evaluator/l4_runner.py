@@ -33,6 +33,11 @@ SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
 # Minimum severity for a finding to be published (1 = medium)
 MIN_SEVERITY_RANK = SEVERITY_RANK.get(os.environ.get("L4_MIN_SEVERITY", "medium"), 1)
 
+# ── System L4 imports (lazy, to avoid circular dependencies in non-system flows) ──
+
+L4_SYSTEM_SCENARIO_MODULE = "backend.assembly.system_l4"
+L4_SYSTEM_HELPERS_MODULE = "backend.assembly.generator"
+
 # Workspace dirs that need write access at runtime
 L4_RUNTIME_WRITABLE_DIRS = (
     "l4_scratch",
@@ -123,7 +128,7 @@ def run_l4_phase(
 # ── Node session helpers (watcher-observed pattern) ─────────────────
 
 
-def _create_l4_node_session(db_url: str, l4_run_id: str, worktree: str) -> str:
+def _create_l4_node_session(db_url: str, l4_run_id: str, worktree: str, attempt: int = 1) -> str:
     """Create a node_session row with ``role='l4'`` for watcher monitoring."""
     import uuid
 
@@ -135,7 +140,7 @@ def _create_l4_node_session(db_url: str, l4_run_id: str, worktree: str) -> str:
                     """INSERT INTO node_sessions
                        (id, run_id, node_id, role, backend, attempt, worktree, members)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (ns_id, l4_run_id, "_l4_eval", "l4", "opencode", 1, worktree, "[]"),
+                    (ns_id, l4_run_id, "_l4_eval", "l4", "opencode", attempt, worktree, "[]"),
                 )
             conn.commit()
         return ns_id
@@ -179,6 +184,32 @@ def _emit_l4_spawned(s: Any, ns_id: str, conv_id: str, worktree: str) -> None:
 # ── Async handler (called from evaluator on ``node.observed``) ──────
 
 
+def _verify_l4_source_baseline(worktree: Path) -> bool:
+    """Verify product source in the isolated copy is unchanged since prep.
+
+    Loads ``l4_scratch/source_baseline.json`` written by
+    ``_prepare_l4_workspace`` and compares it against the current tree.
+    Returns ``False`` (and logs) when the source was mutated — the L4 agent
+    violated the read-only contract.  A missing baseline is tolerated
+    (fail-open) so legacy/pre-verification workspaces are not disrupted.
+    """
+    baseline_path = worktree / "l4_scratch" / "source_baseline.json"
+    if not baseline_path.exists():
+        logger.warning("L4 source baseline missing at %s — skipping verification", baseline_path)
+        return True
+    try:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        from services.evaluator.main import _verify_l4_source_unchanged
+        _verify_l4_source_unchanged(worktree, baseline)
+        return True
+    except RuntimeError as exc:
+        logger.warning("L4 source changed in isolated copy: %s", exc)
+        return False
+    except Exception:
+        logger.exception("L4 source verification failed for %s", worktree)
+        return False
+
+
 def _on_l4_observed(s: Any, payload: dict) -> None:
     """Handle ``NodeObserved`` for ``role='l4'`` sessions.
 
@@ -213,6 +244,17 @@ def _on_l4_observed(s: Any, payload: dict) -> None:
         logger.error("L4 worktree missing for ns=%s: %s", node_session_id, worktree)
         return
 
+    # Source immutability: the L4 agent may only read product source.  If it
+    # was mutated, fail the run and never publish findings from a tampered
+    # artifact (guide 05, locked decision).
+    if not _verify_l4_source_baseline(Path(worktree)):
+        _persist_l4_failure(db_url, l4_run.id, "run_failed",
+                            "L4 source mutated in isolated copy")
+        _persist_l4_on_parent(db_url, l4_run.parent_run_id or "", "run_failed",
+                              "L4 source mutated in isolated copy")
+        _cleanup_l4_workspace(Path(worktree))
+        return
+
     report_path = Path(worktree) / "l4_scratch" / "report.json"
 
     # Load scenarios from the L4 run's pre-registered scenarios
@@ -225,14 +267,40 @@ def _on_l4_observed(s: Any, payload: dict) -> None:
     project_id = l4_run.project_id or _resolve_project_id(db_url, l4_run.parent_run_id or "")
     plan_id = l4_run.plan_id or ""
 
-    # Emit findings if report parsed (bypass structural/severity gates for e2e testing)
-    if report is not None:
-        try:
-            _emit_l4_findings(s, db_url, l4_run.parent_run_id or "", plan_id, project_id, report)
-            logger.info("L4 findings emitted for run=%s verdict=%s",
-                        l4_run.parent_run_id, report.verdict)
-        except Exception:
-            logger.exception("Failed to emit L4 findings for run=%s", l4_run.parent_run_id)
+    # Emit findings only when all three gates pass (guide 06.4): structure ok,
+    # negative verdict, and at least one finding at/above the severity floor.
+    # A parsed-but-inconsistent report never publishes.  For worksystem runs
+    # (File 10) the adjustment delta is also captured: a recurring adjustment
+    # escalates to a system-generated finding, and findings naming a stale
+    # member are tagged so intake does not re-file an already-merged fix.
+    if report is not None and structural == "ok":
+        extra: list[Finding] = []
+        system_id = _worksystem_system_id(worktree, l4_run)
+        findings: list[Finding] = report.findings
+        if system_id:
+            from backend.worksystem.adjustments import (
+                compute_adjustments,
+                recurrence_finding,
+                same_adjustment_in_last_n_runs,
+                tag_possibly_stale,
+            )
+
+            adjustments = compute_adjustments(Path(worktree))
+            _persist_l4_adjustments(db_url, l4_run.id, adjustments)
+            if same_adjustment_in_last_n_runs(system_id, adjustments):
+                sid = report.scenario_results[0].scenario_id if report.scenario_results else "s1"
+                extra.append(recurrence_finding(system_id, adjustments, sid))
+            findings = tag_possibly_stale(findings + extra, system_id)
+        if _should_publish(report) or extra:
+            try:
+                _emit_l4_findings(
+                    s, db_url, l4_run.parent_run_id or "", plan_id, project_id,
+                    report, findings=findings,
+                )
+                logger.info("L4 findings emitted for run=%s verdict=%s",
+                            l4_run.parent_run_id, report.verdict)
+            except Exception:
+                logger.exception("Failed to emit L4 findings for run=%s", l4_run.parent_run_id)
 
     if structural == "ok" and report is not None:
         _persist_l4_success(db_url, l4_run.id, structural, report)
@@ -241,6 +309,13 @@ def _on_l4_observed(s: Any, payload: dict) -> None:
         logger.info("L4 completed successfully: run=%s verdict=%s",
                     l4_run.parent_run_id, report.verdict)
     else:
+        # One bounded structural retry (guide 06.3): send a preamble naming the
+        # defect and spawn a fresh attempt-2 session.  A second failure records
+        # and continues — a structurally broken L4 never fails the parent run.
+        if getattr(ns, "attempt", 1) < 2 and _retry_l4_session(
+            s, db_url, ns, l4_run.id, worktree, structural
+        ):
+            return
         _persist_l4_failure(db_url, l4_run.id, f"structural:{structural}",
                             f"verdict={verdict} structural={structural}")
         _persist_l4_on_parent(db_url, l4_run.parent_run_id or "", f"structural:{structural}",
@@ -254,6 +329,51 @@ def _on_l4_observed(s: Any, payload: dict) -> None:
 
 
 # ── Report validation ──────────────────────────────────────────────
+
+
+def _retry_l4_session(
+    s: Any,
+    db_url: str,
+    ns: Any,
+    l4_run_id: str,
+    worktree: str,
+    structural: str,
+) -> bool:
+    """Send a preamble naming the structural defect and spawn attempt 2.
+
+    Reuses the existing AionUi conversation and watcher-observed spawn path:
+    a fresh ``node_session`` (attempt=2) is created and ``NodeSpawned`` is
+    emitted so the watcher picks it up.  The workspace is intentionally NOT
+    cleaned up — the retry agent rewrites ``l4_scratch/report.json`` in place.
+    """
+    conv_id = getattr(ns, "aionui_conversation_id", "") or ""
+    if not conv_id:
+        logger.warning("L4 retry skipped for run=%s — no conversation id on ns=%s", l4_run_id, ns.id)
+        return False
+
+    from backend.aionui.client import AionUiClient
+
+    aionui = AionUiClient(os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+    preamble = (
+        "Your previous report failed structural validation "
+        f"(outcome: {structural}).\n"
+        "Do NOT modify the product. Re-run your scenarios if needed and rewrite "
+        "l4_scratch/report.json so it passes the schema, path-resolution, and "
+        "consistency rules from your brief: every seeded scenario has a result, "
+        "every finding references a known scenario_id with resolvable where "
+        "paths, and the verdict matches the findings."
+    )
+    try:
+        aionui.send_message(conv_id, preamble)
+    except Exception:
+        logger.exception("Failed to send L4 retry preamble for ns=%s", ns.id)
+        return False
+
+    ns2 = _create_l4_node_session(db_url, l4_run_id, worktree, attempt=2)
+    _update_l4_node_session_conv(db_url, ns2, conv_id)
+    _emit_l4_spawned(s, ns2, conv_id, worktree)
+    logger.info("L4 retry spawned ns=%s (attempt=2) for run=%s", ns2, l4_run_id)
+    return True
 
 
 def _validate_report(
@@ -311,10 +431,16 @@ def _emit_l4_findings(
     project_id: str,
     report: L4Report,
     labeled_by: str = "harness",
+    findings: list[Finding] | None = None,
 ) -> None:
-    """Emit L4Findings for qualifying findings (at or above the severity floor)."""
+    """Emit L4Findings for qualifying findings (at or above the severity floor).
+
+    ``findings`` overrides the report's own findings — used by the worksystem
+    path to add the recurrence finding and staleness tags (File 10).
+    """
     from contracts.events import L4Findings
 
+    source = findings if findings is not None else report.findings
     above_floor = [
         Finding(
             what=f.what,
@@ -322,8 +448,9 @@ def _emit_l4_findings(
             why=f.why,
             severity=f.severity,
             scenario_id=f.scenario_id,
+            possibly_stale=f.possibly_stale,
         )
-        for f in report.findings
+        for f in source
         if SEVERITY_RANK.get(f.severity, 0) >= MIN_SEVERITY_RANK
     ]
 
@@ -358,10 +485,21 @@ def _chmod_tree(root: Path, add_user_write: bool) -> None:
 
 
 def _cleanup_l4_workspace(dst: Path) -> None:
-    """Remove an L4 isolated workspace, making files writable first."""
-    if dst.exists():
-        _chmod_tree(dst, add_user_write=True)
-        shutil.rmtree(dst, ignore_errors=True)
+    """Remove an L4 isolated workspace.
+
+    Git worktrees (worksystem snapshots) are removed via ``git worktree
+    remove`` so their metadata does not leak into the main repo; a plain
+    copy is rmtree'd after making files writable.
+    """
+    if not dst.exists():
+        return
+    git_file = dst / ".git"
+    if git_file.is_file():
+        from backend.worksystem.repo import remove_worktree
+        remove_worktree(dst)
+        return
+    _chmod_tree(dst, add_user_write=True)
+    shutil.rmtree(dst, ignore_errors=True)
 
 
 # ── DB helpers ─────────────────────────────────────────────────────
@@ -394,8 +532,8 @@ def _create_l4_run(
                 cur.execute(
                     """INSERT INTO runs
                        (id, plan_id, project_id, state, kind, parent_run_id,
-                        l4_scenarios, spec_hash)
-                       VALUES (%s, %s, %s, 'created', 'l4', %s, %s::jsonb, %s)
+                        l4_scenarios, spec_hash, merge_status)
+                       VALUES (%s, %s, %s, 'created', 'l4', %s, %s::jsonb, %s, 'skipped')
                        ON CONFLICT (id) DO NOTHING""",
                     (l4_run_id, plan_id, project_id, parent_run_id,
                      json.dumps([s.model_dump() for s in scenarios]),
@@ -483,3 +621,185 @@ def _persist_l4_on_parent(
             conn.commit()
     except Exception:
         logger.exception("Failed to update parent run L4 status for %s", parent_run_id)
+
+
+def _persist_l4_adjustments(db_url: str, l4_run_id: str, adjustments: dict[str, Any]) -> None:
+    """Store the worksystem adjustment delta on the L4 run (guide 10.6)."""
+    try:
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE runs SET l4_adjustments = %s::jsonb WHERE id = %s",
+                    (json.dumps(adjustments), l4_run_id),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to persist L4 adjustments for %s", l4_run_id)
+
+
+def _set_l4_partial_scope(db_url: str, l4_run_id: str) -> None:
+    """Mark an L4 run as a debug-subset run (guide 10.7)."""
+    try:
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE runs SET partial_scope = TRUE WHERE id = %s",
+                    (l4_run_id,),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to set partial_scope on %s", l4_run_id)
+
+
+def _worksystem_system_id(worktree: str, l4_run: Any) -> str | None:
+    """The system_id when this L4 run worked in a worksystem snapshot worktree.
+
+    Worksystem worktrees live under the worksystem ``worktrees/`` root and the
+    L4 run row carries ``project_id=system_id``.  Any other L4 workspace
+    (isolated source copy) returns ``None`` so the legacy path is untouched.
+    """
+    from backend.worksystem.repo import worktrees_root
+
+    p = Path(worktree).resolve()
+    if not p.is_relative_to(worktrees_root()):
+        return None
+    return l4_run.project_id or ""
+
+
+def _resolve_system_plan_id(db_url: str, system_id: str) -> str | None:
+    """Any plan owned by a project of the system (satisfies the runs.plan_id FK)."""
+    try:
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT p.plan_id FROM plans p
+                       JOIN projects pr ON pr.project_id = p.project_id
+                       WHERE pr.system_id = %s
+                       LIMIT 1""",
+                    (system_id,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _write_worksystem_opencode_json(wt: Path) -> None:
+    """L4 opencode.json for a worksystem worktree.
+
+    Edits are allowed — an edit to ``compose.yml`` is the adjustment signal
+    (guide 10.6) — but git and web are denied so the agent cannot commit or
+    research the components.
+    """
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "edit": {"*": "allow"},
+            "bash": {
+                "*": "allow",
+                "git *": "deny",
+                "sudo *": "deny",
+                "rm -rf *": "deny",
+            },
+            "webfetch": "deny",
+            "websearch": "deny",
+        },
+    }
+    (wt / "opencode.json").write_text(json.dumps(config, indent=2) + "\n")
+
+
+def run_system_worksystem_l4(
+    s: Any,
+    system_id: str,
+    members: list[str] | None = None,
+    aionui_host: str | None = None,
+) -> tuple[str, str]:
+    """Drive an on-demand system L4 from a worksystem snapshot (File 10).
+
+    The caller has already gated: the system exists, no in-flight L4 run,
+    and the worksystem is not missing members (unless ``members`` is an
+    explicit debug subset).  This function:
+    1. Generates cross-component scenarios from the system goal + member specs.
+    2. Creates the L4 run row (``project_id=system_id``, ``kind='l4'``).
+    3. Snapshots the worksystem repo into an isolated git worktree.
+    4. Writes brief/scenarios/compose_urls.json/opencode.json into it.
+    5. Spawns the AionUi session and emits NodeSpawned.
+
+    Returns ``(node_session_id, l4_run_id)``.
+    """
+    db_url = os.environ.get("DATABASE_URL", "")
+    import uuid
+
+    from backend.assembly.system_l4 import (
+        SYSTEM_WORKSYSTEM_BRIEF,
+        generate_system_scenarios,
+        prepare_system_l4_workspace,
+    )
+    from backend.worksystem.repo import ensure_worksystem
+    from backend.worksystem.snapshot import (
+        component_specs,
+        compose_services,
+        snapshot_worktree,
+        staleness_notes,
+        system_goal,
+    )
+
+    # 1. Scenarios from the system goal + member specs (subset-filtered)
+    specs = component_specs(system_id)
+    if members:
+        specs = [c for c in specs if c["name"] in members]
+    goal = system_goal(system_id)
+    scenarios = generate_system_scenarios(goal, specs)
+    spec_hash = make_spec_hash(goal or system_id, None)
+    logger.info("Generated %d worksystem L4 scenarios for system=%s", len(scenarios), system_id)
+
+    # 2. L4 run row — project_id=system_id so active_system_l4() finds it
+    plan_id = _resolve_system_plan_id(db_url, system_id) or ""
+    if not plan_id:
+        raise RuntimeError(f"No plan found for any project of system {system_id}")
+    l4_run_id = f"l4sys_{uuid.uuid4().hex[:10]}"
+    _create_l4_run(db_url, l4_run_id, plan_id, system_id, "", scenarios, spec_hash)
+    if members:
+        _set_l4_partial_scope(db_url, l4_run_id)
+    logger.info("Created worksystem L4 run=%s system=%s", l4_run_id, system_id)
+
+    # 3. Snapshot the worksystem repo into an isolated worktree
+    repo = ensure_worksystem(system_id)
+    wt = snapshot_worktree(repo, l4_run_id)
+    (wt / "l4_scratch").mkdir(parents=True, exist_ok=True)
+    logger.info("Worksystem snapshot worktree=%s for run=%s", wt, l4_run_id)
+
+    # 4. Brief/scenarios/compose_urls.json/opencode.json
+    services = compose_services(repo)
+    if members:
+        services = [svc for svc in services if svc["name"] in members]
+    prepare_system_l4_workspace(str(wt), services, scenarios)
+    _write_worksystem_opencode_json(wt)
+    notes = [n for n in staleness_notes(system_id)
+             if not members or n.split(":", 1)[0].strip() in members]
+    preamble = SYSTEM_WORKSYSTEM_BRIEF
+    if notes:
+        preamble += "\n\nSTALENESS NOTES (published vs master):\n- " + "\n- ".join(notes)
+
+    # 5. Spawn AionUi conversation
+    from backend.aionui.client import AionUiClient
+
+    aionui = AionUiClient(aionui_host or os.environ.get("AIONUI_HOST", "http://127.0.0.1:40937"))
+    l4_model = _resolve_l4_model(db_url)
+    brief = render_l4_brief(l4_run_id, str(wt), scenarios, "", preamble=preamble)
+    conv_id = aionui.create_conversation(
+        preset_agent_type="acp",
+        workspace=str(wt),
+        backend="opencode",
+        model=l4_model,
+    )
+    aionui.send_message(conv_id, brief)
+    logger.info("Worksystem L4 session conv=%s worktree=%s", conv_id, wt)
+
+    # 6. node_session + NodeSpawned
+    ns_id = _create_l4_node_session(db_url, l4_run_id, str(wt))
+    _update_l4_node_session_conv(db_url, ns_id, conv_id)
+    _emit_l4_spawned(s, ns_id, conv_id, str(wt))
+
+    logger.info("Worksystem L4 spawn complete: run=%s ns=%s conv=%s", l4_run_id, ns_id, conv_id)
+    return ns_id, l4_run_id

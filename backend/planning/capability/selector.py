@@ -13,17 +13,15 @@ from backend.planning.meta_planner.llm import call_llm_structured, get_meta_plan
 
 logger = logging.getLogger(__name__)
 
-# Domain string -> capability family mapping (deterministic pre-filter)
-DOMAIN_TO_FAMILY: dict[str, list[str]] = {
-    # Original domain profiles
-    "software_app": ["software", "design"],
-    "fullstack": ["software"],
+# Minimal fallback mapping for _infer_domain() results (old-style domain
+# strings like "frontend", "backend" that are NOT standard slugs).
+# The authoritative source is domain_standards.families — this only fires
+# when the node has no standard_id and the keyword heuristic fires.
+_FAMILY_HINTS: dict[str, list[str]] = {
     "frontend": ["software"],
     "backend": ["software"],
     "api": ["software"],
     "cli": ["software"],
-    "data_pipeline": ["data", "software"],
-    "analytics": ["data"],
     "data": ["data"],
     "design": ["design", "creative"],
     "creative": ["creative"],
@@ -35,14 +33,6 @@ DOMAIN_TO_FAMILY: dict[str, list[str]] = {
     "business": ["business"],
     "finance": ["business"],
     "general": ["research"],
-    # Domains from seed_default_checks.py / seed_domain_profiles.py
-    "gui_app": ["software"],
-    "embedded_firmware": ["software"],
-    "visual_design": ["design", "creative"],
-    "api_service": ["software"],
-    "cli_script": ["software"],
-    "research_report": ["research"],
-    "generic": ["research"],
 }
 
 MAX_GAP_PROPOSALS = 2
@@ -54,13 +44,27 @@ MAX_GAP_PROPOSALS = 2
 def candidate_capabilities(node: dict[str, Any]) -> list[dict[str, Any]]:
     """Determine candidate capability set for a node.
 
-    Bounds the selection context to the node's domain family so the
-    registry size does not blow up the LLM prompt. Always includes
+    Resolves families from the standard slug (via ``domain_standards``)
+    when the node's domain is a known standard.  Falls back to a keyword
+    heuristic + small hint map when no standard is found.  Always includes
     'generic' as a fallback candidate.
     """
-    domain = node.get("domain") or _infer_domain(node)
-    family = DOMAIN_TO_FAMILY.get(domain)
-    cands = caps_in_family(family) if family else all_capabilities()
+    domain = node.get("domain")
+
+    # Try standard lookup first — authoritative source
+    families: list[str] | None = None
+    if domain:
+        from backend.standards.loader import get_standard
+        std = get_standard(domain)
+        if std:
+            families = std.get("families") or None
+
+    # Fall back to keyword heuristic + hint map
+    if not families:
+        domain = domain or _infer_domain(node)
+        families = _FAMILY_HINTS.get(domain)
+
+    cands = caps_in_family(families) if families else all_capabilities()
     generic = get_capability("generic")
     seen_names = {c["name"] for c in cands}
     if generic and generic["name"] not in seen_names:

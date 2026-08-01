@@ -360,18 +360,71 @@ def _finalize_or_advance(run_id: str, payload: dict[str, object]) -> None:
             logger.info("All %d nodes complete for run %s — finalizing success", total, run_id)
             print(f"[PRINT] All {total} nodes complete for run {run_id} — finalizing success", flush=True)
             try:
-                finalize_success(run_id, workspace_root=_WORKSPACE_ROOT)
+                from contracts.events import RunMerged
+                merged_run = finalize_success(run_id, workspace_root=_WORKSPACE_ROOT)
                 _update_run(run_id, state="done")
-                with db_session() as s:
-                    emit(s, RunCompleted(
-                        run_id=run_id,
-                        plan_id=plan_id,
-                        status="done",
-                        worktree_status="merged",
-                        ts=time.time(),
-                    ))
-                    s.commit()
-                print(f"[PRINT] Run {run_id} finalized and marked done", flush=True)
+
+                if (merged_run or {}).get("merge_status") == "blocked":
+                    # Outcome stays success — quality passed, integration failed.
+                    # Emit RunCompleted so the L4 chain still runs (L4 never
+                    # depends on merge succeeding); NO RunMerged — master did
+                    # not advance, so pending goals must not drain.
+                    with db_session() as s:
+                        emit(s, RunCompleted(
+                            run_id=run_id,
+                            plan_id=plan_id,
+                            status="done",
+                            worktree_status="blocked",
+                            ts=time.time(),
+                        ))
+                        s.commit()
+                    print(f"[PRINT] Run {run_id} done but merge blocked — project paused", flush=True)
+                else:
+                    # Record dependency SHAs before emitting RunMerged
+                    try:
+                        from services.planner.system_goal import record_dep_shas
+                        record_dep_shas(run_row.project_id or plan_data.get("project_id", ""), run_id)
+                    except Exception as exc:
+                        logger.warning("Failed to record dep_shas for run %s: %s", run_id, exc)
+
+                    with db_session() as s:
+                        # Re-read run to get updated dep_shas
+                        updated_run = s.query(RunModel).filter(RunModel.id == run_id).first()
+                        dep_shas = updated_run.dep_shas if updated_run else None
+
+                        emit(s, RunCompleted(
+                            run_id=run_id,
+                            plan_id=plan_id,
+                            status="done",
+                            worktree_status="merged",
+                            ts=time.time(),
+                        ))
+                        emit(s, RunMerged(
+                            run_id=run_id,
+                            plan_id=plan_id,
+                            project_id=plan_data.get("project_id", "") or (run_row.project_id if run_row else ""),
+                            merge_commit=merged_run.get("merge_commit") if merged_run else None,
+                            dep_shas=dep_shas,
+                            ts=time.time(),
+                        ))
+                        s.commit()
+
+                    # Post-merge image pipeline (opt-in; never affects outcome)
+                    try:
+                        from backend.worktree.lifecycle import finalize_image
+                        finalize_image(run_id, workspace_root=_WORKSPACE_ROOT)
+                    except Exception as exc:
+                        logger.warning("finalize_image failed for run %s: %s", run_id, exc)
+
+                    # File 10: publish on run.merged — worksystem is derived
+                    # state, so a failed publish never affects the run outcome.
+                    try:
+                        from backend.worksystem.publish import publish_run
+                        publish_run(run_id, workspace_root=_WORKSPACE_ROOT)
+                    except Exception as exc:
+                        logger.warning("publish failed for run %s: %s", run_id, exc)
+
+                    print(f"[PRINT] Run {run_id} finalized and marked done", flush=True)
             except Exception as exc:
                 logger.error("Failed to finalize run %s: %s", run_id, exc)
                 print(f"[PRINT] FAILED to finalize run {run_id}: {exc}", flush=True)

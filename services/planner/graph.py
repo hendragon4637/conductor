@@ -34,13 +34,14 @@ class PlanState(TypedDict):
 
 def _n_formulate(state: PlanState) -> PlanState:
     """Call the LLM formulator, detect clarification needs."""
-    from backend.planning.domain_profile import list_domain_names
     from backend.planning.meta_planner.goal_formulator import formulate
+    from backend.standards.loader import list_standard_menu
 
     mg = formulate(
         raw_input=state["raw_input"],
         origin=state["origin"],
-        valid_domains=list_domain_names(),
+        valid_standards=list_standard_menu(),
+        project_id=state.get("project_id"),
     )
     merged = {**state, "meta_goal": mg.model_dump()}
     if mg.needs_clarification:
@@ -51,14 +52,18 @@ def _n_formulate(state: PlanState) -> PlanState:
 
 
 def _n_inject_conventions(state: PlanState) -> PlanState:
-    """Inject domain conventions into the meta-goal."""
+    """Enrich meta-goal with needs_usage_sim and success_seed from standards."""
     from backend.planning.meta_planner.goal_formulator import (
         MetaGoal,
-        enrich_with_conventions,
+        _enrich_meta_goal,
     )
 
     mg = MetaGoal(**state["meta_goal"]) if isinstance(state["meta_goal"], dict) else state["meta_goal"]
-    enriched = enrich_with_conventions(mg, state["raw_input"])
+    if mg is None:
+        logger = __import__("logging").getLogger(__name__)
+        logger.warning("_n_inject_conventions: meta_goal is None for plan %s", state.get("plan_id", "?"))
+        return PlanState(**{**state})
+    enriched = _enrich_meta_goal(mg)
     return PlanState(**{**state, "meta_goal": enriched.model_dump()})
 
 
@@ -197,11 +202,27 @@ def _n_generate_plan(state: PlanState) -> PlanState:
     run_id = f"plan_{plan_id}"
     ns_id = f"ns_plan_{uuid4().hex[:12]}"
     with db_conn() as conn:
+        # Look up existing project system_id or auto-create system-of-one
+        _row = conn.execute(
+            "SELECT system_id FROM projects WHERE project_id = %s",
+            (project_id,),
+        ).fetchone()
+        if _row:
+            _sys_id = _row["system_id"]
+        else:
+            _sys_id = project_id
+            conn.execute(
+                "INSERT INTO systems (system_id, name, description) "
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (_sys_id, project_id,
+                 f"Auto-created system-of-one for {project_id}"),
+            )
         conn.execute(
-            """INSERT INTO projects (project_id, name, repo_path)
-               VALUES (%s, %s, %s)
+            """INSERT INTO projects (project_id, name, repo_path, system_id)
+               VALUES (%s, %s, %s, %s)
                ON CONFLICT (project_id) DO NOTHING""",
-            (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
+            (project_id, project_id,
+             f"/opt/aipc/conductor/workspace/{project_id}", _sys_id),
         )
         conn.execute(
             """INSERT INTO plans (plan_id, project_id, user_intent, goal)

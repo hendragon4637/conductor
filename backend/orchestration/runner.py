@@ -488,11 +488,20 @@ def _ensure_project_and_session(db_url: str, project_id: str, session_id: str, u
     import psycopg
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
-            cur.execute(
-                "INSERT INTO projects (project_id, name, repo_path) "
-                "VALUES (%s, %s, %s) ON CONFLICT (project_id) DO NOTHING",
-                (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
-            )
+            row = cur.execute(
+                "SELECT system_id FROM projects WHERE project_id = %s", (project_id,)
+            ).fetchone()
+            if not row:
+                cur.execute(
+                    "INSERT INTO systems (system_id, name, description) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (project_id, project_id, f"Auto-created system-of-one for {project_id}"),
+                )
+                cur.execute(
+                    "INSERT INTO projects (project_id, name, repo_path, system_id) "
+                    "VALUES (%s, %s, %s, %s) ON CONFLICT (project_id) DO NOTHING",
+                    (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}", project_id),
+                )
             cur.execute(
                 "INSERT INTO sessions (session_id, project_id, user_intent, base_branch) "
                 "VALUES (%s, %s, %s, %s) ON CONFLICT (project_id, session_id) DO NOTHING",

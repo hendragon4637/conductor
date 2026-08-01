@@ -43,8 +43,8 @@ BINDINGS: dict[str, list[str]] = {
     "executor.q": ["plan.ratified", "node.steer", "node.remediate", "gate.evaluated", "run.stop"],
     "watcher.q": ["node.spawned"],
     "evaluator.q": ["node.observed", "ratchet.trigger", "calibrate.trigger", "run.completed"],
-    "intake.q": ["run.failed", "l4.findings", "plan.awaiting_clarification",
-                 "plan.ratifiable", "plan.failed", "plan.rejected"],
+    "intake.q": ["run.failed", "run.merged", "l4.findings", "plan.awaiting_clarification",
+                 "plan.ratifiable", "plan.failed", "plan.rejected", "sys.goal_queued"],
 }
 
 

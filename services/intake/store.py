@@ -18,14 +18,16 @@ def _db() -> str:
     return os.environ["DATABASE_URL"]
 
 
-def insert_intent(intent: dict, status: str = "proposed",
-                  last_error: str | None = None) -> dict:
+def insert_intent(intent: dict[str, Any], status: str = "proposed",
+                  last_error: str | None = None) -> dict[str, Any]:
     """Insert a new intake_intent row and return it (with generated id)."""
     import psycopg
     from psycopg.rows import dict_row
 
     intent_text = intent.get("intent_text", "")
     evidence = json.dumps(intent.get("evidence", []))
+    proposed_project_raw = intent.get("proposed_project")
+    proposed_project = json.dumps(proposed_project_raw) if isinstance(proposed_project_raw, dict) else proposed_project_raw
     now = datetime.now(timezone.utc)
 
     with psycopg.connect(_db(), row_factory=dict_row) as c:
@@ -33,10 +35,12 @@ def insert_intent(intent: dict, status: str = "proposed",
             cur.execute(
                 """INSERT INTO intake_intents
                    (origin, source_ref, project_id, intent_text, evidence,
+                    proposed_project,
                     status, attempt, last_error, clarify_rounds, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id, origin, source_ref, project_id, intent_text,
-                             evidence, status, attempt, plan_id, last_error,
+                             evidence, proposed_project,
+                             status, attempt, plan_id, last_error,
                              clarify_rounds, created_at, updated_at""",
                 (
                     intent.get("origin", ""),
@@ -44,6 +48,7 @@ def insert_intent(intent: dict, status: str = "proposed",
                     intent.get("project_id", "default"),
                     intent_text,
                     evidence,
+                    proposed_project,
                     status,
                     intent.get("attempt", 1),
                     last_error,
@@ -57,7 +62,7 @@ def insert_intent(intent: dict, status: str = "proposed",
     if row is None:
         raise RuntimeError("insert_intent returned no row")
 
-    return _row_to_dict(row)
+    return _row_to_dict(row)  # type: ignore[reportArgumentType]
 
 
 def update_intent(intent_id: int, **kwargs) -> None:
@@ -73,13 +78,13 @@ def update_intent(intent_id: int, **kwargs) -> None:
     with psycopg.connect(_db()) as c:
         with c.cursor() as cur:
             cur.execute(
-                f"UPDATE intake_intents SET {sets}, updated_at = now() WHERE id = %s",
+                f"UPDATE intake_intents SET {sets}, updated_at = now() WHERE id = %s",  # type: ignore[reportArgumentType]
                 vals,
             )
         c.commit()
 
 
-def load_intent_by_plan(plan_id: str) -> dict | None:
+def load_intent_by_plan(plan_id: str) -> dict[str, Any] | None:
     """Load the most recent intent correlated to a plan_id."""
     import psycopg
     from psycopg.rows import dict_row
@@ -92,10 +97,10 @@ def load_intent_by_plan(plan_id: str) -> dict | None:
                    ORDER BY updated_at DESC LIMIT 1""",
                 (plan_id,),
             )
-            return cur.fetchone()
+            return cur.fetchone()  # type: ignore[reportReturnType]
 
 
-def load_intent_by_source_ref(source_ref: str) -> dict | None:
+def load_intent_by_source_ref(source_ref: str) -> dict[str, Any] | None:
     """Load the most recent intent matching a source_ref."""
     import psycopg
     from psycopg.rows import dict_row
@@ -108,10 +113,27 @@ def load_intent_by_source_ref(source_ref: str) -> dict | None:
                    ORDER BY updated_at DESC LIMIT 1""",
                 (source_ref,),
             )
-            return cur.fetchone()
+            return cur.fetchone()  # type: ignore[reportReturnType]
 
 
-def oldest_proposed(project_id: str) -> dict | None:
+def load_intent_by_id(intent_id: int) -> dict[str, Any] | None:
+    """Load an intent by its primary key."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    with psycopg.connect(_db(), row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT * FROM intake_intents WHERE id = %s""",
+                (intent_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return _row_to_dict(row)  # type: ignore[reportArgumentType]
+
+
+def oldest_proposed(project_id: str) -> dict[str, Any] | None:
     """Return the oldest 'proposed' intent for a project."""
     import psycopg
     from psycopg.rows import dict_row
@@ -128,7 +150,7 @@ def oldest_proposed(project_id: str) -> dict | None:
 
 
 def query_intents(project_id: str | None = None,
-                  status: str | None = None) -> list[dict]:
+                   status: str | None = None) -> list[dict[str, Any]]:
     """List intake_intents with optional filters."""
     import psycopg
     from psycopg.rows import dict_row
@@ -151,10 +173,10 @@ def query_intents(project_id: str | None = None,
                 f"SELECT * FROM intake_intents {where} ORDER BY created_at DESC LIMIT 100",
                 params,
             )
-            return cur.fetchall()
+            return cur.fetchall()  # type: ignore[reportReturnType]
 
 
-def is_duplicate(intent: dict, window_days: int = 7) -> bool:
+def is_duplicate(intent: dict[str, Any], window_days: int = 7) -> bool:
     """Check if intent duplicates a recent open intent.
 
     Reformulations (attempt > 1) are always allowed.
@@ -180,10 +202,46 @@ def is_duplicate(intent: dict, window_days: int = 7) -> bool:
                 (intent.get("project_id", "default"), source_ref, window_days),
             )
             row = cur.fetchone()
-            return (row[0] or 0) > 0
+            return (row[0] if row else 0) > 0
 
 
-def _row_to_dict(row: dict) -> dict[str, Any]:
+def sweep_stale_intents(max_age_hours: int = 24) -> list[dict[str, Any]]:
+    """Escalate ``submitted``/``clarifying`` intents idle past the age cap.
+
+    Cheap insurance (guide 08.6): if the planner always emits a terminal
+    event, this sweep should never fire — so any row it catches is a bug
+    signal worth alerting on.  The caller logs every returned row.
+
+    Args:
+        max_age_hours: Idle threshold on ``updated_at`` (default 24).
+
+    Returns:
+        List of escalated ``{id, project_id, origin, updated_at}`` rows.
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    with psycopg.connect(_db(), row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """UPDATE intake_intents
+                   SET status = 'escalated',
+                       last_error = %s,
+                       updated_at = now()
+                   WHERE status IN ('submitted', 'clarifying')
+                     AND updated_at < now() - make_interval(hours => %s)
+                   RETURNING id, project_id, origin, status, updated_at""",
+                (
+                    f"stale sweep: no terminal event within {max_age_hours}h",
+                    max_age_hours,
+                ),
+            )
+            rows = cur.fetchall()
+        c.commit()
+    return [dict(r) for r in rows]
+
+
+def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     """Post-process a dict_row: deserialize JSONB and convert datetimes."""
     d = dict(row)
     for field in ("evidence",):

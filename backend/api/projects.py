@@ -29,9 +29,14 @@ async def create_project(req: ProjectCreate):
     with queries.conn() as c, c.cursor() as cur:
         try:
             cur.execute(
-                "INSERT INTO projects (project_id, name, description, system_prompt, repo_path) "
-                "VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                (req.project_id, req.name, req.description, req.system_prompt, repo_path),
+                "INSERT INTO systems (system_id, name, description) "
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (req.project_id, req.name, f"Auto-created system-of-one for {req.project_id}"),
+            )
+            cur.execute(
+                "INSERT INTO projects (project_id, name, description, system_prompt, repo_path, system_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                (req.project_id, req.name, req.description, req.system_prompt, repo_path, req.project_id),
             )
             row = cur.fetchone()
             c.commit()

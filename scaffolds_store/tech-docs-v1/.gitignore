@@ -1,0 +1,6 @@
+.opencode/
+.conductor/
+.plan/
+node_modules/
+site/
+l4_scratch/

@@ -12,6 +12,7 @@ build/
 .vscode/
 uv.lock.bak
 workspace/
+worksystem/
 imports/
 LITELLM_BUILD_LOG.md
 skills_store/

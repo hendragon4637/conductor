@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from services.intake.adapters.base import Answer, GoalIntent, SourceAdapter
 from services.intake.adapters.render import render_feedback
@@ -19,7 +20,7 @@ class HumanFeedbackAdapter(SourceAdapter):
     origin = "human_feedback"
     max_attempts = 3
 
-    def normalize(self, payload: dict) -> list[GoalIntent]:
+    def normalize(self, payload: dict[str, Any]) -> list[GoalIntent]:
         project_id = payload.get("project_id", "default")
         findings = payload.get("findings", [])
 

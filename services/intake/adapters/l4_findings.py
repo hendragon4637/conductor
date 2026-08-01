@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from services.intake.adapters.base import Answer, GoalIntent, SourceAdapter
 from services.intake.adapters.render import render_l4
 
@@ -21,13 +23,16 @@ class L4FindingsAdapter(SourceAdapter):
     origin = "l4_findings"
     max_attempts = 3
 
-    def normalize(self, payload: dict) -> list[GoalIntent]:
+    def normalize(self, payload: dict[str, Any]) -> list[GoalIntent]:
         findings = payload.get("findings", [])
         project_id = payload.get("project_id", "default")
         run_id = payload.get("run_id", "")
 
-        keep = [f for f in findings
-                if _severity_rank(f.get("severity", "")) >= _MIN_SEVERITY]
+        keep = [
+            f for f in findings
+            if not f.get("possibly_stale")
+            and _severity_rank(f.get("severity", "")) >= _MIN_SEVERITY
+        ]
         if not keep:
             return []
 

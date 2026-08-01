@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 def render_run_failed(project_id: str, run_id: str, plan_id: str,
-                      failed_nodes: list[dict]) -> str:
+                      failed_nodes: list[dict[str, Any]]) -> str:
     """Render intent text from a run.failed event.
 
     Each failed node carries 'node_id', 'what', 'where', 'why' keys from
@@ -28,7 +30,7 @@ def render_run_failed(project_id: str, run_id: str, plan_id: str,
     return "\n".join(parts)
 
 
-def render_l4(project_id: str, run_id: str, findings: list[dict]) -> str:
+def render_l4(project_id: str, run_id: str, findings: list[dict[str, Any]]) -> str:
     """Render intent text from an l4.findings event."""
     parts = [f"Improve {project_id} based on usage findings."]
     for i, f in enumerate(findings, 1):
@@ -65,7 +67,7 @@ def render_reformulation(prev_text: str, note: str, attempt: int,
     return f"{prev_text}\n\n{guidance}"
 
 
-def render_feedback(project_id: str, findings: list[dict]) -> str:
+def render_feedback(project_id: str, findings: list[dict[str, Any]]) -> str:
     """Render intent text from human feedback."""
     parts = [f"Human feedback improvement for {project_id}:"]
     for i, f in enumerate(findings, 1):

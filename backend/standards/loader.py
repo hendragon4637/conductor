@@ -19,7 +19,7 @@ def get_standard(slug: str) -> dict[str, Any] | None:
     """Load a domain standard by slug."""
     with psycopg.connect(get_db_url()) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT slug, name, kind, conventions_md, tool_manifest, artifact_spec, scaffold_tree, source_repo, version"
+            "SELECT slug, name, kind, conventions_md, tool_manifest, artifact_spec, scaffold_tree, source_repo, version, families"
             " FROM domain_standards WHERE slug = %s",
             (slug,),
         )
@@ -36,6 +36,7 @@ def get_standard(slug: str) -> dict[str, Any] | None:
         "scaffold_tree": row[6] if isinstance(row[6], list) else [],
         "source_repo": row[7],
         "version": row[8],
+        "families": row[9] if isinstance(row[9], list) else [],
     }
 
 
@@ -84,3 +85,45 @@ def get_run_standards(run_id: str) -> list[str]:
             (run_id,),
         )
         return [row[0] for row in cur.fetchall()]
+
+
+def list_standard_menu(exclude_planning: bool = True) -> list[dict[str, Any]]:
+    """Return menu data from domain_standards for the formulation prompt.
+
+    Returns slug, name, selector_blurb, families, default_subdir and
+    delivery_form (from ``artifact_spec->'delivery_spec'->>'form'``) for
+    every active domain standard. Excludes 'planning' kind by default. The
+    menu drives the LLM's choice of standard_ids in the multi-component flow.
+
+    Returns:
+        List of dicts with keys: slug, name, blurb, families, default_subdir,
+        delivery_form
+    """
+    results = []
+    with psycopg.connect(get_db_url()) as conn, conn.cursor() as cur:
+        if exclude_planning:
+            cur.execute(
+                """SELECT slug, name, selector_blurb, families, default_subdir,
+                          artifact_spec->'delivery_spec'->>'form' AS delivery_form
+                     FROM domain_standards
+                    WHERE kind = 'domain' AND active
+                    ORDER BY name"""
+            )
+        else:
+            cur.execute(
+                """SELECT slug, name, selector_blurb, families, default_subdir,
+                          artifact_spec->'delivery_spec'->>'form' AS delivery_form
+                     FROM domain_standards
+                    WHERE active
+                    ORDER BY name"""
+            )
+        for row in cur.fetchall():
+            results.append({
+                "slug": row[0],
+                "name": row[1],
+                "blurb": row[2] or "",
+                "families": row[3] if isinstance(row[3], list) else [],
+                "default_subdir": row[4] or "",
+                "delivery_form": row[5] or "",
+            })
+    return results

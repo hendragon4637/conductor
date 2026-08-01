@@ -284,11 +284,20 @@ def _ensure_plan_in_db(db_url: str, plan: dict[str, Any], project_id: str, sessi
     """
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
-            cur.execute(
-                "INSERT INTO projects (project_id, name, repo_path) VALUES (%s, %s, %s) "
-                "ON CONFLICT (project_id) DO NOTHING",
-                (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
-            )
+            row = cur.execute(
+                "SELECT system_id FROM projects WHERE project_id = %s", (project_id,)
+            ).fetchone()
+            if not row:
+                cur.execute(
+                    "INSERT INTO systems (system_id, name, description) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (project_id, project_id, f"Auto-created system-of-one for {project_id}"),
+                )
+                cur.execute(
+                    "INSERT INTO projects (project_id, name, repo_path, system_id) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (project_id) DO NOTHING",
+                    (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}", project_id),
+                )
             nodes = plan.get("dag", plan.get("nodes", []))
             user_intent = plan.get("user_intent", "")
             goal = plan.get("goal", user_intent)
@@ -462,6 +471,7 @@ def spawn_node_team(
     wsr = workspace_root or os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace")
 
     project_id = plan.get("project_id", "default")
+    _proj_dir = Path(wsr) / project_id
     raw_members = members or [node.get("agent_config", "opencode:backend-executor")]
     node_members = [
         m.get("agent_config", "opencode:backend-executor") if isinstance(m, dict) else (str(m) if not isinstance(m, str) else m)
@@ -496,26 +506,62 @@ def spawn_node_team(
         except Exception:
             pass
 
+    # Materialize dependencies (deps/ directory)
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        _db = os.environ.get("DATABASE_URL", "")
+        if _db:
+            with psycopg.connect(_db, row_factory=dict_row) as _conn:
+                with _conn.cursor() as _cur:
+                    _cur.execute(
+                        "SELECT system_id, kind FROM projects WHERE project_id = %s",
+                        (project_id,),
+                    )
+                    _sys_row = _cur.fetchone()
+                    if _sys_row and _sys_row["system_id"]:
+                        _dep_mode = "artifacts" if _sys_row["kind"] == "assembly" else "source"
+                        wm.materialize_deps(project_id, _sys_row["system_id"], mode=_dep_mode, worktree_path=str(wt))
+        from services.planner.system_goal import record_dep_shas
+        record_dep_shas(project_id, session_id)
+    except Exception as exc:
+        logger.warning("Failed to materialize deps for %s: %s", project_id, exc)
+
     # Inject domain standard scaffolding into worktree (pre-spawn)
     try:
         from backend.standards.loader import get_standard
-        from backend.planning.capability.selector import DOMAIN_TO_FAMILY
+        from backend.planning.harness_worktree import read_project_manifest
 
-        # Derive standard slug from node capabilities or plan domain
-        _cap_families: set[str] = set()
-        for cap in (node.get("capabilities") or []):
-            if isinstance(cap, dict):
-                for fam in (cap.get("family") or []):
-                    _cap_families.add(str(fam))
-            elif isinstance(cap, str):
-                _cap_families.add(cap)
-
-        _domain = plan.get("domain", "")
+        # Resolve standard slug by subdir FIRST (from project manifest),
+        # then fall back to capability-based heuristic for legacy plans.
+        _node_subdir = node.get("subdir", "")
+        _manifest = read_project_manifest(_proj_dir)
         _slug_candidates: list[str] = []
-        if "backend" in _cap_families or "backend" in _domain.lower():
-            _slug_candidates.append("python-backend")
-        if "frontend" in _cap_families or "frontend" in _domain.lower():
-            _slug_candidates.append("react-frontend")
+
+        if _manifest and _node_subdir:
+            # Subdir-first: find component in manifest
+            for _mc in _manifest.get("components", []):
+                if _mc.get("subdir") == _node_subdir:
+                    _slug = _mc.get("standard_slug", "")
+                    if _slug:
+                        _slug_candidates.append(_slug)
+                    break
+
+        if not _slug_candidates:
+            # Fallback: derive from capability families or plan domain
+            _cap_families: set[str] = set()
+            for cap in (node.get("capabilities") or []):
+                if isinstance(cap, dict):
+                    for fam in (cap.get("family") or []):
+                        _cap_families.add(str(fam))
+                elif isinstance(cap, str):
+                    _cap_families.add(cap)
+
+            _domain = plan.get("domain", "")
+            if "backend" in _cap_families or "backend" in _domain.lower():
+                _slug_candidates.append("python-backend")
+            if "frontend" in _cap_families or "frontend" in _domain.lower():
+                _slug_candidates.append("react-frontend")
 
         for slug in _slug_candidates:
             std = get_standard(slug)
@@ -546,6 +592,45 @@ def spawn_node_team(
             logger.info("Injected %s scaffolding into worktree %s", slug, wt)
     except Exception as exc:
         logger.debug("Standard scaffolding injection skipped: %s", exc)
+
+    # ── Assembly service descriptor: emit workspace.json for assembly projects ──
+    try:
+        import psycopg
+        _db_url_a = os.environ.get("DATABASE_URL", "")
+        if _db_url_a:
+            with psycopg.connect(_db_url_a) as _ca:
+                with _ca.cursor() as _cu:
+                    _cu.execute(
+                        "SELECT kind, system_id FROM projects WHERE project_id = %s",
+                        (project_id,),
+                    )
+                    _prow = _cu.fetchone()
+                    if _prow and _prow[0] == "assembly" and _prow[1]:
+                        from backend.assembly.generator import generate_assembly
+                        _assy_result = generate_assembly(_prow[1])
+                        if not _assy_result.get("errors"):
+                            _svc_desc = {
+                                "system_id": _prow[1],
+                                "services": [
+                                    {
+                                        "name": s["name"],
+                                        "slug": s["slug"],
+                                        "port": s.get("assigned_host_port", 8000),
+                                        "dep_shas": s.get("dep_shas", {}),
+                                        "depends_on": s.get("depends_on", []),
+                                    }
+                                    for s in _assy_result.get("services", [])
+                                ],
+                            }
+                            (wt / "workspace.json").write_text(
+                                json.dumps(_svc_desc, indent=2) + "\n"
+                            )
+                            logger.info(
+                                "Emitted workspace.json for assembly %s (%d services)",
+                                project_id, len(_svc_desc["services"]),
+                            )
+    except Exception as exc:
+        logger.debug("Assembly service descriptor skipped: %s", exc)
 
     # Install capability-scoped skills into worktree (pre-spawn)
     try:

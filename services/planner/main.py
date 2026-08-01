@@ -532,6 +532,36 @@ def submit_goal(body: GoalRequest):
             },
         )
 
+    # ── Auto-create system-of-one for orphan projects ──
+    try:
+        import psycopg
+        _db = os.environ.get("DATABASE_URL", "")
+        if _db:
+            with psycopg.connect(_db) as _c:
+                with _c.cursor() as _cur:
+                    _cur.execute(
+                        "SELECT system_id FROM projects WHERE project_id = %s",
+                        (body.project_id,),
+                    )
+                    _row = _cur.fetchone()
+                    if _row and not _row[0]:
+                        _sys_id = f"sys_{body.project_id}"
+                        _cur.execute(
+                            "INSERT INTO systems (system_id, name, description) "
+                            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                            (_sys_id, body.project_id,
+                             f"Auto-created system-of-one for {body.project_id}"),
+                        )
+                        _cur.execute(
+                            "UPDATE projects SET system_id = %s WHERE project_id = %s",
+                            (_sys_id, body.project_id),
+                        )
+                        _c.commit()
+                        logger.info("Auto-created system-of-one %s for orphan project %s",
+                                    _sys_id, body.project_id)
+    except Exception:
+        logger.exception("Failed to auto-create system-of-one for %s", body.project_id)
+
     from backend.planning.schema import (
         Plan, PlanNode, TaskSpec, NodeSuccess, SuccessCriterion, NodeMember,
     )
@@ -897,6 +927,229 @@ def ratify_plan(plan_id: str):
     )
 
 
+# ── System goal endpoint ────────────────────────────────────────────────────
+
+
+class SystemGoalRequest(BaseModel):
+    raw_input: str
+    system_id: str | None = None        # re-decompose an existing system
+    families: list[str] | None = None
+    persona_id: str = "default"
+
+
+@app.post("/system/goal")
+def system_goal(body: SystemGoalRequest):
+    """Decompose a system-level goal into a SystemPlan proposal.
+
+    Returns a proposal id for human review.  Caller must ratify via
+    ``POST /system/ratify/{proposal_id}`` to materialise projects.
+    """
+    from services.planner.system_goal import extract_system_plan, save_proposal
+
+    try:
+        plan = extract_system_plan(body.raw_input, families=body.families)
+    except Exception as exc:
+        logger.exception("System decompose failed")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"System decompose failed: {exc}"},
+        )
+
+    proposal_id = save_proposal(body.raw_input, plan.model_dump())
+    return {
+        "status": "proposed",
+        "proposal_id": proposal_id,
+        "proposal": plan.model_dump(),
+    }
+
+
+class SystemRatifyRequest(BaseModel):
+    edited: dict | None = None
+    persona_id: str = "default"
+
+
+@app.post("/system/ratify/{proposal_id}")
+def ratify_system_goal(proposal_id: int, body: SystemRatifyRequest):
+    """Ratify a system proposal — create system + projects + queue first goals."""
+    from services.planner.system_goal import ratify_system
+
+    try:
+        system_id = ratify_system(
+            proposal_id,
+            edited=body.edited,
+            persona_id=body.persona_id,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        logger.exception("Ratify system failed")
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    return {"status": "ratified", "system_id": system_id}
+
+
+@app.post("/system/proposals/{proposal_id}/reject")
+def reject_system_proposal(proposal_id: int):
+    """Reject a system proposal."""
+    from services.planner.system_goal import update_proposal_status
+    try:
+        update_proposal_status(proposal_id, "rejected")
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    return {"status": "rejected", "proposal_id": proposal_id}
+
+
+@app.get("/system/proposals")
+def list_system_proposals(status: str | None = None):
+    """List system proposals."""
+    from services.planner.system_goal import list_proposals
+    return {"proposals": list_proposals(status=status)}
+
+
+@app.get("/system/{system_id}/queue")
+def system_queue(system_id: str, status: str | None = None):
+    """List pending goals for all projects in a system."""
+    from services.planner.system_goal import get_system_queue
+    return {"queue": get_system_queue(system_id, status=status)}
+
+
+@app.get("/system/{system_id}")
+def get_system(system_id: str):
+    """Return system info with project list, edges, per-project run/goal status."""
+    import psycopg
+    from psycopg.rows import dict_row
+    db_url = os.environ["DATABASE_URL"]
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            # 1. System row
+            cur.execute("SELECT * FROM systems WHERE system_id = %s", (system_id,))
+            sys_row = cur.fetchone()
+            if not sys_row:
+                return JSONResponse(status_code=404, content={"error": "System not found"})
+
+            # 2. Projects with last run + next queued goal per project
+            cur.execute(
+                "SELECT project_id, name, kind, status, description FROM projects WHERE system_id = %s ORDER BY name",
+                (system_id,),
+            )
+            projects_raw = cur.fetchall()
+
+            projects = []
+            for p in projects_raw:
+                proj = dict(p)
+                # Last run for this project (exclude L4 runs — they are
+                # critiques of a run, not runs of the project)
+                cur.execute(
+                    """SELECT id, state, worktree_status, l4_standalone, created_at
+                       FROM runs WHERE project_id = %s
+                         AND (kind IS NULL OR kind != 'l4')
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (p["project_id"],),
+                )
+                last_run = cur.fetchone()
+                proj["last_run"] = dict(last_run) if last_run else None
+
+                # Next queued goal (oldest pending or submitted)
+                cur.execute(
+                    """SELECT id, raw_input, origin, status, plan_id, created_at
+                       FROM pending_goals
+                       WHERE project_id = %s AND status IN ('pending', 'submitted')
+                       ORDER BY id ASC LIMIT 1""",
+                    (p["project_id"],),
+                )
+                next_goal = cur.fetchone()
+                proj["next_queued_goal"] = dict(next_goal) if next_goal else None
+
+                projects.append(proj)
+
+            # 3. Edges (project_dependencies)
+            cur.execute(
+                """SELECT pd.project_id, pd.depends_on_project_id, pd.dep_name,
+                          p_from.name AS from_name, p_to.name AS to_name
+                   FROM project_dependencies pd
+                   JOIN projects p_from ON pd.project_id = p_from.project_id
+                   JOIN projects p_to ON pd.depends_on_project_id = p_to.project_id
+                   WHERE p_from.system_id = %s OR p_to.system_id = %s
+                   ORDER BY p_from.name, p_to.name""",
+                (system_id, system_id),
+            )
+            edges = [dict(r) for r in cur.fetchall()]
+
+            # 4. Assembly status — the assembly project's latest compose run
+            cur.execute(
+                """SELECT project_id, name FROM projects
+                   WHERE system_id = %s AND kind = 'assembly'
+                   LIMIT 1""",
+                (system_id,),
+            )
+            assembly_row = cur.fetchone()
+            assembly_status = None
+            if assembly_row:
+                cur.execute(
+                    """SELECT id, state, worktree_status, created_at
+                       FROM runs WHERE project_id = %s
+                         AND (kind IS NULL OR kind != 'l4')
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (assembly_row["project_id"],),
+                )
+                last_assembly_run = cur.fetchone()
+                assembly_status = {
+                    "project_id": assembly_row["project_id"],
+                    "project_name": assembly_row["name"],
+                    "last_run": dict(last_assembly_run) if last_assembly_run else None,
+                }
+
+    return {
+        "system": sys_row,
+        "projects": projects,
+        "edges": edges,
+        "assembly_status": assembly_status,
+    }
+
+
+class AssembleRequest(BaseModel):
+    workspace_root: str | None = None
+
+
+@app.post("/system/{system_id}/assemble")
+def assemble_system(system_id: str, body: AssembleRequest = AssembleRequest()):
+    """Generate docker-compose assembly for a system."""
+    try:
+        from backend.assembly.generator import (
+            generate_assembly, is_assembly_eligible,
+            check_compose_valid,
+        )
+
+        eligible, reason = is_assembly_eligible(system_id)
+        if not eligible:
+            return JSONResponse(status_code=429, content={"error": reason})
+
+        result = generate_assembly(
+            system_id,
+            workspace_root=body.workspace_root or os.environ.get("WORKSPACE_ROOT", ""),
+        )
+
+        if result["errors"]:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "; ".join(result["errors"])},
+            )
+
+        compose_valid = check_compose_valid(result["compose_yaml"])
+        return {
+            "status": "assembled" if compose_valid else "generated_with_warnings",
+            "compose_yaml": result["compose_yaml"],
+            "service_count": len(result["services"]),
+            "dockerfile_count": len(result["dockerfiles"]),
+            "compose_valid": compose_valid,
+            "env_required": result.get("env_required", []),
+            "env_example": result.get("env_example", ""),
+        }
+    except Exception as exc:
+        logger.exception("Assembly failed for system %s", system_id)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
 # ── Intake MVP lifecycle endpoints ──────────────────────────────────────────
 
 
@@ -980,6 +1233,73 @@ def resume_project(body: ResumeRequest):
 
     logger.info("Project %s resumed", body.project_id)
     return {"status": "resumed", "project_id": body.project_id}
+
+
+# ── Blocked-merge recovery (guide 06.5) ─────────────────────────────
+
+class MergeRetryRequest(BaseModel):
+    run_id: str
+
+
+class MergeSkipRequest(BaseModel):
+    run_id: str
+    reason: str = ""
+
+
+@app.get("/merge/blocked")
+def merge_blocked_queue():
+    """The blocked-merge queue — runs whose merge failed and need a human."""
+    from backend.worktree.lifecycle import blocked_merge_queue
+    return {"runs": blocked_merge_queue()}
+
+
+@app.get("/merge/stats")
+def merge_stats():
+    """Weekly blocked-merge counter — should stay near zero."""
+    from backend.worktree.lifecycle import weekly_blocked_merge_count
+    return {"blocked_last_7_days": weekly_blocked_merge_count()}
+
+
+@app.post("/merge/retry")
+def merge_retry(body: MergeRetryRequest):
+    """Re-attempt a blocked merge; unpauses the project only on success.
+
+    ``RunMerged`` is emitted AFTER the merge commits so a dependent project
+    can never materialize pre-merge deps.
+    """
+    from backend.worktree.lifecycle import retry_merge
+
+    run = retry_merge(body.run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": f"Run {body.run_id} not found"})
+    if run.get("merge_status") == "merged":
+        from contracts.events import RunMerged
+        from shared.db import session as db_session
+        from shared.outbox import emit
+        with db_session() as s:
+            emit(s, RunMerged(
+                run_id=run["id"],
+                plan_id=run.get("plan_id") or "",
+                project_id=run.get("project_id") or "",
+                merge_commit=run.get("merge_commit"),
+                ts=time.time(),
+            ))
+            s.commit()
+        return {"status": "merged", "run_id": body.run_id,
+                "merge_commit": run.get("merge_commit")}
+    return {"status": run.get("merge_status", "unknown"), "run_id": body.run_id,
+            "merge_error": run.get("merge_error")}
+
+
+@app.post("/merge/skip")
+def merge_skip(body: MergeSkipRequest):
+    """Record an abandoned merge and unpause the project."""
+    from backend.worktree.lifecycle import skip_merge
+
+    run = skip_merge(body.run_id, body.reason)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": f"Run {body.run_id} not found"})
+    return {"status": "skipped", "run_id": body.run_id}
 
 
 # ── Main ─────────────────────────────────────────────────────────────────

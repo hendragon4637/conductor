@@ -341,6 +341,7 @@ def run_plan_l1(dag: list[dict]) -> PlanL1Result:
     4. DAG is acyclic.
     5. Every node has at least one check.
     6. No hallucinated L1 checks (every L1 check id is in the known preset pool).
+    7. No node references deps/ paths (read-only dependency references).
 
     Args:
         dag: List of node dicts from the plan.
@@ -436,6 +437,26 @@ def run_plan_l1(dag: list[dict]) -> PlanL1Result:
             "passed": True,
             "detail": "All L1 checks reference known presets",
         })
+
+    # Check 7: no node should modify deps/ paths
+    for i, n in enumerate(dag):
+        nid = n.get("id", f"node-{i}")
+        task_text = (n.get("task") or {}).get("text", "")
+        success_text = (n.get("success") or {}).get("text", "")
+        deliverables = (n.get("task") or {}).get("deliverables", [])
+        combined = task_text + " " + success_text + " " + " ".join(deliverables)
+        if _re.search(r"(?:^|/)deps/", combined):
+            all_ok = False
+            checks.append({
+                "check": f"node_{nid}_no_deps",
+                "passed": False,
+                "detail": (
+                    f"Node '{nid}' references deps/ paths which are read-only dependency "
+                    f"references. Nodes must NOT modify, create files in, or depend on deps/. "
+                    f"The deps/ directory is materialized from declared project dependencies "
+                    f"and is read-only."
+                ),
+            })
 
     note = ""
     if not all_ok:

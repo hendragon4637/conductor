@@ -7,8 +7,10 @@ Cleanup removes expired worktrees but preserves git tags for audit.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -157,6 +159,267 @@ def _sched_cleanup(run_id: str, ttl_days: int) -> None:
     _update_run(run_id, worktree_expires_at=expires)
 
 
+def _git_merge_abort(project_dir: str) -> None:
+    """Always abort a conflicted merge — a half-merged master is worse."""
+    try:
+        subprocess.run(
+            ["git", "-C", project_dir, "merge", "--abort"],
+            capture_output=True, timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("git merge --abort failed in %s: %s", project_dir, exc)
+
+
+def _summarize_conflict(err: Exception) -> str:
+    text = str(err)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return (lines[0] if lines else "merge conflict")[:500]
+
+
+# ── Merge-blocked escalation (guide 06.5) ───────────────────────────
+
+
+def pause_project(project_id: str, reason: str) -> None:
+    """Pause intake for a project — master didn't advance, so the next goal
+    would branch from stale state and re-conflict."""
+    import psycopg
+    db_url = _get_db()
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO project_flags (project_id, intake_paused, paused_reason, updated_at)
+                   VALUES (%s, true, %s, now())
+                   ON CONFLICT (project_id) DO UPDATE SET
+                     intake_paused = true, paused_reason = %s, updated_at = now()""",
+                (project_id, reason, reason),
+            )
+        c.commit()
+
+
+def resume_project(project_id: str) -> None:
+    """Clear the intake pause flag for a project."""
+    import psycopg
+    db_url = _get_db()
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO project_flags (project_id, intake_paused, updated_at)
+                   VALUES (%s, false, now())
+                   ON CONFLICT (project_id) DO UPDATE SET
+                     intake_paused = false, paused_reason = NULL, updated_at = now()""",
+                (project_id,),
+            )
+        c.commit()
+
+
+def block_merge(run_id: str, project_id: str, branch: str, error: str) -> dict[str, Any]:
+    """Record a blocked merge and pause the project.
+
+    ``outcome`` stays success — quality passed, only integration failed.
+    No intake event is emitted on this path (master did not advance).
+    """
+    _update_run(
+        run_id,
+        worktree_status="active",
+        merge_status="blocked",
+        merge_ref=branch,
+        merge_error=error,
+    )
+    pause_project(project_id, reason=f"merge blocked on run {run_id}")
+    logger.warning("Run %s merge blocked — project %s paused", run_id, project_id)
+    return _get_run(run_id) or {}
+
+
+def blocked_merge_queue() -> list[dict[str, Any]]:
+    """The blocked-merge queue — the partial index IS the queue."""
+    import psycopg
+    from psycopg.rows import dict_row
+    db_url = _get_db()
+    with psycopg.connect(db_url, row_factory=dict_row) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT id, plan_id, project_id, merge_status, merge_ref, merge_error,
+                          worktree_status, created_at
+                   FROM runs WHERE merge_status = 'blocked'
+                   ORDER BY created_at DESC"""
+            )
+            return cur.fetchall()
+
+
+def weekly_blocked_merge_count() -> int:
+    """Blocked merges in the last 7 days — should stay near zero; a rising
+    count means concurrent goals touch the same paths (a scheduling problem)."""
+    import psycopg
+    db_url = _get_db()
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT COUNT(*) FROM runs
+                   WHERE merge_status = 'blocked'
+                     AND created_at >= NOW() - INTERVAL '7 days'"""
+            )
+            return cur.fetchone()[0]
+
+
+def retry_merge(run_id: str, workspace_root: str | None = None) -> dict[str, Any]:
+    """Re-attempt a blocked merge; unpauses the project only on success."""
+    run = finalize_success(run_id, workspace_root=workspace_root)
+    if run.get("merge_status") == "merged":
+        resume_project(run.get("project_id") or "")
+        logger.info("Retry: run %s merged to main — project resumed", run_id)
+    return run
+
+
+def skip_merge(run_id: str, reason: str) -> dict[str, Any]:
+    """Record an abandoned merge and unpause the project."""
+    run = _get_run(run_id)
+    if not run:
+        return {}
+    _update_run(run_id, merge_status="skipped", merge_error=(reason or "abandoned")[:500])
+    resume_project(run.get("project_id") or "")
+    logger.info("Run %s merge skipped: %s", run_id, reason)
+    return _get_run(run_id) or {}
+
+
+# ── Image pipeline (guide 06.6, opt-in container variant) ───────────
+
+
+def _load_manifest(project_dir: str) -> dict[str, Any] | None:
+    p = Path(project_dir) / ".conductor" / "workspace.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Failed to parse manifest %s", p)
+        return None
+
+
+def _image_name(project_id: str) -> str:
+    name = re.sub(r"[^a-z0-9._-]", "-", project_id.lower()).strip(".-") or "conductor"
+    return f"conductor/{name}"
+
+
+def _master_sha(project_dir: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", project_dir, "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=30,
+    )
+    return result.stdout.strip()
+
+
+def _image_exists(image_ref: str) -> bool:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_ref],
+        capture_output=True, text=True, timeout=60,
+    )
+    return result.returncode == 0
+
+
+def _docker_tag(src: str, dst: str) -> None:
+    result = subprocess.run(
+        ["docker", "tag", src, dst],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"docker tag {src} -> {dst} failed: {result.stderr.strip()[:300]}")
+
+
+def _prune_image_tags(image_name: str, keep: str, retention: int = 3) -> None:
+    """Remove old sha tags, keeping the newest ``retention`` per component."""
+    prefix = image_name + ":"
+    result = subprocess.run(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}|{{.CreatedAt}}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        return
+    tagged: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        ref, _, created = line.partition("|")
+        if ref.startswith(prefix):
+            tagged.append((ref, created))
+    created_by = dict(tagged)
+    sha_tags = sorted(
+        (ref for ref, _ in tagged
+         if ref not in (f"{image_name}:latest", f"{image_name}:candidate", keep)),
+        key=lambda r: created_by.get(r, ""),
+        reverse=True,
+    )
+    for old in sha_tags[retention - 1:]:
+        subprocess.run(["docker", "rmi", old], capture_output=True, text=True, timeout=120)
+
+
+def _run_pre_merge_checks(worktree_root: str, project_dir: str, run: dict[str, Any]) -> str | None:
+    """Run pre-merge gates on the candidate branch; return error text or None.
+
+    ``bash gates.sh`` runs only where the generated root gate exists
+    (subdirs/mixed layouts).  The container image build is opt-in via
+    ``manifest.variants.container``.  A failure blocks the merge — master
+    never receives an unbuildable component.
+    """
+    manifest = _load_manifest(project_dir)
+    checks: list[list[str]] = []
+    if (Path(worktree_root) / "gates.sh").exists():
+        checks.append(["bash", "gates.sh"])
+    if (manifest or {}).get("variants", {}).get("container"):
+        image = _image_name(run.get("project_id") or run.get("plan_id", "default"))
+        checks.append(
+            ["docker", "build", "-t", f"{image}:candidate",
+             "-f", "variants/container/Dockerfile", "."]
+        )
+    if not checks:
+        return None
+    for cmd in checks:
+        result = subprocess.run(
+            cmd, cwd=worktree_root, capture_output=True, text=True, timeout=1800,
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout).strip().splitlines()
+            detail = " | ".join(tail[-3:])[:500] if tail else f"{cmd[0]} failed"
+            return f"pre-merge check failed: {' '.join(cmd)}: {detail}"
+    return None
+
+
+def finalize_image(run_id: str, workspace_root: str | None = None) -> dict[str, Any]:
+    """Post-merge image finalize: re-tag ``candidate`` with the real sha.
+
+    Verifies the new tag exists BEFORE pruning.  Failures are recorded on the
+    run (``image_status='failed'``) and escalated — they never change the run
+    outcome, which is already success.
+    """
+    _wsr = workspace_root or os.environ.get(
+        "WORKSPACE_ROOT", "/opt/aipc/conductor/workspace"
+    )
+    run = _get_run(run_id)
+    if not run:
+        return {}
+    plan = _get_plan(run["plan_id"])
+    project_id = plan["project_id"] if plan else run.get("project_id", run.get("plan_id", "default"))
+    project_dir = str(Path(_wsr) / project_id)
+
+    manifest = _load_manifest(project_dir)
+    if not (manifest or {}).get("variants", {}).get("container"):
+        _update_run(run_id, image_status="skipped")
+        return _get_run(run_id) or {}
+
+    name = _image_name(project_id)
+    try:
+        sha6 = _master_sha(project_dir)[:6]
+        new = f"{name}:{sha6}"
+        _docker_tag(f"{name}:candidate", new)
+        if not _image_exists(new):
+            raise RuntimeError(f"image {new} missing after tag")
+        _docker_tag(new, f"{name}:latest")
+        _prune_image_tags(name, keep=new)
+        _update_run(run_id, image_status="built", image_tag=new)
+        logger.info("Image finalized for run %s: %s", run_id, new)
+    except Exception as exc:
+        _update_run(run_id, image_status="failed", image_error=str(exc)[:500])
+        logger.error("Image finalize failed for run %s: %s", run_id, exc)
+    return _get_run(run_id) or {}
+
+
 def finalize_success(run_id: str, workspace_root: str | None = None) -> dict[str, Any]:
     """Merge the run's verified worktree branch to main.
 
@@ -165,10 +428,10 @@ def finalize_success(run_id: str, workspace_root: str | None = None) -> dict[str
         workspace_root: Workspace root path (defaults to env).
 
     Returns:
-        The updated run dict.
-
-    Raises:
-        RuntimeError: On merge conflict (flagged for human).
+        The updated run dict.  ``merge_status`` is ``merged`` on success or
+        ``blocked`` when pre-merge checks or the merge itself failed — in the
+        blocked case the merge is aborted, the project is paused, and no
+        intake event is emitted (guide 06.5).
     """
     _wsr = workspace_root or os.environ.get(
         "WORKSPACE_ROOT", "/opt/aipc/conductor/workspace"
@@ -178,7 +441,7 @@ def finalize_success(run_id: str, workspace_root: str | None = None) -> dict[str
         raise ValueError(f"Run {run_id} not found")
 
     plan = _get_plan(run["plan_id"])
-    project_id = plan["project_id"] if plan else run.get("plan_id", "default")
+    project_id = plan["project_id"] if plan else run.get("project_id", run.get("plan_id", "default"))
     project_dir = str(Path(_wsr) / project_id)
 
     worktree_root = _get_active_worktree_root(run_id)
@@ -191,23 +454,26 @@ def finalize_success(run_id: str, workspace_root: str | None = None) -> dict[str
     goal = run.get("note") or f"run {run_id}"
     merge_msg = f"run {run_id}: {goal}"
 
+    check_error = _run_pre_merge_checks(worktree_root, project_dir, run)
+    if check_error:
+        logger.warning("Pre-merge checks failed for run %s: %s", run_id, check_error)
+        block_merge(run_id, project_id, branch, check_error)
+        return _get_run(run_id) or {}
+
     try:
         merge_commit = _git_merge(project_dir, branch, merge_msg)
         _update_run(
             run_id,
             worktree_status="merged",
             merge_commit=merge_commit,
+            merge_status="merged",
         )
         _sched_cleanup(run_id, SUCCESS_TTL_DAYS)
         logger.info("Run %s merged to main at %s", run_id, merge_commit)
-
-        # L4 is event-driven in evaluator-svc via run.completed.  Do not run
-        # the legacy in-process scripted L4 here, or a successful run can get
-        # double-scored with different isolation semantics.
     except RuntimeError as exc:
         logger.warning("Merge conflict for run %s: %s", run_id, exc)
-        _update_run(run_id, worktree_status="active")  # leave active for human
-        raise
+        _git_merge_abort(project_dir)
+        block_merge(run_id, project_id, branch, _summarize_conflict(exc))
 
     return _get_run(run_id) or {}
 

@@ -42,9 +42,9 @@ def _index_skeleton(
     }
 
 
-def _node_stub(node_id: str) -> dict[str, Any]:
-    """Build a stub ``.plan/nodes/{node_id}.json``."""
-    return {
+def _node_stub(node_id: str, subdir: str = "") -> dict[str, Any]:
+    """Build a stub ``.plan/nodes/{node_id}.json`` with optional subdir."""
+    stub: dict[str, Any] = {
         "id": node_id,
         "capabilities": [],
         "members": [],
@@ -52,6 +52,9 @@ def _node_stub(node_id: str) -> dict[str, Any]:
         "task": {"text": "", "inputs": [], "deliverables": []},
         "success": {"text": ""},
     }
+    if subdir:
+        stub["subdir"] = subdir
+    return stub
 
 
 def _check_stub() -> list[dict[str, Any]]:
@@ -137,12 +140,16 @@ def scaffold_plan_worktree(
         logger.debug("Scaffolded %s (%d nodes)", idx_path, node_count)
 
     # ── .plan/nodes/ stubs ────────────────────────────────────────────
+    # Pre-seed subdir when there's a single component (deterministic hint).
+    # Multi-component stubs omit subdir — the meta-planner assigns it.
+    _components: list[dict[str, Any]] = (meta_goal or {}).get("components") or []
+    _default_subdir: str = _components[0].get("subdir", "") if len(_components) == 1 else ""
     nodes_dir = wt / ".plan" / "nodes"
     for i in range(1, node_count + 1):
         nid = f"node-{i:03d}"
         nf = nodes_dir / f"{nid}.json"
         if not nf.exists():
-            stub = _node_stub(nid)
+            stub = _node_stub(nid, subdir=_default_subdir)
             nf.write_text(json.dumps(stub, indent=2) + "\n")
             logger.debug("Scaffolded %s", nf)
 

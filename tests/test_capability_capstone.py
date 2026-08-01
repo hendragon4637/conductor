@@ -22,7 +22,6 @@ from backend.planning.capability.selector import (
     candidate_capabilities,
     select_capabilities,
     resolve_node_capabilities,
-    DOMAIN_TO_FAMILY,
 )
 from backend.planning.capability.checkgen import generate_capability_checks
 from backend.planning.capability.harness_profiles import HARNESS_PROFILES

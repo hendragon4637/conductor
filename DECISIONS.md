@@ -351,3 +351,37 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 **Rationale**: Severity labels must match between L4's output model and intake's severity filter. The old rank dict was a copy-paste from a different domain (error monitoring). Using L4's actual severity values is the correct fix.
 
 **Trade-offs**: No behavioral change for the severity floor — `medium` cutoff was always the intent, it just wasn't working because `"high"` was unrecognized. Low-severity findings are still dropped but this is by design.
+
+## 2026-07-31 — L4 execution model: agent-driven (guide 05, Option B)
+
+**Status**: ACTIVE
+
+**Context**: The L4 runtime design guide (05_l4_runtime.md) specifies a deterministic driver model: per-component `run_block` execution, an `L4_DRIVERS` map keyed by delivery form, `await_health`, env tiers, and port allocation. The current implementation instead spawns an LLM persona agent into an isolated workspace — the agent reads RUN.md, runs the product black-box, and writes an `L4Report`. The File 05 todos required either adopting the full driver model (large effort, removes the LLM from the L4 loop) or formally adopting the agent-driven model with hygiene fixes.
+
+**Decision**:
+- Adopt the agent-driven model as the chosen design (Option B). The deterministic driver model from guide 05.1/05.2 (run_block, L4_DRIVERS, await_health, env tiers, port allocation) is NOT implemented — documented deviation, gate 05 status = documented-deviation.
+- Install/setup commands are sourced from the project manifest `.conductor/workspace.json` (`components[].commands.setup`), NOT parsed from RUN.md. This supersedes the 2026-07-02 bullet "Conductor parses deterministic install/setup commands from RUN.md".
+- Each component's setup runs in its own `subdir` inside the isolated copy, in one shell with `set -e` (guide 05.9 semantics) — no `cd`-line parsing.
+- Assembly/system projects (root `workspace.json` with `services`) have no local setup — install is skipped (services run under docker-compose).
+- Source immutability is enforced AND verified: `_prepare_l4_workspace()` persists a SHA-256 source signature to `l4_scratch/source_baseline.json`; `_on_l4_observed()` verifies the copy is unchanged before publishing findings. A mutated source fails the run as `l4_status='run_failed'` and emits no findings.
+
+**Rationale**: Keeps the LLM in the L4 loop (agent discovers HOW from RUN.md and drives the product like a real user — closer to persona simulation than scripted checks) while eliminating the RUN.md-parsing fragility: commands now come from the authoritative manifest written by the planner, and immutability is verified at completion rather than assumed.
+
+**Trade-offs**: The 9 delivery-form drivers from the guide remain unimplemented — products that cannot be driven interactively depend on the agent's tooling. Install is skipped entirely for legacy projects without a manifest; they get no dependency setup.
+
+## 2026-08-01 — Worksystem: publish-on-merge derived store + snapshot system L4
+
+**Status**: ACTIVE
+
+**Context**: The design guide (10_worksystem.md) specifies a worksystem — a per-system store of every member's *published* state that makes multi-component systems composable and L4-testable from artifacts alone. Before File 10, merged runs committed their artifacts only to the master worktree; there was no system-level index, no compose, and no way to run a system L4 against real published state.
+
+**Decision**:
+- Add a `backend/worksystem/` package: `repo.py` (per-system git repos under `worksystem/repos/<system_id>/`), `index.py` (`index.json` regenerated on every publish, never patched), `compose.py` (compose.yml + .env.example rendered from index), `publish.py` (publish-on-merge), `snapshot.py` (git worktree snapshot sandbox), `adjustments.py` (compose-diff → recurring-adjustment finding).
+- **Publish-on-merge**: on `run.merged`, the executor calls `publish_run()` — the member's committed artifacts (per the standard's `publish_manifest.files`/`artifacts`) are copied into `members/<name>/` with `_source.json` provenance, then `index.json` + `compose.yml` are regenerated and committed. A failed publish marks the run `publish_status='stale'` and **never fails the run**. Skipped for system-less projects and assembly composers.
+- **Sandbox-by-absence**: system L4 runs off a git worktree snapshot (`snapshot_worktree()`, detached HEAD, tag `l4/run-<run_id>`, retain policy `L4_TAGS_RETAIN`) — "artifacts only, no source" (guide 10.5). `_write_worksystem_opencode_json()` allows edits (an edit to `compose.yml` is the adjustment signal) but denies `git *`/`sudo *`/`rm -rf *`/webfetch/websearch.
+- **Adjustment-delta**: `compute_adjustments()` diffs compose between runs; `same_adjustment_in_last_n_runs()` (window `RECURRENCE_WINDOW`=3) escalates a recurrence finding even on pass verdicts; `tag_possibly_stale()` drops findings about members whose published state already lags master (intake filters them).
+- Worksystem repos are **derived state** — gitignored (`worksystem/`), never committed to the Conductor repo.
+
+**Rationale**: Keeps the worksystem a regenerable view of merged artifacts rather than a second source of truth. Publish failure must never alter a run's outcome. The snapshot-without-source sandbox gives the guide's isolation while letting the compose file be the agent's adjustment surface.
+
+**Trade-offs**: Worksystem content is lost on a fresh checkout (regenerated on next publish). Assembly composers remain on the legacy generator path and are excluded from publish. The compose-diff signal requires a `docker compose config` parse to normalize semantic deltas.

@@ -5,6 +5,8 @@ Covers E2E scenarios 1–7, 11, 13 from the intake MVP gate checklist.
 
 from __future__ import annotations
 
+from typing import Any
+
 from services.intake.adapters.base import GoalIntent
 from services.intake.adapters.human_feedback import HumanFeedbackAdapter
 from services.intake.adapters.l4_findings import L4FindingsAdapter
@@ -22,12 +24,13 @@ from services.intake.adapters.render import (
 # ── Adapter registration ──────────────────────────────────────────────────────
 
 
-def test_all_5_adapters_registered():
+def test_all_6_adapters_registered():
     assert "run_failed" in _ADAPTERS
     assert "l4_findings" in _ADAPTERS
     assert "plan_failed" in _ADAPTERS
     assert "ratify_rejected" in _ADAPTERS
     assert "human_feedback" in _ADAPTERS
+    assert "system_goal" in _ADAPTERS
 
 
 def test_adapter_caps():
@@ -234,7 +237,7 @@ def test_evidence_no_duplicates():
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _sample_payload(origin: str) -> dict:
+def _sample_payload(origin: str) -> dict[str, Any]:
     """Return a minimal valid payload for the given adapter origin."""
     samples = {
         "run_failed": {"run_id": "run_001", "plan_id": "plan_001", "project_id": "proj",

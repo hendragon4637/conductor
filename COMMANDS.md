@@ -188,18 +188,33 @@ curl -s --max-time 300 -X POST "http://127.0.0.1:8093/ratify/${PLAN_ID}" \
 
 ### Manual E2E cycle
 ```bash
-# 1. Submit goal
+# 1. Submit goal (single project)
 curl -s -X POST http://127.0.0.1:8093/goal \
   -H 'Content-Type: application/json' \
   -d '{"raw_input":"<goal>","project_id":"default"}'
 
-# 2. Clarify (if goal needs refinement — returns formulated MetaGoal, re-invokes graph)
+# 2. Submit system goal (multi-project decomposition — returns proposal_id)
+curl -s --max-time 300 -X POST http://127.0.0.1:8093/system/goal \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_input":"<system goal>","families":null}'
+
+# 3. Ratify system proposal (materialises system + projects + queues first goals)
+curl -s -X POST http://127.0.0.1:8093/system/ratify/<proposal_id> \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+
+# 4. Clarify (if goal needs refinement — returns formulated MetaGoal, re-invokes graph)
 curl -s -X POST http://127.0.0.1:8093/clarify/<plan_id> \
   -H 'Content-Type: application/json' \
   -d '{"clarification":"<your clarification text>","human_input":"<revised goal or spec>"}'
 
-# 3. Ratify (use plan_id from step 1)
+# 5. Ratify plan (use plan_id from step 1/4)
 curl -s -X POST http://127.0.0.1:8093/ratify/<plan_id>
+
+# 6. Stop active run (cancels run, pauses intake for project)
+curl -s -X POST http://127.0.0.1:8093/stop \
+  -H 'Content-Type: application/json' \
+  -d '{"project_id":"<project_id>","reason":"<why>"}'
 
 # 4. Monitor cycle
 docker exec postgres psql -U aipc -d aipc_conductor \
@@ -443,4 +458,31 @@ Database migrations are in `/opt/aipc/conductor/backend/migrations/`. Migration 
 ```bash
 /opt/aipc/conductor/.env                # monolith configuration (DB, Neo4j, LLM)
 /opt/aipc/conductor/services/*/.env     # per-microservice env overrides
+```
+
+## Worksystem (File 10 — publish-on-merge store + system L4)
+```bash
+# Worksystem layout
+ls /opt/aipc/conductor/worksystem/repos/<system_id>/          # per-system repo (derived, gitignored)
+cat /opt/aipc/conductor/worksystem/repos/<system_id>/index.json  # member manifest + compose inputs
+cat /opt/aipc/conductor/worksystem/repos/<system_id>/compose.yml # regenerated compose
+ls /opt/aipc/conductor/worksystem/repos/<system_id>/members/<project>/  # published RUN.md/workspace.json/_source.json
+
+# Inspect a system's published state
+git -C /opt/aipc/conductor/worksystem/repos/<system_id> log --oneline -5
+
+# Re-trigger publish for a merged run (executor side)
+docker exec postgres psql -U aipc -d aipc_conductor \
+  -c "SELECT id, state, publish_status, publish_error FROM runs WHERE publish_status IS NOT NULL ORDER BY id DESC LIMIT 10"
+
+# Run on-demand system L4 against the worksystem snapshot
+curl -s -X POST http://127.0.0.1:8091/l4/trigger/system \
+  -H 'Content-Type: application/json' -d '{"system_id":"<system_id>"}'
+
+# L4 worktree snapshots (retained per L4_TAGS_RETAIN)
+ls /opt/aipc/conductor/worksystem/worktrees/
+git -C /opt/aipc/conductor/worksystem/repos/<system_id> tag -l "l4/run-*"
+
+# Worksystem tests
+cd /opt/aipc/conductor && uv run python -m pytest backend/tests/test_worksystem.py backend/tests/test_l4_isolated_execution.py backend/tests/test_workspace_manifest.py -q
 ```

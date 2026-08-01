@@ -621,26 +621,6 @@ L4_RUNTIME_WRITABLE_DIRS = (
     "logs",
 )
 
-L4_INSTALL_MARKERS = (
-    "python -m venv",
-    "python3 -m venv",
-    "uv venv",
-    "pip install",
-    "python -m pip install",
-    "python3 -m pip install",
-    ".venv/bin/pip install",
-    "venv/bin/pip install",
-    "uv pip install",
-    "npm install",
-    "npm ci",
-    "pnpm install",
-    "yarn install",
-    "bun install",
-    "poetry install",
-    "go mod download",
-    "cargo fetch",
-)
-
 L4_SOURCE_EXCLUDE_DIRS = {
     ".git",
     "l4_scratch",
@@ -661,64 +641,33 @@ def _l4_run_root() -> Path:
     return workspace_root / "l4_runs"
 
 
-def _strip_shell_prompt(line: str) -> str:
-    stripped = line.strip()
-    if stripped.startswith(('-', '*')):
-        stripped = stripped[1:].strip()
-    for prefix in ("$ ", "> "):
-        if stripped.startswith(prefix):
-            return stripped[len(prefix):].strip()
-    return stripped
+def _manifest_install_blocks(dst: Path) -> list[tuple[str, str]]:
+    """Extract (subdir, setup_command) install blocks from the project manifest.
 
-
-def _is_install_command(candidate: str) -> bool:
-    lowered = candidate.lower().strip()
-    return lowered.startswith((
-        "python -m venv ",
-        "python3 -m venv ",
-        "uv venv",
-        "pip install ",
-        "python -m pip install ",
-        "python3 -m pip install ",
-        ".venv/bin/pip install ",
-        "venv/bin/pip install ",
-        "uv pip install ",
-        "npm install",
-        "npm ci",
-        "pnpm install",
-        "yarn install",
-        "bun install",
-        "poetry install",
-        "go mod download",
-        "cargo fetch",
-    ))
-
-
-def _parse_l4_install_commands(run_md: Path) -> list[str]:
-    if not run_md.exists():
+    Reads ``.conductor/workspace.json`` (guide 03.3) — the authoritative
+    layout record written by the planner with per-component ``commands``.
+    Only components declaring a ``commands.setup`` contribute; each setup
+    runs in the component's ``subdir`` (guide 05.9).  Returns ``[]`` when
+    the manifest is missing or unparseable — assembly projects carry a
+    root ``workspace.json`` with ``services`` instead and have nothing to
+    install locally.
+    """
+    manifest_path = dst / ".conductor" / "workspace.json"
+    if not manifest_path.exists():
+        logger.info("No project manifest at %s — skipping L4 install", manifest_path)
         return []
-    commands: list[str] = []
-    in_fence = False
-    for raw in run_md.read_text(errors="replace").splitlines():
-        line = raw.strip()
-        if line.startswith("```"):
-            in_fence = not in_fence
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Unparseable project manifest at %s — skipping L4 install", manifest_path)
+        return []
+    blocks: list[tuple[str, str]] = []
+    for comp in manifest.get("components", []):
+        setup = ((comp.get("commands") or {}).get("setup") or "").strip()
+        if not setup:
             continue
-        if not line or line.startswith("#"):
-            continue
-        candidate = _strip_shell_prompt(line)
-        lowered = candidate.lower()
-        if _is_install_command(candidate):
-            commands.append(candidate)
-        elif in_fence and any(marker in lowered for marker in L4_INSTALL_MARKERS):
-            commands.append(candidate)
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for command in commands:
-        if command not in seen:
-            deduped.append(command)
-            seen.add(command)
-    return deduped
+        blocks.append((comp.get("subdir", "."), setup))
+    return blocks
 
 
 def _write_l4_opencode_json(dst: Path, model: str | None = None) -> None:
@@ -768,28 +717,38 @@ def _cleanup_l4_workspace(dst: Path) -> None:
         shutil.rmtree(dst, ignore_errors=True)
 
 
-def _run_l4_install_commands(dst: Path, commands: list[str], timeout_s: int | None = None) -> list[str]:
+def _run_l4_install_blocks(
+    dst: Path,
+    blocks: list[tuple[str, str]],
+    timeout_s: int | None = None,
+) -> list[str]:
+    """Run each component's ``setup`` block in the isolated workspace.
+
+    Every block runs in ONE shell with ``set -e`` (guide 05.1) and ``cwd``
+    set to the component's ``subdir`` inside the copy (guide 05.9) — the
+    manifest never relies on ``cd`` lines.  A non-zero exit raises: the L4
+    agent cannot run the product, so the run must not emit bogus findings.
+    """
     logs: list[str] = []
-    for command in commands:
-        parts = command.split()
-        if len(parts) >= 4 and parts[:3] in (["python", "-m", "venv"], ["python3", "-m", "venv"]):
-            venv_dir = dst / parts[3]
-            if venv_dir.exists():
-                shutil.rmtree(venv_dir, ignore_errors=True)
+    timeout = timeout_s or int(os.environ.get("L4_INSTALL_TIMEOUT_S", "300"))
+    for subdir, command in blocks:
+        cwd = dst if subdir in ("", ".") else dst / subdir
+        if not cwd.is_dir():
+            logger.warning("L4 install subdir missing: %s — skipping setup", cwd)
+            logs.append(f"[{subdir}] setup skipped (subdir missing)")
+            continue
         result = subprocess.run(
-            command,
-            cwd=str(dst),
-            shell=True,
+            ["bash", "-lc", "set -e\n" + command],
+            cwd=str(cwd),
             capture_output=True,
             text=True,
-            timeout=timeout_s or int(os.environ.get("L4_INSTALL_TIMEOUT_S", "300")),
+            timeout=timeout,
             check=False,
         )
-        logs.append(f"{command} -> {result.returncode}")
+        logs.append(f"[{subdir}] {command} -> exit {result.returncode}")
         if result.returncode != 0:
-            raise RuntimeError(
-                f"L4 install failed for {command}: {(result.stderr or result.stdout)[-500:]}"
-            )
+            tail = (result.stderr or result.stdout or "").strip()[-500:]
+            raise RuntimeError(f"L4 setup failed for subdir {subdir!r}: {tail}")
     return logs
 
 
@@ -866,7 +825,10 @@ def _prepare_l4_workspace(
     if dst.exists():
         _cleanup_l4_workspace(dst)
     try:
-        shutil.copytree(src, dst, symlinks=True)
+        def _ignore_l4_dirs(_dir: str, names: list[str]) -> set[str]:
+            return {n for n in names if n in L4_SOURCE_EXCLUDE_DIRS}
+
+        shutil.copytree(src, dst, symlinks=True, ignore=_ignore_l4_dirs)
 
         # Make the workspace an independent git repo so the watcher's
         # ``_git_state_signature()`` can detect file changes.
@@ -879,9 +841,14 @@ def _prepare_l4_workspace(
 
         (dst / "l4_scratch").mkdir(parents=True, exist_ok=True)
         _write_l4_opencode_json(dst)
-        install_commands = _parse_l4_install_commands(dst / "RUN.md")
-        install_logs = _run_l4_install_commands(dst, install_commands, timeout_s=install_timeout_s)
+        install_blocks = _manifest_install_blocks(dst)
+        install_logs = _run_l4_install_blocks(dst, install_blocks, timeout_s=install_timeout_s)
         baseline = _l4_source_signature(dst)
+        # Persist the baseline so the completion path can verify source
+        # immutability in the isolated copy (guide 05, locked decision).
+        (dst / "l4_scratch" / "source_baseline.json").write_text(
+            json.dumps(baseline, indent=2) + "\n", encoding="utf-8",
+        )
         _freeze_l4_workspace(dst)
         return dst, install_logs, baseline
     except Exception:
@@ -1204,9 +1171,9 @@ def manual_l4(body: ManualL4Request) -> ManualL4Response:
                     cur.execute(
                         """INSERT INTO runs
                            (id, plan_id, project_id, state, kind, parent_run_id,
-                            l4_scenarios, l4_report, l4_structural, spec_hash)
+                            l4_scenarios, l4_report, l4_structural, spec_hash, merge_status)
                            VALUES (%s, %s, %s, 'completed', 'l4', %s,
-                                   %s::jsonb, %s::jsonb, %s, %s)
+                                   %s::jsonb, %s::jsonb, %s, %s, 'skipped')
                            ON CONFLICT (id) DO NOTHING""",
                         (l4_run_id, body.plan_id or "", project_id,
                          body.parent_run_id,
@@ -1258,6 +1225,94 @@ def manual_l4(body: ManualL4Request) -> ManualL4Response:
     finally:
         import shutil
         shutil.rmtree(worktree, ignore_errors=True)
+
+
+class TriggerSystemL4Request(BaseModel):
+    system_id: str
+    members: list[str] | None = None
+
+
+class TriggerSystemL4Response(BaseModel):
+    status: str
+    l4_run_id: str
+    node_session_id: str
+    message: str
+
+
+def _sys_l4_error(message: str) -> TriggerSystemL4Response:
+    return TriggerSystemL4Response(
+        status="error", l4_run_id="", node_session_id="", message=message,
+    )
+
+
+@app.post("/l4/trigger/system", response_model=TriggerSystemL4Response)
+def trigger_system_l4(body: TriggerSystemL4Request) -> TriggerSystemL4Response:
+    """On-demand system L4 from the worksystem snapshot (File 10, guide 10.4).
+
+    Gates before spawning: the system exists, no in-flight L4 run, and every
+    expected member has published state (an explicit ``members`` debug subset
+    is never blocked).  The L4 agent then works in an isolated worktree of
+    the worksystem repo — published artifacts only, no source.
+    """
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return _sys_l4_error("DATABASE_URL not set")
+
+    system_id = body.system_id
+    if not system_id:
+        return _sys_l4_error("system_id is required")
+
+    import psycopg
+
+    try:
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT system_id FROM systems WHERE system_id = %s", (system_id,))
+                if not cur.fetchone():
+                    return _sys_l4_error(f"System {system_id} not found")
+    except Exception as exc:
+        logger.exception("Failed to resolve system context for %s", system_id)
+        return _sys_l4_error(str(exc)[:500])
+
+    from backend.worksystem.snapshot import (
+        active_system_l4,
+        blocked_result,
+        missing_members,
+    )
+
+    inflight = active_system_l4(system_id)
+    if inflight:
+        return TriggerSystemL4Response(
+            status="in_flight",
+            l4_run_id=inflight["id"],
+            node_session_id="",
+            message=f"System L4 already running as {inflight['id']}",
+        )
+
+    missing = missing_members(system_id, members=body.members)
+    if missing and not body.members:
+        return TriggerSystemL4Response(**blocked_result(system_id, missing))
+
+    from services.evaluator.l4_runner import run_system_worksystem_l4
+    from shared.db import session as db_session
+
+    try:
+        with db_session() as s:
+            ns_id, l4_run_id = run_system_worksystem_l4(
+                s, system_id, members=body.members,
+            )
+    except Exception as exc:
+        logger.exception("Worksystem L4 spawn failed for system=%s", system_id)
+        return _sys_l4_error(f"L4 spawn failed: {str(exc)[:500]}")
+
+    logger.info("Worksystem L4 triggered on-demand: system=%s run=%s ns=%s",
+                system_id, l4_run_id, ns_id)
+    return TriggerSystemL4Response(
+        status="spawned",
+        l4_run_id=l4_run_id,
+        node_session_id=ns_id,
+        message=f"L4 agent spawned for system {system_id}. Watcher will handle completion.",
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────

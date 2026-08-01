@@ -38,11 +38,28 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
     needs_usage_sim = getattr(plan, "needs_usage_sim", False)
     with psycopg.connect(db_url) as c:
         with c.cursor() as cur:
+            # Look up existing project system_id or auto-create system-of-one
             cur.execute(
-                """INSERT INTO projects (project_id, name, repo_path)
-                   VALUES (%s, %s, %s)
+                "SELECT system_id FROM projects WHERE project_id = %s",
+                (project_id,),
+            )
+            existing_row = cur.fetchone()
+            if existing_row:
+                sys_id = existing_row[0]
+            else:
+                sys_id = project_id
+                cur.execute(
+                    "INSERT INTO systems (system_id, name, description) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (sys_id, project_id,
+                     f"Auto-created system-of-one for {project_id}"),
+                )
+            cur.execute(
+                """INSERT INTO projects (project_id, name, repo_path, system_id)
+                   VALUES (%s, %s, %s, %s)
                    ON CONFLICT (project_id) DO NOTHING""",
-                (project_id, project_id, f"/opt/aipc/conductor/workspace/{project_id}"),
+                (project_id, project_id,
+                 f"/opt/aipc/conductor/workspace/{project_id}", sys_id),
             )
             origin_val = getattr(plan, "origin", "human")
             source_ref_val = getattr(plan, "source_ref", None)
@@ -227,13 +244,25 @@ def save_run(run: dict[str, Any]) -> None:
                     try:
                         parsed = json.loads(goal)
                         if isinstance(parsed, dict):
-                            domains = parsed.get("domains")
-                            domain = domains[0] if domains else parsed.get("domain")
+                            # New format: components[0].standard_slug
+                            components = parsed.get("components")
+                            if components and isinstance(components, list) and len(components) > 0:
+                                domain = components[0].get("standard_slug") if isinstance(components[0], dict) else None
+                            # Old format: domains[0]
+                            if not domain:
+                                domains = parsed.get("domains")
+                                domain = domains[0] if domains else parsed.get("domain")
                     except (json.JSONDecodeError, TypeError):
                         pass
                 elif isinstance(goal, dict):
-                    domains = goal.get("domains")
-                    domain = domains[0] if domains else goal.get("domain")
+                    # New format
+                    components = goal.get("components")
+                    if components and isinstance(components, list) and len(components) > 0:
+                        domain = components[0].get("standard_slug") if isinstance(components[0], dict) else None
+                    # Old format
+                    if not domain:
+                        domains = goal.get("domains")
+                        domain = domains[0] if domains else goal.get("domain")
 
                 if domain:
                     stamp_run_standard(run_id, domain, db_url)

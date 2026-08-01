@@ -52,6 +52,271 @@ def is_greenfield(project_dir: str | Path) -> bool:
     return not manifest.exists()
 
 
+def _determine_layout(components: list[dict[str, Any]]) -> str:
+    """Determine the project layout type from a list of components.
+
+    - ``"root"`` → all components are at ``"."``  (legacy single-component)
+    - ``"subdirs"`` → all components in named subdirectories (new projects)
+    - ``"mixed"`` → some at root, some in named subdirs (after adding to legacy)
+    """
+    subdirs = [c.get("subdir", ".") for c in components]
+    if all(s == "." for s in subdirs):
+        return "root"
+    if "." in subdirs:
+        return "mixed"
+    return "subdirs"
+
+
+def write_project_manifest(
+    project_dir: str | Path,
+    components: list[dict[str, Any]],
+    variants: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write the project root ``.conductor/workspace.json`` manifest.
+
+    Records the layout type and full per-component L4 entries (guide 03.3:
+    delivery_form, runnable, port, health, env_required, env_l4_defaults,
+    commands) so every consumer (spawn, gates, deps materialization, judge,
+    L4) reads the authoritative layout rather than inferring it from the tree.
+    Optional ``variants`` (e.g. ``{"container": true}``) opt into the
+    guide 06.6 image build pipeline.
+
+    Three layout values:
+    - ``"root"`` — legacy single component at root (never restructured)
+    - ``"subdirs"`` — all components in named subdirectories (default for new)
+    - ``"mixed"`` — a root component plus one or more named subdirs
+
+    Version policy (guide 03.4): an existing subdir is never regenerated; the
+    manifest records the version actually generated.  Re-runs therefore keep
+    the version pinned at whatever created the subdir, not the latest standard
+    version — drift is visible rather than silent.
+    """
+    project_dir = Path(project_dir)
+    conductor_dir = project_dir / ".conductor"
+    conductor_dir.mkdir(parents=True, exist_ok=True)
+
+    layout = _determine_layout(components)
+    params = _default_params(project_dir)
+    # Preserve existing version pins for subdirs that already exist on disk.
+    _prior = read_project_manifest(project_dir)
+    _prior_by_subdir = {
+        c.get("subdir", "."): c
+        for c in (_prior or {}).get("components", [])
+        if c.get("subdir") is not None
+    }
+    _manifest_components: list[dict[str, Any]] = []
+    for c in components:
+        _slug = c.get("standard_slug", "")
+        _std = _get_active_standard(_slug) if _slug else None
+        _subdir = c.get("subdir", ".")
+        _entry = (
+            component_manifest_entry(_std, params, _subdir)
+            if _std
+            else {
+                "standard_slug": _slug,
+                "standard_id": str(c.get("standard_id", "")),
+                "version": c.get("version", 1),
+                "subdir": _subdir,
+                "domain": c.get("domain", ""),
+                "delivery_form": c.get("delivery_form", ""),
+                "runnable": c.get("runnable", False),
+                "port": c.get("port"),
+                "health": c.get("health"),
+                "env_required": c.get("env_required", []),
+                "env_l4_defaults": c.get("env_l4_defaults", {}),
+                "commands": c.get("commands", {}),
+            }
+        )
+        # Version pin: an existing subdir keeps the version that generated it.
+        _prior_entry = _prior_by_subdir.get(_subdir)
+        if _prior_entry is not None and _prior_entry.get("version") is not None:
+            _entry["version"] = _prior_entry["version"]
+        _manifest_components.append(_entry)
+    manifest: dict[str, Any] = {
+        "layout": layout,
+        "components": _manifest_components,
+        "variants": variants or {},
+        "generated_at": datetime.datetime.now().isoformat(),
+    }
+    path = conductor_dir / "workspace.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    logger.info("Project manifest written: layout=%s, %d components", layout, len(components))
+    return manifest
+
+
+def read_project_manifest(project_dir: str | Path) -> dict[str, Any] | None:
+    """Read the project root ``.conductor/workspace.json`` manifest.
+
+    Returns ``None`` when the file is missing or unparseable (legacy project
+    or not yet scaffolded).
+    """
+    path = Path(project_dir) / ".conductor" / "workspace.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Failed to read project manifest at %s", path)
+        return None
+
+
+def _get_standard_by_id(standard_id: str) -> dict[str, Any] | None:
+    """Fetch an active domain_standard row by id (used by backfill)."""
+    from backend.db.queries import conn as db_conn
+
+    with db_conn() as c:
+        row = c.execute(
+            """SELECT id, slug, name, conventions_md,
+                      scaffold_ref, artifact_spec, service_template, version
+               FROM domain_standards
+               WHERE id = %s AND active = true""",
+            (str(standard_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def backfill_manifest(
+    project_dir: str | Path,
+    defer_commit: bool = False,
+) -> dict[str, Any] | None:
+    """Backfill L4 fields (guide 03.4) into an existing project manifest.
+
+    Each component entry still missing ``commands`` is re-derived from its
+    standard via :func:`component_manifest_entry`.  Existing ``version`` pins
+    are preserved — an existing subdir is never regenerated, so its version
+    stays at whatever created it.  Returns ``None`` when no manifest exists
+    (nothing to backfill).
+    """
+    project_dir = Path(project_dir)
+    manifest = read_project_manifest(project_dir)
+    if not manifest:
+        return None
+    params = _default_params(project_dir)
+    changed = False
+    for c in manifest.get("components", []):
+        if "commands" in c:
+            continue
+        std = _get_standard_by_id(c["standard_id"]) if c.get("standard_id") else None
+        if std is None and c.get("standard_slug"):
+            std = _get_active_standard(c["standard_slug"])
+        if not std:
+            continue
+        _version = c.get("version")
+        c.update(component_manifest_entry(std, params, c.get("subdir", ".")))
+        if _version is not None:
+            c["version"] = _version
+        changed = True
+    if not changed:
+        return manifest
+    path = project_dir / ".conductor" / "workspace.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    if not defer_commit:
+        subprocess.run(
+            ["git", "-C", str(project_dir), "add", "-A"],
+            check=True, capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["git", "-C", str(project_dir), "commit", "-m", "backfill: manifest commands"],
+            check=True, capture_output=True, timeout=30,
+        )
+    logger.info("Backfilled project manifest for %s", project_dir)
+    return manifest
+
+
+def check_runmd_drift(project_dir: str | Path, subdir: str) -> list[str]:
+    """Return command keys whose first token is absent from ``subdir/RUN.md``.
+
+    Deliberately loose (guide 03.8): only the first token per command is
+    compared, so harmless formatting differences do not fail.  Empty list
+    means no drift.  Components without ``commands`` are skipped.
+    """
+    manifest = read_project_manifest(project_dir) or {}
+    comp = next(
+        (c for c in manifest.get("components", []) if c.get("subdir") == subdir),
+        None,
+    )
+    commands = (comp or {}).get("commands") or {}
+    runmd = Path(project_dir) / subdir / "RUN.md"
+    txt = runmd.read_text(encoding="utf-8") if runmd.exists() else ""
+    return [
+        k for k in ("setup", "run", "test", "verify")
+        if k in commands and commands[k].split()[0] not in txt
+    ]
+
+
+def _runmd_drift_snippet(subdir: str) -> str:
+    """Self-contained gates.sh drift check for one standard-bearing component."""
+    return (
+        f"# RUN.md drift gate — {subdir} (standard-bearing)\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib, sys\n"
+        "m = json.loads(pathlib.Path('.conductor/workspace.json').read_text())\n"
+        f"subdir = {subdir!r}\n"
+        "comp = next((c for c in m.get('components', []) if c.get('subdir') == subdir), None)\n"
+        "if not comp or not comp.get('commands'):\n"
+        "    sys.exit(0)\n"
+        "runmd = pathlib.Path(subdir) / 'RUN.md'\n"
+        "txt = runmd.read_text() if runmd.exists() else ''\n"
+        "missing = [k for k in ('setup', 'run', 'test', 'verify')\n"
+        "           if k in comp['commands'] and comp['commands'][k].split()[0] not in txt]\n"
+        "if missing:\n"
+        "    print(f'RUN.md drift ({subdir}): RUN.md does not document: {missing}')\n"
+        "    sys.exit(1)\n"
+        "PY"
+    )
+
+
+def write_root_gates(project_dir: str | Path, manifest: dict[str, Any]) -> None:
+    """Write (or update) the root ``gates.sh`` that iterates component subdirs.
+
+    Three layout behaviours:
+    - ``"root"`` — no root gates.sh written (single component at root).
+    - ``"subdirs"`` — iterate all named subdirectories.
+    - ``"mixed"`` — rename pre-existing ``gates.sh`` to ``gates.legacy.sh``
+      (one-time), run it inline, then iterate named subdirs.
+    """
+    layout = manifest.get("layout", "root")
+    subdirs: list[str] = sorted(
+        c["subdir"] for c in manifest.get("components", [])
+        if c.get("subdir", ".") != "."
+    )
+    if not subdirs or layout == "root":
+        return  # single-root-component project — no wrapper needed
+
+    project_dir = Path(project_dir)
+    lines: list[str] = ["#!/usr/bin/env bash", "# root gates.sh — generated by conductor", "set -euo pipefail", ""]
+
+    if layout == "mixed":
+        root_gates = project_dir / "gates.sh"
+        legacy_gates = project_dir / "gates.legacy.sh"
+        if root_gates.exists() and not legacy_gates.exists():
+            root_gates.rename(legacy_gates)
+            lines.append("# legacy root gates (pre-existing)")
+            lines.append("bash gates.legacy.sh || exit 1")
+            lines.append("")
+
+    for sd in subdirs:
+        gates_script = project_dir / sd / "gates.sh"
+        if gates_script.exists():
+            lines.append(f"(cd \"{sd}\" && bash gates.sh) || exit 1")
+        # RUN.md drift gate (guide 03.8) — only for standard-bearing components.
+        comp = next((c for c in manifest.get("components", []) if c.get("subdir") == sd), None)
+        if comp and comp.get("commands"):
+            lines.append(_runmd_drift_snippet(sd))
+
+    if len(lines) <= 4:  # only header, no real content
+        return
+
+    content = "\n".join(lines) + "\n"
+    root_gates_path = project_dir / "gates.sh"
+    # Avoid re-writing identical content
+    if root_gates_path.exists() and root_gates_path.read_text(encoding="utf-8") == content:
+        return
+    root_gates_path.write_text(content, encoding="utf-8")
+    root_gates_path.chmod(0o755)
+    logger.info("Root gates.sh written (layout=%s, %d subdirs)", layout, len(subdirs))
+
+
 def pkg_slug(name: str) -> str:
     """Convert a project name into a valid Python/npm package identifier (snake_case)."""
     s = name.strip().replace("-", "_").replace(" ", "_")
@@ -72,12 +337,75 @@ def _get_active_standard(slug: str) -> dict[str, Any] | None:
     with db_conn() as c:
         row = c.execute(
             """SELECT id, slug, name, conventions_md,
-                      scaffold_ref, artifact_spec, version
+                      scaffold_ref, artifact_spec, service_template, version
                FROM domain_standards
                WHERE slug = %s AND active = true""",
             (slug,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def _default_params(project_dir: Path) -> dict[str, str]:
+    """Derive the standard token map (``__APP__``/``__PKG__``/``__PROJECT__``).
+
+    Shared by scaffold generation and manifest command substitution so both
+    use identical token values for the same project.
+    """
+    proj_name = project_dir.name
+    return {
+        "__APP__": _display_name(proj_name),
+        "__PKG__": pkg_slug(proj_name),
+        "__PROJECT__": proj_name,
+    }
+
+
+def _substitute_tokens_str(text: str, params: dict[str, str]) -> str:
+    """Replace generation-time tokens (``__APP__``/``__PKG__``/``__PROJECT__``).
+
+    ``${PORT}`` / ``${SCRIPT}`` are LEFT INTACT — they are resolved at run
+    time by the L4 drivers, not at generation time (guide 03.3).
+    """
+    for token, value in params.items():
+        text = text.replace(token, value)
+    return text
+
+
+def component_manifest_entry(
+    std: dict[str, Any],
+    params: dict[str, str],
+    subdir: str,
+) -> dict[str, Any]:
+    """Build one manifest component entry with everything L4 needs (guide 03.3).
+
+    Fields come from the standard's ``service_template`` (runnable/port/health/
+    env/commands) and ``artifact_spec.delivery_spec.form``.  Commands have
+    generation-time tokens substituted; ``${PORT}``/``${SCRIPT}`` survive
+    untouched for runtime resolution.
+
+    When the standard has no ``service_template`` the entry degrades to
+    ``runnable: false`` with empty ``commands`` — L4 then reports ``blocked``
+    with a finding rather than crashing.
+    """
+    t = std.get("service_template") or {}
+    artifact_spec = std.get("artifact_spec") or {}
+    delivery_form = (artifact_spec.get("delivery_spec") or {}).get("form", "")
+    return {
+        "subdir": subdir,
+        "standard_slug": std.get("slug", ""),
+        "standard_id": str(std.get("id", "")),
+        "version": std.get("version", 1),
+        "domain": std.get("slug", ""),
+        "delivery_form": delivery_form,
+        "runnable": t.get("runnable", False),
+        "port": t.get("port"),
+        "health": t.get("health"),
+        "env_required": t.get("env_required", []),
+        "env_l4_defaults": t.get("env_l4_defaults", {}),
+        "commands": {
+            k: _substitute_tokens_str(v, params)
+            for k, v in (t.get("commands") or {}).items()
+        },
+    }
 
 
 # Domain → standard slug(s) mapping.
@@ -281,7 +609,7 @@ def emit_workspace_picture(worktree: Path) -> None:
     INFRA_EXCLUDES = {
         ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
         ".ruff_cache", ".opencode", ".conductor", ".plan", "l4_scratch",
-        "dist", ".pio", ".cache",
+        "dist", ".pio", ".cache", "deps",
     }
 
     # ── Tree ─────────────────────────────────────────────────────────────
@@ -445,9 +773,11 @@ def create_planning_worktree(
     from it so ``.memory/`` (which lives on master) travels into the planning
     worktree.  Fresh projects get an initialised worktree.
 
-    When ``meta_goal`` is provided, the domain is extracted so
-    ``_build_static_brief`` can include domain-filtered capability vocabulary
-    and quality dimensions in ``NODE_BRIEF.md``.
+    When ``meta_goal`` is provided, the component standard slugs are used
+    to derive capability families so ``_build_static_brief`` can include
+    family-filtered capability vocabulary and quality dimensions in
+    ``NODE_BRIEF.md``. Legacy ``domains[0]``-based resolution also works
+    via ``_FAMILY_HINTS`` in ``selector.py``.
 
     Returns the absolute path to the worktree root.
     """
@@ -489,18 +819,59 @@ def create_planning_worktree(
         )
 
     # ── Greenfield scaffold generation ──────────────────────────────────
-    # For new projects with a known domain, generate the scaffold workspace
+    # For new projects with a known goal, generate the scaffold workspace
     # on master BEFORE creating the planning worktree.  This ensures the
     # scaffold is commit 0 — the planning agent and later execution nodes
     # all inherit the pre-structured workspace.
     #
-    # Each domain maps to one or more standard slugs.  Single-engine
-    # domains scaffold at the project root; multi-engine domains scaffold
-    # into subdirectories named after each slug.
-    domains = (meta_goal or {}).get("domains") if meta_goal else None
-    domain = domains[0] if domains else ((meta_goal or {}).get("domain") if meta_goal else None)
+    # When the meta-goal has ``components`` (new format), each component's
+    # ``standard_slug`` maps directly to a scaffold.  When only ``domains``
+    # (legacy format), the old ``_domain_to_standard_slug`` map is used.
+    # Multi-component goals scaffold into subdirectories; single-component
+    # goals scaffold at the project root.
+    mg = meta_goal or {}
+    components: list[dict[str, Any]] = mg.get("components") or []
+    domains: list[str] | None = mg.get("domains") or None
     _scaffold_committed = False
-    if domain and is_greenfield(project_dir):
+    standard_slugs: list[str] | None = None
+
+    if components:
+        # New multi-component format — use component standard_slugs directly
+        multi = len(components) > 1
+        for comp in components:
+            slug = comp.get("standard_slug", "")
+            if not slug:
+                continue
+            subdir = comp.get("subdir") or (slug if multi else ".")
+            # Skip existing subdirs (version upgrades out of scope — guide 03.3)
+            _target = project_dir / subdir if subdir != "." else project_dir
+            if _target.exists() and subdir != ".":
+                logger.info("Subdir %s already exists — skipping regeneration for %s", subdir, slug)
+                _scaffold_committed = True  # still count as committed (already exists)
+                continue
+            try:
+                generate_workspace(project_dir, slug, subdir=subdir, defer_commit=multi)
+                logger.info(
+                    "Greenfield scaffold generated for component=%s subdir=%s",
+                    slug, subdir,
+                )
+                _scaffold_committed = True
+            except ValueError as exc:
+                logger.warning(
+                    "Scaffold generation skipped for %s/%s: %s", "components", slug, exc,
+                )
+        if multi and _scaffold_committed:
+            subprocess.run(
+                ["git", "-C", str(project_dir), "add", "-A"],
+                check=True, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["git", "-C", str(project_dir), "commit", "-m", "scaffold: generated workspace(s)"],
+                check=True, capture_output=True, timeout=30,
+            )
+    elif domains:
+        # Legacy format — map old domain name to standard slugs
+        domain = domains[0]
         standard_slugs = _domain_to_standard_slug(domain)
         if standard_slugs:
             multi = len(standard_slugs) > 1
@@ -527,6 +898,36 @@ def create_planning_worktree(
                     check=True, capture_output=True, timeout=30,
                 )
 
+    # Write root manifest (project_dir/.conductor/workspace.json) reflecting
+    # all scaffolded components.  This is the authoritative layout record.
+    _root_components: list[dict[str, Any]] = []
+    if components:
+        _root_components = [
+            {"standard_slug": c.get("standard_slug", ""), "subdir": c.get("subdir", "."), "domain": c.get("domain", "")}
+            for c in components if c.get("subdir", ".") != "."
+        ]
+        # Always include the first component — even for legacy root projects
+        if not _root_components:
+            _root_components = [
+                {"standard_slug": components[0].get("standard_slug", ""), "subdir": ".", "domain": components[0].get("domain", "")}
+            ]
+    elif _scaffold_committed:
+        # Legacy scaffold — derive from what was generated
+        for slug in (standard_slugs or []):
+            _n_slugs = len(standard_slugs) if standard_slugs else 0
+            _root_components.append({"standard_slug": slug, "subdir": slug if _n_slugs > 1 else ".", "domain": slug})
+    if _root_components and _scaffold_committed:
+        _manifest = write_project_manifest(project_dir, _root_components)
+        write_root_gates(project_dir, _manifest)
+        subprocess.run(
+            ["git", "-C", str(project_dir), "add", "-A"],
+            check=False, capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["git", "-C", str(project_dir), "commit", "-m", "manifest: project layout"],
+            check=False, capture_output=True, timeout=30,
+        )
+
     # Remove prior worktree if exists
     subprocess.run(
         ["git", "-C", str(project_dir), "worktree", "remove", "--force", str(worktree_path)],
@@ -548,8 +949,26 @@ def create_planning_worktree(
     (worktree_path / ".plan" / "nodes").mkdir(parents=True, exist_ok=True)
     (worktree_path / ".plan" / "checks").mkdir(parents=True, exist_ok=True)
 
-    # Write scoped opencode.json with domain-filtered static brief
-    _write_planner_opencode_json(worktree_path, domain=domain)
+    # Derive capability families from components (new) or domain (legacy)
+    # for filtering the capability vocabulary in the static brief.
+    _families: list[str] = []
+    if components:
+        from backend.standards.loader import get_standard
+        seen: set[str] = set()
+        for comp in components:
+            slug = comp.get("standard_slug", "")
+            if slug:
+                std = get_standard(slug)
+                for f in (std.get("families") or []) if std else []:
+                    if f not in seen:
+                        _families.append(f)
+                        seen.add(f)
+    elif domains:
+        from backend.planning.capability.selector import _FAMILY_HINTS
+        _families = _FAMILY_HINTS.get(domains[0], [])
+
+    # Write scoped opencode.json with family-filtered static brief
+    _write_planner_opencode_json(worktree_path, families=_families or None)
 
     # Scaffold deterministic .plan/ stubs (index skeleton, node/check stubs, TODO.md)
     from backend.planning.plan_scaffolds import scaffold_plan_worktree
@@ -607,17 +1026,14 @@ def on_planning_failed(
 # ── Scoped opencode.json ──────────────────────────────────────────────────
 
 
-def _write_planner_opencode_json(worktree: Path, domain: str | None = None) -> None:
-    """Write scoped permissions to the planning worktree.
-
-    The meta-planner agent may edit ONLY ``.plan/**``.
-    Bash is read-only (ls, cat, find). Research (webfetch, websearch) allowed.
+def _write_planner_opencode_json(worktree: Path, families: list[str] | None = None) -> None:
+    """Write a scoped opencode.json into a planning worktree.
 
     Reads the meta-planner agent config from the database to populate the
     model, allowed tools, and agent definition in opencode.json, so the
     worktree reflects the full agent profile (not just hardcoded permissions).
 
-    When *domain* is provided, ``_build_static_brief`` includes domain-filtered
+    When *families* is provided, ``_build_static_brief`` includes family-filtered
     capability vocabulary and quality dimensions in ``NODE_BRIEF.md``.
     """
     from backend.db.queries import get_agent_config
@@ -630,7 +1046,7 @@ def _write_planner_opencode_json(worktree: Path, domain: str | None = None) -> N
     conductor_dir.mkdir(parents=True, exist_ok=True)
     brief_path = conductor_dir / "NODE_BRIEF.md"
 
-    static_brief = _build_static_brief(domain=domain)
+    static_brief = _build_static_brief(families=families)
     brief_content = static_brief
     if sys_prompt:
         brief_content = f"{sys_prompt}\n\n---\n\n{static_brief}"
@@ -680,28 +1096,25 @@ def _roster_slate() -> list[dict[str, Any]]:
     ]
 
 
-def _capability_slate(domain: str | None = None) -> list[dict[str, Any]]:
+def _capability_slate(families: list[str] | None = None) -> list[dict[str, Any]]:
     from backend.db.queries import conn as db_conn
 
-    if domain:
-        from backend.planning.capability.selector import DOMAIN_TO_FAMILY
-        families = DOMAIN_TO_FAMILY.get(domain, [])
-        if families:
-            with db_conn() as c:
-                placeholders = ",".join("%s" for _ in families)
-                rows = c.execute(
-                    f"""
-                    SELECT name, family
-                    FROM capabilities
-                    WHERE family ?| array[{placeholders}]
-                    ORDER BY name
-                    """,
-                    families,
-                ).fetchall()
-            return [
-                {"name": r["name"], "family": r["family"]}
-                for r in rows
-            ]
+    if families:
+        with db_conn() as c:
+            placeholders = ",".join("%s" for _ in families)
+            rows = c.execute(
+                f"""
+                SELECT name, family
+                FROM capabilities
+                WHERE family ?| array[{placeholders}]
+                ORDER BY name
+                """,
+                families,
+            ).fetchall()
+        return [
+            {"name": r["name"], "family": r["family"]}
+            for r in rows
+        ]
 
     with db_conn() as c:
         rows = c.execute(
@@ -718,7 +1131,7 @@ def _capability_slate(domain: str | None = None) -> list[dict[str, Any]]:
 
 
 def capability_dims_slate(
-    domain: str | None = None,
+    families: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return capabilities with their quality_dimensions for the brief.
 
@@ -727,11 +1140,6 @@ def capability_dims_slate(
     per-node checks from them.
     """
     from backend.db.queries import conn as db_conn
-
-    families: list[str] = []
-    if domain:
-        from backend.planning.capability.selector import DOMAIN_TO_FAMILY
-        families = DOMAIN_TO_FAMILY.get(domain, [])
 
     if families:
         with db_conn() as c:
@@ -809,7 +1217,7 @@ def _fmt_dims_for_brief(
     return str(mapped)
 
 
-def _build_static_brief(domain: str | None = None) -> str:
+def _build_static_brief(families: list[str] | None = None) -> str:
     """Build the static reference section for NODE_BRIEF.md.
 
     This content does NOT depend on the specific goal — it is the meta-planner's
@@ -818,8 +1226,8 @@ def _build_static_brief(domain: str | None = None) -> str:
     as an ``{file:}`` instruction so the agent sees it alongside the dynamic
     ``planning_brief()`` message.
 
-    When *domain* is provided, the CAPABILITY VOCABULARY and CAPABILITY
-    DIMENSIONS sections are filtered to that domain's families.
+    When *families* is provided, the CAPABILITY VOCABULARY and CAPABILITY
+    DIMENSIONS sections are filtered to those capability families.
     """
     parts: list[str] = []
     _NL = "\n"
@@ -959,8 +1367,8 @@ def _build_static_brief(domain: str | None = None) -> str:
         parts.append(f"- {rule}")
     parts.append("")
 
-    # ── CAPABILITY VOCABULARY (domain-filtered when domain is known) ────
-    caps = _capability_slate(domain)
+    # ── CAPABILITY VOCABULARY (family-filtered when families are known) ─
+    caps = _capability_slate(families)
     caps_formatted = "\n".join(
         f"  - {c['name']}  (family={c['family']})"
         for c in caps
@@ -974,8 +1382,8 @@ def _build_static_brief(domain: str | None = None) -> str:
     parts.append(caps_formatted)
     parts.append("")
 
-    # ── CAPABILITY DIMENSIONS (domain-filtered when domain is known) ────
-    dims = capability_dims_slate(domain)
+    # ── CAPABILITY DIMENSIONS (family-filtered when families are known) ─
+    dims = capability_dims_slate(families)
     dims_formatted = "\n".join(
         f"  - {d['name']}  dims={_fmt_dims_for_brief(d['dimensions'])}"
         for d in dims

@@ -14,9 +14,11 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from contracts.events import (
     L4Findings, PlanRatifiable, PlanFailed as PlanFailedEvent,
@@ -27,7 +29,7 @@ from shared.config import ServiceConfig
 from shared.db import init_db
 
 from services.intake.store import (
-    insert_intent, update_intent, load_intent_by_plan,
+    insert_intent, update_intent, load_intent_by_plan, load_intent_by_id,
     oldest_proposed, query_intents, is_duplicate,
 )
 
@@ -48,6 +50,8 @@ INTAKE_ENABLED = os.environ.get("INTAKE_ENABLED", "true").lower() == "true"
 DEDUPE_WINDOW_DAYS = int(os.environ.get("DEDUPE_WINDOW_DAYS", "7"))
 MAX_CLARIFY_ROUNDS = int(os.environ.get("MAX_CLARIFY_ROUNDS", "3"))
 RATE_LIMIT_PER_HOUR = int(os.environ.get("RATE_LIMIT_PER_HOUR", "3"))
+STALE_SWEEP_HOURS = int(os.environ.get("STALE_SWEEP_HOURS", "24"))
+STALE_SWEEP_INTERVAL_MINUTES = int(os.environ.get("STALE_SWEEP_INTERVAL_MINUTES", "60"))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -87,7 +91,7 @@ def _over_rate_limit(project_id: str) -> bool:
                 (project_id,),
             )
             row = cur.fetchone()
-            return (row[0] or 0) >= RATE_LIMIT_PER_HOUR
+            return (row[0] if row else 0) >= RATE_LIMIT_PER_HOUR
 
 
 def _escalate(row, reason: str) -> None:
@@ -109,7 +113,7 @@ def _escalate(row, reason: str) -> None:
     )
 
 
-def _post_goal(intent: dict) -> dict:
+def _post_goal(intent: dict[str, Any]) -> dict[str, Any]:
     """POST a normalized goal to planner-svc /goal.
 
     Returns the response dict with 'plan_id' and 'status'.
@@ -129,7 +133,7 @@ def _post_goal(intent: dict) -> dict:
     return resp.json()
 
 
-def _post_clarify(plan_id: str, answer: str) -> dict:
+def _post_clarify(plan_id: str, answer: str) -> dict[str, Any]:
     """POST a clarification answer to planner-svc."""
     import httpx
     planner_url = os.environ.get("PLANNER_URL", "http://127.0.0.1:8093")
@@ -158,32 +162,35 @@ def _post_ratify(plan_id: str) -> None:
 # ── Submit (shared by all entry handlers) ────────────────────────────────
 
 
-def _submit(intent: dict) -> None:
+def _submit(intent: dict[str, Any]) -> str | None:
     """Normalize, dedupe, check guards, then submit to planner.
 
     Writes the intent to DB first so the row has an id for intake_id.
+
+    Returns:
+        Plan ID on successful submission, ``None`` otherwise.
     """
     project_id = intent["project_id"]
 
     if _paused(project_id):
         insert_intent(intent, status="proposed")
         logger.info("Intake paused for %s — intent stored as proposed", project_id)
-        return
+        return None
 
     if is_duplicate(intent, window_days=DEDUPE_WINDOW_DAYS):
         insert_intent(intent, status="duplicate")
         logger.info("Duplicate intent for %s source_ref=%s", project_id, intent.get("source_ref"))
-        return
+        return None
 
     if _over_rate_limit(project_id):
         insert_intent(intent, status="escalated", last_error="rate limit")
         logger.warning("Rate limit hit for %s — intent escalated", project_id)
-        return
+        return None
 
     if not _project_free(project_id):
         insert_intent(intent, status="proposed")
         logger.info("Project %s busy — intent stored as proposed", project_id)
-        return
+        return None
 
     row = insert_intent(intent, status="submitted")
     try:
@@ -191,15 +198,17 @@ def _submit(intent: dict) -> None:
         plan_id = resp.get("plan_id", "")
         if plan_id:
             update_intent(row["id"], plan_id=plan_id)
+        return plan_id
     except Exception as exc:
         logger.exception("POST /goal failed for intent_id=%s", row["id"])
         update_intent(row["id"], status="escalated", last_error=str(exc)[:500])
+        return None
 
 
 # ── Event handlers ───────────────────────────────────────────────────────
 
 
-def on_run_failed(s, payload: dict) -> None:
+def on_run_failed(s, payload: dict[str, Any]) -> None:
     """Handle run.failed — create an improvement intent."""
     from services.intake.adapters.run_failed import RunFailedAdapter
     adapter = RunFailedAdapter()
@@ -207,7 +216,7 @@ def on_run_failed(s, payload: dict) -> None:
         _submit(intent.model_dump())
 
 
-def on_l4_findings(s, payload: dict) -> None:
+def on_l4_findings(s, payload: dict[str, Any]) -> None:
     """Handle l4.findings — create an improvement intent from L4 report."""
     from services.intake.adapters.l4_findings import L4FindingsAdapter
     adapter = L4FindingsAdapter()
@@ -215,7 +224,58 @@ def on_l4_findings(s, payload: dict) -> None:
         _submit(intent.model_dump())
 
 
-def on_human_feedback(body: dict) -> None:
+def on_system_goal_queued(s, payload: dict[str, Any]) -> None:
+    """Consume ``sys.goal_queued`` — create intent, submit to planner."""
+    import psycopg
+    db_url = os.environ["DATABASE_URL"]
+    project_id = payload.get("project_id", "")
+    raw_input = payload.get("raw_input", "")
+
+    if not project_id or not raw_input:
+        logger.warning("sys.goal_queued missing project_id or raw_input: %s", payload)
+        return
+
+    from services.intake.adapters.system_goal import SystemGoalAdapter
+    intents = SystemGoalAdapter().normalize(payload)
+    plan_id = _submit(intents[0].model_dump()) if intents else None
+
+    try:
+        with psycopg.connect(db_url) as c:
+            with c.cursor() as cur:
+                if plan_id:
+                    cur.execute(
+                        """UPDATE pending_goals
+                           SET status = 'submitted', plan_id = %s, updated_at = now()
+                           WHERE project_id = %s AND status = 'in_progress'""",
+                        (plan_id, project_id),
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE pending_goals
+                           SET last_error = 'intake submission failed', updated_at = now()
+                           WHERE project_id = %s AND status = 'in_progress'""",
+                        (project_id,),
+                    )
+            c.commit()
+    except Exception as exc:
+        logger.exception("Failed to update pending_goals for %s", project_id)
+
+
+def on_run_merged(s, payload: dict[str, Any]) -> None:
+    """Handle run.merged — drain pending goals for the merged project."""
+    from services.planner.system_goal import drain_pending
+    project_id = payload.get("project_id", "")
+    if project_id:
+        logger.info("Run merged for %s — draining pending goals", project_id)
+    try:
+        count = drain_pending()
+        if count:
+            logger.info("Drained %d pending goals after run.merged", count)
+    except Exception as exc:
+        logger.warning("drain_pending failed on run.merged: %s", exc)
+
+
+def on_human_feedback(body: dict[str, Any]) -> None:
     """Handle POST /intake/feedback — create an improvement intent."""
     from services.intake.adapters.human_feedback import HumanFeedbackAdapter
     adapter = HumanFeedbackAdapter()
@@ -223,7 +283,7 @@ def on_human_feedback(body: dict) -> None:
         _submit(intent.model_dump())
 
 
-def on_clarification_needed(s, payload: dict) -> None:
+def on_clarification_needed(s, payload: dict[str, Any]) -> None:
     """Handle plan.awaiting_clarification — answer via adapter or escalate."""
     row = load_intent_by_plan(payload["plan_id"])
     if not row:
@@ -237,10 +297,10 @@ def on_clarification_needed(s, payload: dict) -> None:
         _escalate(row, f"clarification deferred: {ans.text}")
         return
     update_intent(row["id"], status="clarifying", clarify_rounds=(row["clarify_rounds"] or 0) + 1)
-    _post_clarify(payload["plan_id"], ans.text if hasattr(ans, "text") else str(ans))
+    _post_clarify(payload["plan_id"], (ans.text or "") if hasattr(ans, "text") else str(ans))
 
 
-def on_plan_ratifiable(s, payload: dict) -> None:
+def on_plan_ratifiable(s, payload: dict[str, Any]) -> None:
     """Handle plan.ratifiable — auto-ratify or park for human."""
     row = load_intent_by_plan(payload["plan_id"])
     if not row:
@@ -252,17 +312,17 @@ def on_plan_ratifiable(s, payload: dict) -> None:
     update_intent(row["id"], status="running")
 
 
-def on_plan_failed(s, payload: dict) -> None:
+def on_plan_failed(s, payload: dict[str, Any]) -> None:
     """Handle plan.failed — reformulate via plan_failed adapter."""
     _reformulate("plan_failed", payload, payload.get("error", "gate failure"))
 
 
-def on_plan_rejected(s, payload: dict) -> None:
+def on_plan_rejected(s, payload: dict[str, Any]) -> None:
     """Handle plan.rejected — reformulate via ratify_rejected adapter."""
     _reformulate("ratify_rejected", payload, payload.get("reason", "rejected"))
 
 
-def _reformulate(origin: str, payload: dict, note: str) -> None:
+def _reformulate(origin: str, payload: dict[str, Any], note: str) -> None:
     """Reformulate an intent after plan failure or rejection.
 
     Preserves original source_ref for lineage. Caps differ by origin.
@@ -299,6 +359,7 @@ def _adapter_for_origin(origin: str):
     from services.intake.adapters.plan_failed import PlanFailedAdapter
     from services.intake.adapters.ratify_rejected import RatifyRejectedAdapter
     from services.intake.adapters.human_feedback import HumanFeedbackAdapter
+    from services.intake.adapters.system_goal import SystemGoalAdapter
 
     _MAP = {
         "run_failed": RunFailedAdapter,
@@ -306,6 +367,7 @@ def _adapter_for_origin(origin: str):
         "plan_failed": PlanFailedAdapter,
         "ratify_rejected": RatifyRejectedAdapter,
         "human_feedback": HumanFeedbackAdapter,
+        "system_goal": SystemGoalAdapter,
     }
     cls = _MAP.get(origin)
     if cls is None:
@@ -323,6 +385,68 @@ def _drain_proposed(project_id: str) -> None:
         _submit(row)
 
 
+def run_stale_sweep(max_age_hours: int | None = None) -> int:
+    """Escalate submitted/clarifying intents idle past the age cap.
+
+    Guide 08.6: a firing sweep is a bug signal — if the planner always
+    emits a terminal event, nothing should be stale. Logged per row.
+    """
+    from services.intake.store import sweep_stale_intents
+
+    hours = max_age_hours if max_age_hours is not None else STALE_SWEEP_HOURS
+    rows = sweep_stale_intents(max_age_hours=hours)
+    for row in rows:
+        logger.warning(
+            "Stale sweep escalated intent_id=%s project=%s origin=%s "
+            "(idle > %sh)",
+            row["id"], row["project_id"], row["origin"], hours,
+        )
+    return len(rows)
+
+
+def stale_sweep_loop() -> None:
+    """Background loop — run the stale sweep every interval."""
+    while True:
+        try:
+            run_stale_sweep()
+        except Exception:
+            logger.exception("Stale sweep failed")
+        time.sleep(STALE_SWEEP_INTERVAL_MINUTES * 60)
+
+
+# ── Dispatcher — extracted to module level for testability ────────────────
+
+
+def _dispatch(s, payload):
+    """Route an inbound RabbitMQ event to the correct handler."""
+    if not INTAKE_ENABLED:
+        logger.info("INTAKE_ENABLED=false — dropping event: %s", list(payload.keys())[:3])
+        return
+    if "run_id" in payload and "plan_id" in payload and "findings" in payload:
+        on_l4_findings(s, payload)
+    elif payload.get("event_type") == "run.failed":
+        on_run_failed(s, payload)
+    elif "merge_commit" in payload:
+        on_run_merged(s, payload)
+    elif "raw_input" in payload and "project_id" in payload and "questions" not in payload:
+        on_system_goal_queued(s, payload)
+    elif "questions" in payload:
+        on_clarification_needed(s, payload)
+    elif "error" in payload and "plan_id" in payload and "project_id" in payload:
+        on_plan_failed(s, payload)
+    elif "reason" in payload and "rejected_by" in payload:
+        on_plan_rejected(s, payload)
+    elif "plan_id" in payload and "project_id" in payload:
+        on_plan_ratifiable(s, payload)
+    else:
+        logger.warning("No intake handler for payload keys: %s", list(payload.keys()))
+
+    # After any event that might free a project, try to drain
+    project_id = payload.get("project_id", "")
+    if project_id:
+        _drain_proposed(project_id)
+
+
 # ── Lifespan ─────────────────────────────────────────────────────────────
 
 
@@ -335,31 +459,6 @@ async def lifespan(app: FastAPI):
     bus.declare()
     logger.info("RabbitMQ topology declared")
 
-    # Single dispatcher on intake.q
-    def _dispatch(s, payload):
-        if not INTAKE_ENABLED:
-            logger.info("INTAKE_ENABLED=false — dropping event: %s", list(payload.keys())[:3])
-            return
-        if "run_id" in payload and "plan_id" in payload and "findings" in payload:
-            on_l4_findings(s, payload)
-        elif "questions" in payload:
-            on_clarification_needed(s, payload)
-        elif "error" in payload and "plan_id" in payload and "project_id" in payload:
-            on_plan_failed(s, payload)
-        elif "reason" in payload and "rejected_by" in payload:
-            on_plan_rejected(s, payload)
-        elif "plan_id" in payload and "project_id" in payload:
-            on_plan_ratifiable(s, payload)
-        elif payload.get("event_type") == "run.failed":
-            on_run_failed(s, payload)
-        else:
-            logger.warning("No intake handler for payload keys: %s", list(payload.keys()))
-
-        # After any event that might free a project, try to drain
-        project_id = payload.get("project_id", "")
-        if project_id:
-            _drain_proposed(project_id)
-
     bus.start_consumer("intake.q", _dispatch, "intake.dispatch")
     logger.info("Consumer started on intake.q (dispatch)")
 
@@ -370,6 +469,10 @@ async def lifespan(app: FastAPI):
     consumer_thread = threading.Thread(target=bus.start_consuming, daemon=True, name="intake-consumer")
     consumer_thread.start()
     logger.info("Consumer pumping thread started")
+
+    sweep_thread = threading.Thread(target=stale_sweep_loop, daemon=True, name="intake-stale-sweep")
+    sweep_thread.start()
+    logger.info("Stale sweep thread started (every %s min)", STALE_SWEEP_INTERVAL_MINUTES)
 
     yield
 
@@ -399,7 +502,7 @@ from pydantic import BaseModel
 
 class FeedbackRequest(BaseModel):
     project_id: str
-    findings: list[dict] = []  # [{what, where[], why}]
+    findings: list[dict[str, Any]] = []  # [{what, where[], why}]
 
 
 @app.post("/intake/feedback")
@@ -408,6 +511,13 @@ def receive_feedback(body: FeedbackRequest):
     on_human_feedback(body.model_dump())
     _drain_proposed(body.project_id)
     return {"status": "accepted", "project_id": body.project_id}
+
+
+@app.post("/intake/sweep")
+def trigger_stale_sweep(max_age_hours: int | None = None):
+    """Manually run the stale-intent sweep (guide 08.6)."""
+    escalated = run_stale_sweep(max_age_hours=max_age_hours)
+    return {"status": "ok", "escalated": escalated}
 
 
 # ── Observability endpoint ───────────────────────────────────────────────
@@ -423,6 +533,114 @@ def list_intents(project_id: str | None = None, status: str | None = None):
     """List intake_intents with optional filters."""
     rows = query_intents(project_id=project_id, status=status)
     return {"intents": rows}
+
+
+class RatifyIntentRequest(BaseModel):
+    auto_submit: bool = True
+    """If True (default), immediately submit the ratified intent as a goal."""
+
+
+@app.post("/intake/intents/{intent_id}/ratify")
+def ratify_intent(intent_id: int, body: RatifyIntentRequest = RatifyIntentRequest()):
+    """Ratify a proposed_project intent, creating a project row.
+
+    Reads the ``proposed_project`` JSONB from the intent, creates a project
+    in the ``projects`` table with the specified name/kind/system_id, and
+    marks the intent as ``ratified``.  If ``auto_submit`` is True, the intent
+    is also submitted to the planner as a goal.
+    """
+    import psycopg
+    import json as _json
+
+    row = load_intent_by_id(intent_id)
+    if not row:
+        return JSONResponse(status_code=404, content={"error": f"intent {intent_id} not found"})
+
+    if row.get("status") not in ("proposed", "awaiting_ratify"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": f"intent {intent_id} has status '{row['status']}' — "
+                f"expected 'proposed' or 'awaiting_ratify'",
+            },
+        )
+
+    proposed = row.get("proposed_project")
+    if not proposed:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"intent {intent_id} has no proposed_project"},
+        )
+
+    pp = proposed
+    if isinstance(pp, str):
+        pp = _json.loads(pp)
+
+    project_name = pp.get("project_name", f"proposal-{intent_id}")
+    kind = pp.get("kind", "service")
+    system_id = pp.get("system_id", row.get("project_id", "default"))
+
+    # Generate a stable project_id from the name
+    import re
+    project_id = re.sub(r"[^a-z0-9_]", "_", project_name.lower().replace(" ", "_"))
+    project_id = re.sub(r"_+", "_", project_id).strip("_")[:63]
+
+    db_url = os.environ["DATABASE_URL"]
+    try:
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                # Create the project row (idempotent)
+                cur.execute(
+                    """INSERT INTO projects (project_id, name, kind, system_id)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (project_id) DO UPDATE
+                       SET name = EXCLUDED.name,
+                           kind = EXCLUDED.kind,
+                           system_id = EXCLUDED.system_id""",
+                    (project_id, project_name, kind, system_id),
+                )
+
+                # Mark the intent as ratified
+                cur.execute(
+                    """UPDATE intake_intents
+                       SET status = 'ratified', updated_at = now()
+                       WHERE id = %s""",
+                    (intent_id,),
+                )
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Failed to ratify intent %d", intent_id)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    logger.info(
+        "Ratified intent %d → project %s (name=%s kind=%s system=%s)",
+        intent_id, project_id, project_name, kind, system_id,
+    )
+
+    result = {
+        "status": "ratified",
+        "project_id": project_id,
+        "project_name": project_name,
+        "kind": kind,
+        "system_id": system_id,
+        "intent_id": intent_id,
+    }
+
+    # Optionally submit as a goal
+    if body.auto_submit:
+        try:
+            row["project_id"] = project_id
+            row["intent_text"] = row.get("intent_text") or (
+                f"Create the {kind} project \"{project_name}\" as part of system {system_id}"
+            )
+            _submit(row)
+            result["submitted"] = True
+        except Exception as exc:
+            logger.warning("Auto-submit failed for ratified intent %d: %s", intent_id, exc)
+            result["submitted"] = False
+            result["submit_error"] = str(exc)[:200]
+
+    return result
 
 
 # ── Main ─────────────────────────────────────────────────────────────────

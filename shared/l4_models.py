@@ -40,6 +40,11 @@ class Finding(BaseModel):
     why: str = Field(min_length=10, description="Observed evidence, not speculation")
     severity: Literal["low", "medium", "high"]
     scenario_id: str = Field(..., description="Every finding must trace to a scenario attempt")
+    possibly_stale: bool = Field(
+        default=False,
+        description="True when the finding names a member whose published state is "
+        "behind master (File 10) — intake must not re-file a fix already on master",
+    )
 
 
 class L4Report(BaseModel):

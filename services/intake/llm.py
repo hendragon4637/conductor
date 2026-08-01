@@ -14,7 +14,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gpt-4o-mini"  # fast & cheap for short clarification answers
+_DEFAULT_MODEL = "deepseek-planning"
 
 
 def call_llm(system: str, user: str, max_tokens: int = 512) -> str:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel
 
@@ -29,8 +29,10 @@ class SourceAdapter(Protocol):
     origin: str
     max_attempts: int = 3
 
-    def normalize(self, payload: dict) -> list[GoalIntent]:
+    def normalize(self, payload: dict[str, Any]) -> list[GoalIntent]:
         """Convert a source event into one or more GoalIntents."""
+        ...
 
     def answer(self, question: str, source_ref: str) -> Answer:
         """Answer a clarification question from available source context, or defer."""
+        ...
