@@ -221,6 +221,25 @@ class TestOnL4ObservedRetry:
         m_spawn.assert_called_once()
         m_clean.assert_not_called()
 
+    def test_retry_cancels_running_conversation_before_preamble(self):
+        wt = tempfile.mkdtemp(prefix="l4_retry_")
+        Path(wt, "l4_scratch").mkdir(parents=True)
+        ns = _ns(attempt=1, conv="conv_1")
+        run = _run(wt, _seeded_dicts())
+        s = _FakeSession(ns, run)
+
+        mock_aionui = MagicMock()
+        with patch("backend.aionui.client.AionUiClient", return_value=mock_aionui), \
+             patch.object(l4_runner, "_create_l4_node_session", return_value="ns_l4_retry2"), \
+             patch.object(l4_runner, "_update_l4_node_session_conv"), \
+             patch.object(l4_runner, "_emit_l4_spawned"):
+            retried = l4_runner._retry_l4_session(s, "db_url", ns, run.id, wt, "missing_file")
+
+        assert retried is True
+        mock_aionui.cancel_conversation.assert_called_once_with("conv_1")
+        call_names = [c[0] for c in mock_aionui.method_calls]
+        assert call_names.index("cancel_conversation") < call_names.index("send_message")
+
     def test_retry_skipped_without_conversation(self):
         wt = tempfile.mkdtemp(prefix="l4_retry_")
         Path(wt, "l4_scratch").mkdir(parents=True)

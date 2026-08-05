@@ -128,6 +128,10 @@ def _post_goal(intent: dict[str, Any]) -> dict[str, Any]:
         "evidence": intent.get("evidence", []),
         "project_id": intent["project_id"],
     }
+    if intent.get("spec"):
+        payload["spec"] = intent["spec"]
+    if intent.get("quality_intent"):
+        payload["quality_intent"] = intent["quality_intent"]
     resp = httpx.post(f"{planner_url}/goal", json=payload, timeout=120.0)
     resp.raise_for_status()
     return resp.json()
@@ -193,6 +197,10 @@ def _submit(intent: dict[str, Any]) -> str | None:
         return None
 
     row = insert_intent(intent, status="submitted")
+    if intent.get("spec"):
+        row["spec"] = intent["spec"]
+    if intent.get("quality_intent"):
+        row["quality_intent"] = intent["quality_intent"]
     try:
         resp = _post_goal(row)
         plan_id = resp.get("plan_id", "")
@@ -608,6 +616,17 @@ def ratify_intent(intent_id: int, body: RatifyIntentRequest = RatifyIntentReques
                     (intent_id,),
                 )
             conn.commit()
+
+        # Create dependency edges (same-system, post-commit — add_dependency
+        # opens its own connection)
+        for dep_id in pp.get("depends_on", []) or []:
+            try:
+                from shared.models import add_dependency
+                add_dependency(project_id, dep_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to add dependency %s → %s: %s", project_id, dep_id, exc,
+                )
     except Exception as exc:
         logger.exception("Failed to ratify intent %d", intent_id)
         return JSONResponse(status_code=500, content={"error": str(exc)})
@@ -633,6 +652,10 @@ def ratify_intent(intent_id: int, body: RatifyIntentRequest = RatifyIntentReques
             row["intent_text"] = row.get("intent_text") or (
                 f"Create the {kind} project \"{project_name}\" as part of system {system_id}"
             )
+            if pp.get("spec"):
+                row["spec"] = pp["spec"]
+            if pp.get("quality_intent"):
+                row["quality_intent"] = pp["quality_intent"]
             _submit(row)
             result["submitted"] = True
         except Exception as exc:

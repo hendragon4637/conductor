@@ -110,7 +110,10 @@ def write_project_manifest(
         _std = _get_active_standard(_slug) if _slug else None
         _subdir = c.get("subdir", ".")
         _entry = (
-            component_manifest_entry(_std, params, _subdir)
+            component_manifest_entry(
+                _std, params, _subdir,
+                variant=c.get("variant") or None,
+            )
             if _std
             else {
                 "standard_slug": _slug,
@@ -167,7 +170,8 @@ def _get_standard_by_id(standard_id: str) -> dict[str, Any] | None:
     with db_conn() as c:
         row = c.execute(
             """SELECT id, slug, name, conventions_md,
-                      scaffold_ref, artifact_spec, service_template, version
+                      scaffold_ref, artifact_spec, service_template, version,
+                      variants
                FROM domain_standards
                WHERE id = %s AND active = true""",
             (str(standard_id),),
@@ -337,7 +341,8 @@ def _get_active_standard(slug: str) -> dict[str, Any] | None:
     with db_conn() as c:
         row = c.execute(
             """SELECT id, slug, name, conventions_md,
-                      scaffold_ref, artifact_spec, service_template, version
+                      scaffold_ref, artifact_spec, service_template, version,
+                      variants
                FROM domain_standards
                WHERE slug = %s AND active = true""",
             (slug,),
@@ -374,6 +379,7 @@ def component_manifest_entry(
     std: dict[str, Any],
     params: dict[str, str],
     subdir: str,
+    variant: str | None = None,
 ) -> dict[str, Any]:
     """Build one manifest component entry with everything L4 needs (guide 03.3).
 
@@ -382,6 +388,9 @@ def component_manifest_entry(
     generation-time tokens substituted; ``${PORT}``/``${SCRIPT}`` survive
     untouched for runtime resolution.
 
+    ``variant`` pins the curated design variant (guide 02.6) so every later
+    goal in the project reuses it instead of re-picking.
+
     When the standard has no ``service_template`` the entry degrades to
     ``runnable: false`` with empty ``commands`` — L4 then reports ``blocked``
     with a finding rather than crashing.
@@ -389,7 +398,7 @@ def component_manifest_entry(
     t = std.get("service_template") or {}
     artifact_spec = std.get("artifact_spec") or {}
     delivery_form = (artifact_spec.get("delivery_spec") or {}).get("form", "")
-    return {
+    entry: dict[str, Any] = {
         "subdir": subdir,
         "standard_slug": std.get("slug", ""),
         "standard_id": str(std.get("id", "")),
@@ -406,6 +415,9 @@ def component_manifest_entry(
             for k, v in (t.get("commands") or {}).items()
         },
     }
+    if variant:
+        entry["variant"] = variant
+    return entry
 
 
 # Domain → standard slug(s) mapping.
@@ -419,7 +431,7 @@ _DOMAIN_STANDARD_MAP: dict[str, list[str]] = {
     "data_pipeline": ["python-backend"],
     "gui_app": ["python-gui"],
     "embedded_firmware": ["arduino"],
-    "visual_design": ["react-frontend", "design-layout"],
+    "visual_design": ["react-frontend", "design-layout-v2"],
 }
 
 
@@ -478,11 +490,16 @@ def _copy_scaffold_tree(src: Path, dst: Path) -> None:
     """Copy a scaffold directory tree to *dst*, overwriting any existing content.
 
     Skips ``.gitkeep`` files (preserve their presence in the source but allow
-    the target to add its own).  Creates parent dirs as needed.
+    the target to add its own).  Skips the top-level ``variants/`` library
+    (guide 02.7) — variant files are seeded individually per selected variant
+    in :func:`generate_workspace`, never bulk-copied into a project.
+    Creates parent dirs as needed.
     """
     dst.mkdir(parents=True, exist_ok=True)
     for item in src.rglob("*"):
         rel = item.relative_to(src)
+        if rel.parts[0] == "variants":
+            continue
         target = dst / rel
         if item.is_dir():
             target.mkdir(parents=True, exist_ok=True)
@@ -491,12 +508,129 @@ def _copy_scaffold_tree(src: Path, dst: Path) -> None:
             shutil.copy2(item, target)
 
 
+def _seed_variant_files(src: Path, dst: Path, variant: str) -> None:
+    """Seed a selected design variant's files into a component subdir (guide 02.7).
+
+    Copies ``variants/<variant>/{DESIGN.md,tokens.css,reference.html}`` from the
+    scaffold library (``src``) into the component (``dst``): ``DESIGN.md`` at the
+    subdir root, ``tokens.css`` + ``reference.html`` under ``work/``.  The variant
+    files override the scaffold's generic stubs (a variant system replaces the
+    neutral defaults).  Project-adjusted files are protected at the caller by the
+    existing-subdir skip (guide 03.2) — regeneration never reaches this helper.
+    """
+    lib = src / "variants" / variant
+    for name, rel in (
+        ("DESIGN.md", dst / "DESIGN.md"),
+        ("tokens.css", dst / "work" / "tokens.css"),
+        ("reference.html", dst / "work" / "reference.html"),
+    ):
+        source = lib / name
+        if not source.exists():
+            logger.warning("Variant %s missing %s — skipping seed", variant, name)
+            continue
+        rel.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, rel)
+
+
+def handoff_design_tokens(
+    project_dir: str | Path,
+    worktree: str | Path,
+    materialized: list[dict[str, str]],
+    dep_shas: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Copy the design dependency's tokens into a frontend component (guide 03.3).
+
+    Called at spawn time AFTER deps are materialized (``deps/<dep_name>/``
+    symlink or copy).  Finds the design dep by its ``work/tokens.css``, copies
+    that file into the frontend component's ``src/styles/tokens.css`` and the
+    shared ``check_tokens.py`` into its ``scripts/``, then records the token
+    source sha on the project manifest's frontend component entry.
+
+    The copy (never an ``@import`` across the ``deps/`` boundary) is required
+    because ``deps/`` is read-only and gitignored — a relative import would
+    break any build outside the worktree.
+
+    Returns the updated frontend component entry (with ``token_source``), or
+    ``None`` when the project has no frontend component or no design dep.
+    """
+    project_dir = Path(project_dir)
+    worktree = Path(worktree)
+
+    manifest = read_project_manifest(project_dir)
+    if not manifest:
+        return None
+    frontend = next(
+        (
+            c
+            for c in manifest.get("components", [])
+            if "frontend" in c.get("standard_slug", "")
+        ),
+        None,
+    )
+    if frontend is None:
+        return None
+
+    design_dep = next(
+        (
+            m
+            for m in materialized
+            if (Path(m["path"]) / "work" / "tokens.css").is_file()
+        ),
+        None,
+    )
+    if design_dep is None:
+        return None
+
+    src_tokens = Path(design_dep["path"]) / "work" / "tokens.css"
+    fe_root = worktree / frontend.get("subdir", ".")
+    styles_dir = fe_root / "src" / "styles"
+    scripts_dir = fe_root / "scripts"
+    styles_dir.mkdir(parents=True, exist_ok=True)
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_tokens, styles_dir / "tokens.css")
+    # The gate script must be present for the frontend's gates.sh to enforce
+    # the same token rules against its own copy of the tokens.
+    src_gate = Path(design_dep["path"]) / "scripts" / "check_tokens.py"
+    if src_gate.is_file():
+        shutil.copy2(src_gate, scripts_dir / "check_tokens.py")
+
+    sha = ""
+    if dep_shas:
+        sha = dep_shas.get(design_dep["dep_project_id"], "")
+    if not sha:
+        try:
+            sha = subprocess.run(
+                ["git", "-C", str(Path(design_dep["path"])), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+        except Exception:
+            sha = "unknown"
+
+    frontend["token_source"] = {
+        "sha": sha,
+        "dep": design_dep["dep_name"],
+        "path": "deps/design/work/tokens.css",
+    }
+    for i, c in enumerate(manifest["components"]):
+        if c.get("subdir") == frontend.get("subdir"):
+            manifest["components"][i] = frontend
+            break
+    path = project_dir / ".conductor" / "workspace.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    logger.info(
+        "Handed off design tokens → %s (sha=%s)",
+        styles_dir / "tokens.css", sha or "unknown",
+    )
+    return frontend
+
+
 def generate_workspace(
     project_dir: str | Path,
     standard_slug: str,
     params: dict[str, str] | None = None,
     subdir: str = ".",
     defer_commit: bool = False,
+    variant: str | None = None,
 ) -> dict[str, Any]:
     """Generate a scaffold workspace in *project_dir* from a domain standard.
 
@@ -507,8 +641,11 @@ def generate_workspace(
     3. Substitutes ``__APP__`` / ``__PKG__`` / ``__PROJECT__`` in all contents
        and path segments.
     4. Writes the standard's ``conventions_md`` into ``AGENTS.md``.
-    5. Writes ``.conductor/workspace.json`` manifest.
-    6. Git-commits the result — unless ``defer_commit=True`` (caller commits).
+    5. Seeds the selected design variant's files when ``variant`` is given
+       (guide 02.7): ``DESIGN.md`` → subdir root, ``tokens.css`` +
+       ``reference.html`` → ``work/``.  Never overwrites an existing target.
+    6. Writes ``.conductor/workspace.json`` manifest.
+    7. Git-commits the result — unless ``defer_commit=True`` (caller commits).
 
     Args:
         project_dir: Root project directory (git repo).
@@ -518,14 +655,16 @@ def generate_workspace(
         subdir: Subdirectory within the project to generate into.
         defer_commit: When True, skip the git add/commit so the caller can
             commit all scaffolds in a single atomic commit.
+        variant: Curated design variant to seed (e.g. ``"editorial-serif"``).
 
     Returns:
         Manifest dict with keys ``standard_slug``, ``standard_id``, ``version``,
         ``params``, ``subdir``, ``generated_at``.
 
     Raises:
-        ValueError: When the standard is not found, has no scaffold_ref, or
-            the scaffold directory does not exist on disk.
+        ValueError: When the standard is not found, has no scaffold_ref, the
+            scaffold directory does not exist on disk, or the requested variant
+            is not in the standard's library.
     """
     project_dir = Path(project_dir).resolve()
     std = _get_active_standard(standard_slug)
@@ -539,6 +678,13 @@ def generate_workspace(
     src = Path(scaffold_ref)
     if not src.exists():
         raise ValueError(f"Scaffold directory does not exist: {src}")
+
+    variants_lib = std.get("variants") or {}
+    if variant is not None and variant not in variants_lib:
+        valid = ", ".join(sorted(variants_lib.keys())) or "(none)"
+        raise ValueError(
+            f"Unknown variant '{variant}' for {standard_slug}; valid: {valid}"
+        )
 
     # Derive params when not provided
     if params is None:
@@ -562,7 +708,11 @@ def generate_workspace(
     if conventions:
         (dst / "AGENTS.md").write_text(conventions, encoding="utf-8")
 
-    # 4. Write workspace manifest
+    # 4. Seed the selected design variant (guide 02.7) — seed, not dependency.
+    if variant:
+        _seed_variant_files(src, dst, variant)
+
+    # 5. Write workspace manifest
     manifest: dict[str, Any] = {
         "standard_slug": standard_slug,
         "standard_id": str(std["id"]),
@@ -571,13 +721,15 @@ def generate_workspace(
         "subdir": subdir,
         "generated_at": datetime.datetime.now().isoformat(),
     }
+    if variant:
+        manifest["variant"] = variant
     conductor_dir = dst / ".conductor"
     conductor_dir.mkdir(parents=True, exist_ok=True)
     (conductor_dir / "workspace.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8",
     )
 
-    # 5. Commit to master (unless caller defers for batch commit)
+    # 6. Commit to master (unless caller defers for batch commit)
     if not defer_commit:
         subprocess.run(
             ["git", "-C", str(project_dir), "add", "-A"],
@@ -850,7 +1002,12 @@ def create_planning_worktree(
                 _scaffold_committed = True  # still count as committed (already exists)
                 continue
             try:
-                generate_workspace(project_dir, slug, subdir=subdir, defer_commit=multi)
+                generate_workspace(
+                    project_dir, slug,
+                    subdir=subdir,
+                    defer_commit=multi,
+                    variant=comp.get("variant") or None,
+                )
                 logger.info(
                     "Greenfield scaffold generated for component=%s subdir=%s",
                     slug, subdir,
@@ -903,13 +1060,23 @@ def create_planning_worktree(
     _root_components: list[dict[str, Any]] = []
     if components:
         _root_components = [
-            {"standard_slug": c.get("standard_slug", ""), "subdir": c.get("subdir", "."), "domain": c.get("domain", "")}
+            {
+                "standard_slug": c.get("standard_slug", ""),
+                "subdir": c.get("subdir", "."),
+                "domain": c.get("domain", ""),
+                "variant": c.get("variant"),
+            }
             for c in components if c.get("subdir", ".") != "."
         ]
         # Always include the first component — even for legacy root projects
         if not _root_components:
             _root_components = [
-                {"standard_slug": components[0].get("standard_slug", ""), "subdir": ".", "domain": components[0].get("domain", "")}
+                {
+                    "standard_slug": components[0].get("standard_slug", ""),
+                    "subdir": ".",
+                    "domain": components[0].get("domain", ""),
+                    "variant": components[0].get("variant"),
+                }
             ]
     elif _scaffold_committed:
         # Legacy scaffold — derive from what was generated
@@ -980,6 +1147,14 @@ def create_planning_worktree(
     # Emit workspace picture — a bounded view of the scaffold / existing code the
     # planner can use to understand the workspace structure without scanning files.
     emit_workspace_picture(worktree_path)
+
+    # Copy project references into .conductor/references/ (gitignored, read-only)
+    try:
+        from backend.planning.references import copy_references, gitignore_references
+        copy_references(project_id, worktree_path)
+        gitignore_references(worktree_path)
+    except Exception as exc:
+        logger.warning("Reference copy skipped for %s: %s", project_id, exc)
 
     logger.info("Planning worktree created at %s", worktree_path)
     return str(worktree_path)
@@ -1056,7 +1231,7 @@ def _write_planner_opencode_json(worktree: Path, families: list[str] | None = No
         "$schema": "https://opencode.ai/config.json",
         "model": model,
         "permission": {
-            "edit": "allow",
+            "edit": {"**": "allow", ".conductor/references/**": "deny"},
             "bash": "allow",
         },
     }
@@ -1073,7 +1248,10 @@ def _write_planner_opencode_json(worktree: Path, families: list[str] | None = No
 def _roster_slate() -> list[dict[str, Any]]:
     """Return all active agent_configs with their capabilities, for the brief.
 
-    Each entry: ``{"agent_config_id": "...", "capabilities": [...], "backend": "..."}``
+    Each entry: ``{"agent_config_id": "...", "capabilities": [...], "backend": "...",
+    "group_id": "...", "description": "..."}`` — the description is taken from the
+    harness-neutral ``raw_definition`` frontmatter and capped at 500 chars so the
+    static NODE_BRIEF.md roster stays compact.
     """
     from backend.db.queries import conn as db_conn
 
@@ -1082,16 +1260,21 @@ def _roster_slate() -> list[dict[str, Any]]:
             """
             SELECT agent_config_id, COALESCE(new_capabilities, '[]'::jsonb) AS caps,
                    COALESCE(execution->>'backend', 'opencode') AS backend,
-                   group_id
+                   group_id,
+                   COALESCE(raw_definition->>'description', '') AS description
             FROM agent_configs
             WHERE active = true
             ORDER BY agent_config_id
             """
         ).fetchall()
     return [
-        {"agent_config_id": r["agent_config_id"], "capabilities": r["caps"] or [],
-         "backend": r["backend"] or "opencode",
-         "group_id": r["group_id"] or ""}
+        {
+            "agent_config_id": r["agent_config_id"],
+            "capabilities": r["caps"] or [],
+            "backend": r["backend"] or "opencode",
+            "group_id": r["group_id"] or "",
+            "description": r["description"][:500],
+        }
         for r in rows
     ]
 
@@ -1486,6 +1669,20 @@ WORKTREE: {worktree}
     ``.plan/`` files — the list includes all scaffolded nodes and checks."""
 
     brief += _build_aion_files_block(worktree)
+
+    # ── REFERENCES (read-only context material, when present) ───────────
+    refs_dir = Path(worktree) / ".conductor" / "references"
+    if refs_dir.is_dir():
+        ref_readmes = sorted(
+            str(p.relative_to(Path(worktree)))
+            for p in refs_dir.rglob("README.md")
+        )
+        if ref_readmes:
+            brief += (
+                "\nREFERENCES (read-only context — do not edit):\n"
+                + "\n".join(f"  - Read {rp} for context summary of that reference." for rp in ref_readmes)
+                + "\n"
+            )
 
     return brief
 

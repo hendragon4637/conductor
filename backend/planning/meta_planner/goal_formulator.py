@@ -14,8 +14,11 @@ Multi-component change (2026-07):
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -41,6 +44,10 @@ class Component(BaseModel):
     subdir: str = Field(
         default="",
         description="Worktree subdirectory for this component (from default_subdir)",
+    )
+    variant: str | None = Field(
+        default=None,
+        description="Curated design variant pinned for this component (design standards only)",
     )
 
 
@@ -218,6 +225,116 @@ def _components_valid(
     return issues
 
 
+class VariantChoice(BaseModel):
+    """LLM pick of a curated design variant from a standard's variant library."""
+    variant: str = Field(description="Name of the chosen variant, exactly as listed in the menu")
+    rationale: str = Field(description="One-sentence reason for the pick, tied to the goal spec")
+
+
+def select_variant(
+    raw_input: str,
+    spec: str,
+    std: dict[str, Any],
+) -> str | None:
+    """Pick a curated design variant for a standard (guide 02.6).
+
+    Deterministic only where possible: standards without variants return
+    ``None`` (strong-oracle standards seed nothing), and a single-variant
+    library returns its only option.  Anything else is delegated to the LLM,
+    which reads the raw goal text + spec and picks from the variant blurbs —
+    the LLM honors an explicit user preference naturally, no keyword matching.
+    Returns ``None`` for standards with no variants so callers skip seeding.
+    """
+    variants = std.get("variants") or {}
+    if not variants:
+        return None
+    names = list(variants.keys())
+    if len(names) == 1:
+        return names[0]
+    # LLM pick — tiny structured call over the variant blurbs (max 5)
+    lines = "\n".join(
+        f"  - {name}: {variants[name].get('blurb', '')}" for name in names
+    )
+    prompt = (
+        "Pick the ONE design variant that best fits this project.\n"
+        f"Variants (blurbs state what each is NOT for):\n{lines}\n\n"
+        f"Raw user goal:\n{raw_input or '(not provided)'}\n\n"
+        f"Project spec:\n{spec or '(not provided)'}\n\n"
+        "Rules:\n"
+        "- Choose exactly one variant name from the list above. NEVER invent a name.\n"
+        "- If the user explicitly names a style, follow it when it matches a variant.\n"
+        "- If the user names a style that is NOT on the list, pick the closest fit and say so in the rationale.\n"
+        "Return {\"variant\": \"<exact name from the list>\", \"rationale\": \"<one sentence>\"}."
+    )
+    try:
+        choice = call_llm_structured(prompt, schema=VariantChoice)
+        picked = choice.variant if isinstance(choice, VariantChoice) else None
+    except Exception:
+        logger.exception("Variant LLM pick failed — falling back to first variant")
+        picked = None
+    if picked in names:
+        return picked
+    logger.warning(
+        "Variant LLM returned unknown '%s' — falling back to first (%s)", picked, names[0]
+    )
+    return names[0]
+
+
+def _pinned_variant_for(
+    project_id: str,
+    standard_slug: str,
+    subdir: str,
+) -> str | None:
+    """Return the manifest-pinned variant for a component, if any (guide 02.6).
+
+    A second design goal in the same project reuses the variant the first
+    goal pinned, so the design system stays consistent instead of re-picking.
+    Reads ``<workspace_root>/<project_id>/.conductor/workspace.json``; returns
+    ``None`` when the project has no manifest or the component has no pin.
+    """
+    workspace_root = os.environ.get("WORKSPACE_ROOT", "/opt/aipc/conductor/workspace")
+    manifest_path = Path(workspace_root) / project_id / ".conductor" / "workspace.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    for comp in manifest.get("components", []):
+        if comp.get("standard_slug") == standard_slug and comp.get("subdir") == subdir:
+            return comp.get("variant")
+    return None
+
+
+def _pin_variants(
+    components: list[Component],
+    raw_input: str,
+    spec: str,
+    project_id: str | None = None,
+) -> None:
+    """Pin a variant onto every component whose standard has a variant library.
+
+    Used post-``build_components``: each design component gets its ``variant``
+    set via :func:`select_variant` so the plan carries the choice, the manifest
+    records it, and a later goal in the same project reuses it (guide 02.6).
+    When ``project_id`` is given and its manifest already pins a variant for
+    the component, that pin is reused instead of re-picking.
+    """
+    for comp in components:
+        std = get_standard(comp.standard_slug)
+        if not std or not (std.get("variants") or {}):
+            continue
+        if project_id:
+            pinned = _pinned_variant_for(project_id, comp.standard_slug, comp.subdir)
+            if pinned:
+                comp.variant = pinned
+                logger.info(
+                    "Reusing pinned variant %s for %s (%s)", pinned, comp.standard_slug, comp.subdir,
+                )
+                continue
+        comp.variant = select_variant(raw_input, spec, std)
+
+
 def build_components(standard_ids: list[str]) -> list[Component]:
     """Build Component list from standard slugs with deterministic subdirs."""
     # Fetch default_subdir for each slug
@@ -264,7 +381,7 @@ def metagoal_from_stored(data: dict[str, Any]) -> MetaGoal:
             "cli_script": "cli-tool",
             "data_pipeline": "python-etl",
             "research_report": "tech-docs",
-            "visual_design": "design-layout",
+            "visual_design": "design-layout-v2",
             "gui_app": "python-gui",
             "embedded_firmware": "arduino",
             "generic": "planning",
@@ -468,6 +585,7 @@ def formulate(
         )
     else:
         comps = build_components(fo.standard_ids)
+        _pin_variants(comps, raw_input, fo.spec, project_id=project_id)
         mg = MetaGoal(
             goal=fo.goal, spec=fo.spec, quality_intent=fo.quality_intent,
             needs_clarification=fo.needs_clarification,

@@ -108,6 +108,9 @@
 | **Adjustment-delta** | `compute_adjustments()` git-diffs compose between runs → semantic delta → recurring-adjustment finding when `same_adjustment_in_last_n_runs()` (window `RECURRENCE_WINDOW`=3) matches, escalated even on pass verdicts. |
 | **Possibly-stale finding** | `tag_possibly_stale()` tags findings naming members whose published state (per `_source.json` sha) lags master — intake drops them so fixes already on master aren't re-filed. |
 | **Partial-scope run** | An L4 system run with an explicit `members` debug subset: `runs.partial_scope=true`, never blocked by missing members, publishes nothing. |
+| **References store** | Per-project immutable reference material under `references/<project_id>/` (root `REFERENCES_ROOT`, default `/opt/aipc/conductor/references`) with a `README.md` validity gate. Copied into planning + execution worktrees at `.conductor/references/`, gitignored (never committed), and made read-only via a `.conductor/references/**` deny-edit rule. `has_references(project_id)` guards all wiring; a missing/invalid store is a silent no-op. |
+| **References README gate** | A project's references store is valid only when the directory exists AND contains a `README.md` (parallels the SKILL.md / WORKSPACE.md "structured file = valid entity" convention). Without it, `has_references()` returns False and no copy/deny-write/brief-pointer happens. |
+| **REFERENCES brief block** | The conditional section `planning_brief()` appends to the planning brief when references were copied: `REFERENCES (read-only context — do not edit):` followed by each `README.md` relative path under `.conductor/references/`. |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -361,6 +364,14 @@
 - Staleness: `tag_possibly_stale()` marks findings about members whose published state lags master; intake drops `possibly_stale` findings. Recurring adjustments (`same_adjustment_in_last_n_runs`, window 3) escalate a finding even on pass verdicts.
 - `_FILE_FLATTEN` maps `.conductor/workspace.json` → member `workspace.json`; other files copy by basename. Artifacts >2 MB (`ARTIFACT_CAP_BYTES`) become `.ref` pointers, not copies.
 
+## References store
+- `has_references(project_id)` is the single guard: returns True only when `references/<project_id>/` exists AND has a `README.md`. All reference wiring is conditional on it — no store = silent no-op, never an error.
+- Copy is one-way: `copy_references()` copies `references/<project_id>/` → worktree `.conductor/references/` in BOTH planning (`create_planning_worktree`) and execution (`assemble_for_spawn`) worktrees. `.git` is always excluded (`shutil.ignore_patterns(".git")`) — context, not history.
+- References are gitignored, never committed: execution worktrees get `.conductor/references/` via `worktree_gitignore_lines()` (`.conductor/` is in `INFRA_EXCLUDES`); planning worktrees call `gitignore_references()` because `_unignore_plan_dotdir()` un-ignores `.conductor/` there.
+- Read-only enforcement: planning `opencode.json` always carries `"edit": {"**": "allow", ".conductor/references/**": "deny"}`; execution applies `_deny_references_edit()` ONLY when `has_references()` so reference-less projects keep identical permissions.
+- `planning_brief()` appends the conditional `REFERENCES (read-only context — do not edit):` block listing each README.md relative path only when `.conductor/references/` exists in the worktree.
+- New stores are seeded by humans at `references/<project_id>/README.md`; there is no pipeline that creates them.
+
 ## Key commands
 # Key Commands (Conductor development)
 
@@ -415,6 +426,20 @@ Notes:
 /opt/aipc/conductor/.memory/assemble.sh          # rebuild AGENTS.md from durable sources
 /opt/aipc/conductor/.memory/repomix_refresh.sh    # refresh repo structure snapshot
 /opt/aipc/conductor/.memory/obsidian_repomix_export.sh   # export chunked repomix notes into Obsidian
+```
+
+## References store
+```bash
+# Seed reference material for a project (README.md is the validity gate)
+mkdir -p /opt/aipc/conductor/references/<project_id>
+cp -r /path/to/docs /opt/aipc/conductor/references/<project_id>/
+echo "# <Project> reference context" > /opt/aipc/conductor/references/<project_id>/README.md
+
+# Verify a project's store is active (README gate)
+ls /opt/aipc/conductor/references/<project_id>/README.md
+
+# Check the store is not committed / not in watcher scope (auto via INFRA_EXCLUDES)
+grep -r ".conductor/references" workspace/<project_id>.<run-id>/.gitignore 2>/dev/null
 ```
 
 ## Neo4j (product memory)

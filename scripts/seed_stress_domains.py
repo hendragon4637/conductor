@@ -120,7 +120,7 @@ CONTENT_STUDIO = [
             {"id": "prompt_fit", "dimension": "matches brief", "kind": "subjective"},
             {"id": "aesthetic", "dimension": "visually coherent", "kind": "subjective"},
         ],
-        "required_tools": ["image_gen", "write_file"],
+        "required_tools": ["write_file"],
     },
     {
         "name": "music_generation",
@@ -142,7 +142,7 @@ CONTENT_STUDIO = [
             {"id": "hierarchy", "dimension": "clear visual hierarchy", "kind": "subjective"},
             {"id": "brief_fit", "dimension": "matches brief", "kind": "subjective"},
         ],
-        "required_tools": ["write_file", "image_gen"],
+        "required_tools": ["write_file"],
     },
     {
         "name": "content_review",

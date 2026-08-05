@@ -1,0 +1,99 @@
+/* design-layout-v2/variants/editorial-serif/tokens.css
+ * Regenerated from DESIGN.md (authoritative per File 01 verdict) — the
+ * upstream open-design bundle carried a conflicting warm-paper tokens.css
+ * whose values matched neither this DESIGN.md nor its components.html.
+ * Palette: DESIGN.md §2 (8 colors).  Type: §3 scale 14/16/18/24/32/40,
+ * Gelasio display + Ubuntu Mono.  Spacing: §4 8pt baseline grid.
+ */
+
+:root {
+  /* ─── Surface (light canvas) ─────────────────────────────────────
+   * Editorial is a paper-light system: white canvas, near-white tonal
+   * surfaces.  DESIGN.md §2 Surface #FFFFFF carries the large blocks. */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-warm: #f1f1f1;
+
+  /* ─── Foreground ramp ────────────────────────────────────────────
+   * §2 Primary #111111 (CTA emphasis) and Text #111827 (body copy) —
+   * both near-black, so the two tiers bind to ink tones, not a color
+   * ladder. */
+  --fg: #111111;
+  --fg-2: #111827;
+  --muted: rgba(17, 24, 39, 0.65);
+  --meta: #111827;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #f1f1f1;
+  --border-soft: #f1f1f1;
+
+  /* ─── Accent ─────────────────────────────────────────────────────
+   * §2 Primary #111111 is the single CTA emphasis — a journal's accent
+   * is its ink, not a chromatic hue. */
+  --accent: #111111;
+  --accent-on: #ffffff;
+  --accent-hover: color-mix(in oklab, var(--accent), black 10%);
+  --accent-active: color-mix(in oklab, var(--accent), black 16%);
+
+  /* ─── Semantic (all declared in §2) ────────────────────────────── */
+  --success: #16a34a;
+  --warn: #d97706;
+  --danger: #dc2626;
+
+  /* ─── Typography ─────────────────────────────────────────────────
+   * §3: primary=Gelasio, display=Gelasio, mono=Ubuntu Mono. */
+  --font-display: "Gelasio", Georgia, "Times New Roman", serif;
+  --font-body: "Gelasio", Georgia, "Times New Roman", serif;
+  --font-mono: "Ubuntu Mono", ui-monospace, Menlo, monospace;
+
+  /* Type scale — §3 "14/16/18/24/32/40". */
+  --text-xs: 14px;
+  --text-sm: 16px;
+  --text-base: 18px;
+  --text-lg: 24px;
+  --text-xl: 32px;
+  --text-2xl: 40px;
+  --text-3xl: 40px;
+  --text-4xl: 40px;
+
+  --leading-body: 1.6;
+  --leading-tight: 1.15;
+  --tracking-display: -0.02em;
+
+  /* ─── Spacing — §4 8pt baseline grid ───────────────────────────── */
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 32px;
+  --space-5: 40px;
+  --space-6: 48px;
+  --space-8: 64px;
+  --space-12: 96px;
+
+  --section-y-desktop: 96px;
+  --section-y-tablet: 64px;
+  --section-y-phone: 48px;
+
+  /* ─── Radius — restrained, bookish ─────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — flat; typography carries hierarchy ───────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: none;
+
+  --focus-ring: 0 0 0 4px rgba(17, 24, 39, 0.24);
+
+  --motion-fast: 150ms;
+  --motion-base: 250ms;
+  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ─── Layout — measure for long-form reading ───────────────────── */
+  --container-max: 720px;
+  --container-gutter-desktop: 24px;
+  --container-gutter-tablet: 16px;
+  --container-gutter-phone: 12px;
+}

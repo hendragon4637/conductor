@@ -1,0 +1,98 @@
+/* design-layout-v2/variants/brutalism/tokens.css
+ * Regenerated from DESIGN.md (authoritative per File 01 verdict) — the
+ * upstream open-design bundle's tokens.css declared a loud-yellow palette
+ * (#ffef5a accent, #f5f1e8 bg) that contradicts its own DESIGN.md §2
+ * (Primary #DD614C, Surface #FFFFFF, Text #111827).
+ * Type: §3 Darker Grotesque (primary+display), JetBrains Mono.  Spacing: §4
+ * 4/8/12/16/24/32.  Motion: §7 150–250ms.
+ */
+
+:root {
+  /* ─── Surfaces — §2 Surface #FFFFFF for backgrounds and cards ── */
+  --bg: #ffffff;
+  --surface: #ffffff;
+
+  /* ─── Foreground — §2 Text #111827 for body copy ─────────────── */
+  --fg: #111827;
+  --fg-2: #374151;
+  --muted: #6b7280;
+  --meta: #111827;
+
+  /* ─── Border — hard black lines (brutalist signature) ────────── */
+  --border: #111827;
+  --border-soft: #d1d5db;
+
+  /* ─── Accent — §2 Primary #DD614C for CTA emphasis ─────────────
+   * --accent-on is dark (#111827) because white fails WCAG AA on
+   * #DD614C (3.57:1); dark text on terracotta passes at 4.97:1. */
+  --accent: #dd614c;
+  --accent-on: #111827;
+  --accent-hover: color-mix(in oklab, var(--accent), black 12%);
+  --accent-active: color-mix(in oklab, var(--accent), black 20%);
+
+  /* ─── Semantic — §2 token foundation colors ───────────────────── */
+  --success: #16a34a;
+  --warn: #d97706;
+  --danger: #dc2626;
+
+  /* ─── Typography — §3 Darker Grotesque / JetBrains Mono ──────── */
+  --font-display: "Darker Grotesque", Arial Black, Impact, sans-serif;
+  --font-body: "Darker Grotesque", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  /* Type scale — §3 desktop-first expressive scale:
+   * Display 88 / Hero 64 / Section 42 / Feature 28 / Lead 20 /
+   * Body 16 / Nav 14 / Caption 12. */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 28px;
+  --text-2xl: 42px;
+  --text-3xl: 64px;
+  --text-4xl: 88px;
+
+  --leading-body: 1.35;
+  --leading-tight: 0.98;
+  --tracking-display: -0.02em;
+
+  /* ─── Spacing — §4 4/8/12/16/24/32 (+48 section) ──────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --section-y-desktop: 88px;
+  --section-y-tablet: 64px;
+  --section-y-phone: 44px;
+
+  /* ─── Radius — sharp 0px edges, pill for chips ───────────────── */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — §6 hard offset shadow ───────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: 8px 8px 0 var(--fg);
+
+  --focus-ring: 0 0 0 4px var(--accent);
+
+  --motion-fast: 150ms;
+  --motion-base: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout — §5 clear content blocks, obvious hierarchy ────── */
+  --container-max: 1160px;
+  --container-gutter-desktop: 36px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+  --measure-hero: 880px;
+  --measure-prose: 640px;
+  --measure-copy: 560px;
+}

@@ -248,3 +248,11 @@
 - Worksystem opencode.json permits edits (compose.yml edit is the adjustment signal) but denies `git *`, `sudo *`, `rm -rf *`, webfetch, websearch.
 - Staleness: `tag_possibly_stale()` marks findings about members whose published state lags master; intake drops `possibly_stale` findings. Recurring adjustments (`same_adjustment_in_last_n_runs`, window 3) escalate a finding even on pass verdicts.
 - `_FILE_FLATTEN` maps `.conductor/workspace.json` → member `workspace.json`; other files copy by basename. Artifacts >2 MB (`ARTIFACT_CAP_BYTES`) become `.ref` pointers, not copies.
+
+## References store
+- `has_references(project_id)` is the single guard: returns True only when `references/<project_id>/` exists AND has a `README.md`. All reference wiring is conditional on it — no store = silent no-op, never an error.
+- Copy is one-way: `copy_references()` copies `references/<project_id>/` → worktree `.conductor/references/` in BOTH planning (`create_planning_worktree`) and execution (`assemble_for_spawn`) worktrees. `.git` is always excluded (`shutil.ignore_patterns(".git")`) — context, not history.
+- References are gitignored, never committed: execution worktrees get `.conductor/references/` via `worktree_gitignore_lines()` (`.conductor/` is in `INFRA_EXCLUDES`); planning worktrees call `gitignore_references()` because `_unignore_plan_dotdir()` un-ignores `.conductor/` there.
+- Read-only enforcement: planning `opencode.json` always carries `"edit": {"**": "allow", ".conductor/references/**": "deny"}`; execution applies `_deny_references_edit()` ONLY when `has_references()` so reference-less projects keep identical permissions.
+- `planning_brief()` appends the conditional `REFERENCES (read-only context — do not edit):` block listing each README.md relative path only when `.conductor/references/` exists in the worktree.
+- New stores are seeded by humans at `references/<project_id>/README.md`; there is no pipeline that creates them.

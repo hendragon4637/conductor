@@ -280,6 +280,91 @@ class TestRubricPresets:
         assert "quality" in rubric_ids
 
 
+# ── Single-Call Judge Tests ─────────────────────────────────────────────────
+
+def _single_call_item(check_id: str, score: float, what: str = "ok",
+                      where: str = "app.py", why: str = "good", how: str = "keep") -> dict:
+    return {"id": check_id, "score": score, "what": what, "where": where,
+            "why": why, "how": how}
+
+
+class TestSingleCallJudge:
+    """The new default path: one ``call_llm_structured`` judge call covers ALL rubric items."""
+
+    def _install_mock(self, monkeypatch, items: list[dict], raw: str | None = None):
+        """Monkeypatch ``call_llm_structured`` in l2_judge to return the given items."""
+        from backend.evaluator.l2_judge import NodeJudgeResponse
+        from backend.evaluator.l2_judge import call_llm_structured as real_call
+        resp = NodeJudgeResponse(items=items)
+        raw_text = raw if raw is not None else resp.model_dump_json()
+
+        def _fake(prompt, schema, **kwargs):
+            assert kwargs.get("role") == "l2_judge"
+            assert kwargs.get("include_raw") is True
+            assert kwargs.get("temperature") == 0.0
+            return resp, raw_text
+
+        monkeypatch.setattr("backend.evaluator.l2_judge.call_llm_structured", _fake)
+        return real_call
+
+    def test_all_pass_near_full(self, rubric_checks, tmp_worktree_with_diff, monkeypatch):
+        items = [_single_call_item(c.id, 9.0) for c in rubric_checks]
+        self._install_mock(monkeypatch, items)
+        result = run_l2(rubric_checks, tmp_worktree_with_diff)
+        assert result.score == pytest.approx(0.9)
+        assert result.items_met == len(rubric_checks)
+        assert all(j.criteria_met for j in result.judgments)
+
+    def test_mixed_scores_weighted(self, mixed_checks, tmp_worktree_with_diff, monkeypatch):
+        items = [
+            _single_call_item("rubric-edge", 9.0),
+            _single_call_item("rubric-clarity", 2.0),
+        ]
+        self._install_mock(monkeypatch, items)
+        result = run_l2(mixed_checks, tmp_worktree_with_diff)
+        # weights 2.0 + 1.0 → (0.9*2 + 0.2*1) / 3 = 2.0/3 = 0.6667
+        assert result.score == pytest.approx(2.0 / 3.0, abs=1e-3)
+        assert result.judgments[0].criteria_met
+        assert not result.judgments[1].criteria_met
+
+    def test_missing_item_hard_fails(self, rubric_checks, tmp_worktree_with_diff, monkeypatch):
+        items = [_single_call_item(rubric_checks[0].id, 9.0)]  # second check missing
+        self._install_mock(monkeypatch, items)
+        result = run_l2(rubric_checks, tmp_worktree_with_diff)
+        assert len(result.judgments) == 2
+        missing = next(j for j in result.judgments if j.check_id == rubric_checks[1].id)
+        assert missing.criteria_met is False
+        assert missing.score == 0.0
+        assert "missing from L2 response" in missing.explanation
+        assert missing.feedback_raw.get("_degraded") is True
+
+    def test_unparseable_judge_raises(self, rubric_checks, tmp_worktree_with_diff, monkeypatch):
+        def _boom(prompt, schema, **kwargs):
+            raise RuntimeError("gateway 502")
+
+        monkeypatch.setattr("backend.evaluator.l2_judge.call_llm_structured", _boom)
+        from backend.evaluator.l2_judge import JudgeUnavailableError
+        with pytest.raises(JudgeUnavailableError):
+            run_l2(rubric_checks, tmp_worktree_with_diff)
+
+    def test_raw_response_captured(self, rubric_checks, tmp_worktree_with_diff, monkeypatch):
+        items = [_single_call_item(c.id, 9.0) for c in rubric_checks]
+        self._install_mock(monkeypatch, items, raw='{"items":[{"id":"x","score":9}]}')
+        result = run_l2(rubric_checks, tmp_worktree_with_diff)
+        assert result.raw_response is not None
+
+    def test_degraded_feedback_flagged(self, rubric_checks, tmp_worktree_with_diff, monkeypatch):
+        items = [_single_call_item(c.id, 9.0, what="", why="", how="") for c in rubric_checks]
+        self._install_mock(monkeypatch, items)
+        result = run_l2(rubric_checks, tmp_worktree_with_diff)
+        assert all(j.feedback_raw.get("_degraded") is True for j in result.judgments)
+
+    def test_llm_call_override_still_legacy(self, rubric_checks, tmp_worktree_with_diff, monkeypatch):
+        """Providing llm_call keeps the legacy per-item path working."""
+        result = run_l2(rubric_checks, tmp_worktree_with_diff, llm_call=_mock_judge_pass)
+        assert result.score == 1.0
+
+
 # ── Chunking Tests ──────────────────────────────────────────────────────────
 
 class TestChunkArtifact:

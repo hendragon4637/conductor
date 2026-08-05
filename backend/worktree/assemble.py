@@ -8,11 +8,29 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+import logging
+
 import psycopg
 from psycopg.rows import dict_row
 
 from contracts.paths import worktree_gitignore_lines
 from backend.adapters.registry import get_adapter
+
+logger = logging.getLogger(__name__)
+
+
+def _deny_references_edit(perm_config: dict[str, Any]) -> None:
+    """Make ``.conductor/references/**`` read-only in the worktree permission file.
+
+    Mutates *perm_config* in place: converts the ``edit`` rule into a
+    pattern map when it is a plain allow so reference files can never be
+    modified by the agent (they are read-only context).
+    """
+    edit = perm_config.get("edit")
+    if edit == "allow":
+        perm_config["edit"] = {"**": "allow", ".conductor/references/**": "deny"}
+    elif isinstance(edit, dict):
+        perm_config["edit"] = {"**": "allow", **edit, ".conductor/references/**": "deny"}
 
 
 def assemble_for_spawn(
@@ -44,12 +62,41 @@ def assemble_for_spawn(
     _db_url = db_url or os.environ.get("DATABASE_URL", "")
 
     # 1. Permission (deterministic)
+    #
+    # git, sudo, and rm -rf are DENIED for spawned worktrees regardless of
+    # auto_approve. Conductor owns version control and worktree lifecycle
+    # (watcher keys off git signatures; finalize_success auto-commits), so a
+    # spawned agent committing/resetting/running sudo/rm -rf would corrupt the
+    # very signals the pipeline relies on. The deny-spike applies even on the
+    # auto_approve path so it is never overridden by an agent profile.
+    member_bash: dict[str, str] = {
+        "*": "allow",
+        "git *": "deny",
+        "sudo *": "deny",
+        "rm -rf *": "deny",
+    }
+    # Project references are copied into the worktree below; when the store
+    # has references for this project, the edit rule is narrowed so the
+    # reference files stay read-only for the agent.
+    try:
+        from backend.planning.references import has_references
+        _refs_exist = has_references(project_id)
+    except Exception:
+        _refs_exist = False
     if auto_approve:
         policy = {"mode": "auto_approve"}
-        perm_config = {"edit": "allow", "bash": "allow", "webfetch": "allow"}
+        perm_config = {"edit": "allow", "bash": member_bash, "webfetch": "allow"}
     else:
         policy = dict(permission_rules or agent_config.get("permission_policy") or {})
         perm_config = dict(policy)
+        if isinstance(perm_config.get("bash"), dict):
+            merged_bash = dict(member_bash)
+            merged_bash.update(perm_config["bash"])
+            perm_config["bash"] = merged_bash
+        else:
+            perm_config["bash"] = member_bash
+    if _refs_exist:
+        _deny_references_edit(perm_config)
     adapter.write_permission(worktree, policy)
 
     if cli.startswith("opencode"):
@@ -73,6 +120,13 @@ def assemble_for_spawn(
         gitignore_path = worktree / ".gitignore"
         if not gitignore_path.exists():
             gitignore_path.write_text(worktree_gitignore_lines())
+
+        # 1c. Project references — copied into .conductor/references/ (gitignored, read-only)
+        try:
+            from backend.planning.references import copy_references
+            copy_references(project_id, worktree)
+        except Exception as exc:
+            logger.warning("Reference copy skipped for %s: %s", project_id, exc)
 
     # 2. Instructions = global + project + session memory, concatenated
     parts: list[str] = []

@@ -9,9 +9,9 @@ from backend.standards.loader import list_standard_menu
 
 def _fake_rows():
     return [
-        ("python-backend", "Python Backend (FastAPI)", "HTTP API server", ["software"], "backend", "served_url"),
-        ("cli-tool", "Python CLI Tool", "Command-line tool", ["software"], ".", "installed_command"),
-        ("design-layout", "Design Layout", "Design deliverables", ["design", "creative"], "design", ""),
+        ("python-backend", "Python Backend (FastAPI)", "HTTP API server", ["software"], "backend", "served_url", {}),
+        ("cli-tool", "Python CLI Tool", "Command-line tool", ["software"], ".", "installed_command", {}),
+        ("design-layout", "Design Layout", "Design deliverables", ["design", "creative"], "design", "", {}),
     ]
 
 
@@ -28,6 +28,9 @@ def _mock_db(monkeypatch):
 
         def fetchall(self):
             return self.rows
+
+        def fetchone(self):
+            return None
 
         def __enter__(self):
             return self

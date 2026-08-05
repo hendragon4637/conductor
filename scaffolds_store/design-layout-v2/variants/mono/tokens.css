@@ -1,0 +1,103 @@
+/* design-layout-v2/variants/mono/tokens.css
+ * Regenerated from DESIGN.md (authoritative per File 01 verdict) — the
+ * upstream open-design bundle's tokens.css declared a black-on-white
+ * monochrome palette that contradicts its own DESIGN.md §2 (Primary
+ * #37F712 matrix green, Surface #E7E5E4 warm gray).
+ * Contrast fix: DESIGN.md Text #78716B on Surface #E7E5E4 is only 3.82:1
+ * (sub-AA), and #37F712 carries dark text (white is 1.45:1).  Text is
+ * darkened to #1c1917 (fg, 12.5:1) / #44403c (fg-2, 6.4:1) while keeping
+ * the DESIGN.md surface + green accent values, so every contrast pair
+ * meets the File 03.2 gate (>= 4.5:1).
+ * Type: §3 Space Mono (primary+display), JetBrains Mono.  Spacing: §4
+ * compact density.  Motion: §7 150–250ms.
+ */
+
+:root {
+  /* ─── Surfaces — §2 Surface #E7E5E4 (warm gray) ──────────────── */
+  --bg: #e7e5e4;
+  --surface: #ffffff;
+  --surface-warm: #d6d3d1;
+
+  /* ─── Foreground — §2 Text, darkened for WCAG AA ─────────────── */
+  --fg: #1c1917;
+  --fg-2: #44403c;
+  --muted: #57534e;
+  --meta: #1c1917;
+
+  /* ─── Border (warm stone) ─────────────────────────────────────── */
+  --border: #a8a29e;
+  --border-soft: #d6d3d1;
+
+  /* ─── Accent — §2 Primary #37F712 (matrix green) ────────────────
+   * --accent-on is dark #111111 (13:1) — white on green fails AA. */
+  --accent: #37f712;
+  --accent-on: #111111;
+  --accent-hover: color-mix(in oklab, var(--accent), black 15%);
+  --accent-active: color-mix(in oklab, var(--accent), black 25%);
+
+  /* ─── Semantic — §2 token foundation colors ───────────────────── */
+  --success: #00a63d;
+  --warn: #fe9900;
+  --danger: #ff2157;
+
+  /* ─── Typography — §3 Space Mono / JetBrains Mono ─────────────── */
+  --font-display: "Space Mono", ui-monospace, Menlo, monospace;
+  --font-body: "Space Mono", ui-monospace, Menlo, monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Type scale — §3 desktop-first expressive scale:
+   * Display 56 / Hero 40 / Section 28 / Feature 20 / Lead 16 /
+   * Body 14 / Nav 12 / Caption 11. */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+  --text-3xl: 40px;
+  --text-4xl: 56px;
+
+  --leading-body: 1.45;
+  --leading-tight: 1.06;
+  --tracking-display: -0.025em;
+
+  /* ─── Spacing — §4 compact density on 4px baseline ────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --section-y-desktop: 80px;
+  --section-y-tablet: 60px;
+  --section-y-phone: 42px;
+
+  /* ─── Radius — slight rounding, pill chips ────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — soft, diffused ──────────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: 0 16px 40px rgba(0, 0, 0, 0.1);
+
+  --focus-ring: 0 0 0 3px rgba(28, 25, 23, 0.2);
+
+  --motion-fast: 150ms;
+  --motion-base: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout — §5 clear blocks, compact density ───────────────── */
+  --container-max: 1280px;
+  --container-gutter-desktop: 36px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+  --measure-hero: 720px;
+  --measure-prose: 560px;
+  --measure-copy: 480px;
+}

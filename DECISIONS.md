@@ -385,3 +385,21 @@ Each service starts via `uv run uvicorn services.<name>.main:app --port <port>` 
 **Rationale**: Keeps the worksystem a regenerable view of merged artifacts rather than a second source of truth. Publish failure must never alter a run's outcome. The snapshot-without-source sandbox gives the guide's isolation while letting the compose file be the agent's adjustment surface.
 
 **Trade-offs**: Worksystem content is lost on a fresh checkout (regenerated on next publish). Assembly composers remain on the legacy generator path and are excluded from publish. The compose-diff signal requires a `docker compose config` parse to normalize semantic deltas.
+
+## 2026-08-05 — References store: per-project read-only context in worktrees
+
+**Status**: ACTIVE
+
+**Context**: Some projects need immutable reference material (docs, conventions, third-party docs) visible to both the meta-planner and execution agents. Reusing the `deps/` mechanism was wrong (deps are system-goal driven and request-scoped). The store-first design avoids any request-schema change and reuses the existing "structured file = valid entity" convention (README.md as validity gate, like SKILL.md / WORKSPACE.md).
+
+**Decision**:
+- **Store-first**: reference repositories live under `references/<project_id>/` (root `REFERENCES_ROOT`, default `/opt/aipc/conductor/references`) with a `README.md` as the validity/context-summary gate. No `GoalRequest` / request-field changes.
+- **Auto-detected by project_id**: `has_references(project_id)` returns True only when the project dir exists AND contains a `README.md`. A missing/invalid store is a silent no-op — no errors, no permission changes.
+- **Copied into worktrees**: `copy_references(project_id, worktree)` copies the store to `.conductor/references/` in both planning worktrees (`create_planning_worktree()`) and execution worktrees (`assemble_for_spawn()`). `.git` is never copied — context, not git history.
+- **Gitignored, never committed**: `.conductor/references/` is appended to the worktree `.gitignore` (`gitignore_references()`). `.conductor/` is already in `INFRA_EXCLUDES` so references never reach watcher signatures, evaluator artifacts, or commits.
+- **Read-only**: when references exist, the worktree permission file denies edits under `.conductor/references/**` (planning opencode.json always; execution `_deny_references_edit()` conditional on `has_references`). Agents read, never modify.
+- **Brief pointer**: `planning_brief()` appends a `REFERENCES (read-only context — do not edit):` block listing each `README.md` relative path when the store was copied.
+
+**Rationale**: Immutable reference context should be available to both planning and execution without schema changes, be excluded from evaluator/git surfaces automatically via existing `.conductor/` exclusions, and degrade gracefully when absent.
+
+**Trade-offs**: References are derived state — a fresh checkout loses them until re-seeded (gitignore-only, never committed). The README gate means a store without a README is invisible. Execution deny-write is conditional on `has_references`, so adding a store later changes permissions for existing projects.

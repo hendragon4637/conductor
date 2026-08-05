@@ -346,3 +346,72 @@ class TestAssembleSystem:
         resp = client.post("/system/sys-abc/assemble", json={})
         assert resp.status_code == 500  # errors trigger 500
         assert "Port conflict" in resp.json().get("error", "")
+
+
+# ── POST /system/{system_id}/projects ───────────────────────────────────────
+
+class TestAddProjectToSystem:
+    @patch("backend.assembly.proposal.propose_project")
+    @patch("psycopg.connect")
+    def test_proposes_project(self, mock_connect, mock_propose, client):
+        """Valid system → propose_project called with spec/quality_intent/depends_on."""
+        mock_cur = MagicMock()
+        mock_cur.fetchone.side_effect = [(1,), (1,)]  # system + depends_on exist
+        mock_conn = mock_connect.return_value.__enter__.return_value
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_propose.return_value = {"id": 7, "status": "proposed"}
+
+        resp = client.post("/system/sys-abc/projects", json={
+            "project_name": "billing",
+            "kind": "service",
+            "goal": "Build billing with enough characters for planning",
+            "spec": "REST API with /invoices endpoint",
+            "quality_intent": "High reliability",
+            "depends_on": ["sys-abc-core"],
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "proposed"
+        assert data["intent_id"] == 7
+        assert data["system_id"] == "sys-abc"
+        mock_propose.assert_called_once_with(
+            system_id="sys-abc",
+            project_name="billing",
+            kind="service",
+            intent_text="Build billing with enough characters for planning",
+            spec="REST API with /invoices endpoint",
+            quality_intent="High reliability",
+            depends_on=["sys-abc-core"],
+        )
+
+    @patch("psycopg.connect")
+    def test_404_on_missing_system(self, mock_connect, client_raw):
+        """Unknown system → 404 before propose_project is reached."""
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = None
+        mock_conn = mock_connect.return_value.__enter__.return_value
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        resp = client_raw.post("/system/nope/projects", json={
+            "project_name": "billing",
+        })
+
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["error"]
+
+    @patch("psycopg.connect")
+    def test_400_on_missing_dependency(self, mock_connect, client_raw):
+        """depends_on referencing a project outside the system → 400."""
+        mock_cur = MagicMock()
+        mock_cur.fetchone.side_effect = [(1,), None]  # system exists, dep missing
+        mock_conn = mock_connect.return_value.__enter__.return_value
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        resp = client_raw.post("/system/sys-abc/projects", json={
+            "project_name": "billing",
+            "depends_on": ["other-system-proj"],
+        })
+
+        assert resp.status_code == 400
+        assert "other-system-proj" in resp.json()["error"]

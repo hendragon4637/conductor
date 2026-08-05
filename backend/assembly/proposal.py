@@ -13,6 +13,9 @@ def propose_project(
     project_name: str,
     kind: str = "service",
     intent_text: str | None = None,
+    spec: str | None = None,
+    quality_intent: str | None = None,
+    depends_on: list[str] | None = None,
     source_ref: str | None = None,
     evidence: list[dict] | None = None,
 ) -> dict[str, Any] | None:
@@ -23,6 +26,9 @@ def propose_project(
         project_name: Human-readable name for the proposed project.
         kind: Project kind (``"service"``, ``"library"``, ``"docs"``, etc.).
         intent_text: Optional goal text.  Auto-generated if omitted.
+        spec: Optional detailed specification for the project's first goal.
+        quality_intent: Optional quality expectation for the first goal.
+        depends_on: Optional project_ids (same system) this project depends on.
         source_ref: Optional lineage pointer (e.g. ``"l4:<run_id>"``).
         evidence: Optional list of evidence dicts.
 
@@ -53,6 +59,12 @@ def propose_project(
         "kind": kind,
         "system_id": system_id,
     }
+    if spec:
+        proposed_project["spec"] = spec
+    if quality_intent:
+        proposed_project["quality_intent"] = quality_intent
+    if depends_on:
+        proposed_project["depends_on"] = list(depends_on)
 
     intent: dict[str, Any] = {
         "origin": "l4_findings",

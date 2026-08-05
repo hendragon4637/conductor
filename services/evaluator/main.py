@@ -160,7 +160,7 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
         7. Emit ``GateEvaluated`` + optionally ``NodeRemediate``.
     """
     from backend.evaluator.gate import GateDecision, evaluate_gate
-    from backend.evaluator.l2_judge import JudgeUnavailableError, run_l2
+    from backend.evaluator.l2_judge import JudgeUnavailableError, L2Result, run_l2
     from backend.evaluator.remediation import (
         AttemptSnapshot,
         best_score,
@@ -266,14 +266,26 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
     node_context_with_chunk = dict(existing_judgments=existing_judgments, best_chunk_idx=best_chunk_idx)
 
     try:
-        decision = evaluate_gate(
-            check_list=check_list,
-            worktree=worktree,
-            l2_fn=lambda checks, wt: run_l2(
+        l2_result: L2Result | None = None
+
+        def _l2_run(checks, wt):
+            nonlocal l2_result
+            l2_result = run_l2(
                 checks, wt, trace_id=ns.langfuse_trace_id,
                 node_context=node_context_with_chunk,
                 existing_judgments=existing_judgments,
-            ),
+            )
+            if l2_result.raw_response:
+                logger.debug(
+                    "L2 raw_response for node_session=%s: %s",
+                    node_session_id, l2_result.raw_response,
+                )
+            return l2_result
+
+        decision = evaluate_gate(
+            check_list=check_list,
+            worktree=worktree,
+            l2_fn=_l2_run,
             threshold=0.7,
             prev_l1_passed_ids=prev_l1_passed_ids,
             has_changes_since_prev=bool(ns.remediation_of),
@@ -304,7 +316,7 @@ def on_node_observed(s, payload: dict) -> None:  # noqa: C901  # noqa: PLR0912
 
     # ── Re-queue handling ────────────────────────────────────────────
     if decision is not None and decision.action == "requeue":
-        _handle_requeue(s, ns, node_session_id, decision)
+        _mark_l2_paused(s, ns, node_session_id, decision)
         return
 
     # ── V8 observability ──────────────────────────────────────────────
@@ -571,6 +583,37 @@ def _handle_requeue(s, ns: Any, node_session_id: str,
     # nothing to re-deliver, so mark_processed is correct.
     if publish_ok:
         raise RequeueHandled()
+
+
+def _mark_l2_paused(s, ns: Any, node_session_id: str,
+                    decision: Any) -> None:
+    """Mark a node_session 'paused' after L2 judge retries are exhausted.
+
+    Called when L2 returns ``partial=True`` (retries exhausted mid-evaluation),
+    replacing the old auto-requeue. Persists completed judgments so a manual
+    resume (re-emitted node.observed) picks up where it left off, then stops
+    the retry loop by NOT publishing a delayed event — no further LLM cost
+    until a human re-delivers the event.
+    """
+    completed = []
+    for item in (decision.l2_feedback or []):
+        if isinstance(item, dict) and item.get("check_id"):
+            completed.append(item)
+    ns.l2_partial_judgments = completed if completed else None
+    ns.l2_best_chunk_idx = getattr(decision, "l2_chunk_idx", 0) or 0
+    ns.gate_outcome = "paused"
+    ns.stop_reason = "l2_retry_exhausted"
+    s.commit()
+
+    logger.info(
+        "L2_PAUSED node_session=%s partial_judgments=%d",
+        node_session_id, len(completed),
+    )
+    print(  # noqa: T201
+        f"[PRINT] Evaluator: L2_PAUSED ns={node_session_id} "
+        f"partial={len(completed)}",
+        flush=True,
+    )
 
 
 def on_ratchet_trigger(s, payload: dict) -> None:

@@ -53,6 +53,20 @@ Notes:
 /opt/aipc/conductor/.memory/obsidian_repomix_export.sh   # export chunked repomix notes into Obsidian
 ```
 
+## References store
+```bash
+# Seed reference material for a project (README.md is the validity gate)
+mkdir -p /opt/aipc/conductor/references/<project_id>
+cp -r /path/to/docs /opt/aipc/conductor/references/<project_id>/
+echo "# <Project> reference context" > /opt/aipc/conductor/references/<project_id>/README.md
+
+# Verify a project's store is active (README gate)
+ls /opt/aipc/conductor/references/<project_id>/README.md
+
+# Check the store is not committed / not in watcher scope (auto via INFRA_EXCLUDES)
+grep -r ".conductor/references" workspace/<project_id>.<run-id>/.gitignore 2>/dev/null
+```
+
 ## Neo4j (product memory)
 ```bash
 docker exec neo4j-aipc cypher-shell -u neo4j -p <pass> "MATCH (n) RETURN n LIMIT 10"  # query graph

@@ -14,6 +14,12 @@
 - Co-locate CSS modules or Tailwind classes
 
 ## Styling
+- Colors, spacing and type come from `src/styles/tokens.css` via `var(--…)`.
+  Never introduce a literal hex/rgb value or an off-scale spacing value.
+- When a design project is a dependency, its tokens were copied to
+  `src/styles/tokens.css` at spawn time (source sha in the project manifest's
+  `token_source`).  Design token changes arrive as a new goal, never a silent
+  re-copy.
 - Tailwind CSS as primary styling approach
 - `cn()` utility for conditional class merging
 - CSS modules for complex component-specific styles

@@ -364,6 +364,12 @@ def _retry_l4_session(
         "paths, and the verdict matches the findings."
     )
     try:
+        # Cancel any running turn first — AionUi rejects POST /messages with
+        # 409 when the conversation is still running. Mirrors executor steering
+        # (services/executor/main.py `_handle_node_steer`) and planner steering
+        # (`_cancel_conv_for_steering`): a watcher-declared-stable L4 session can
+        # still be mid-turn from AionUi's perspective.
+        aionui.cancel_conversation(conv_id)
         aionui.send_message(conv_id, preamble)
     except Exception:
         logger.exception("Failed to send L4 retry preamble for ns=%s", ns.id)

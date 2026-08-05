@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Editorial Serif — reference one-pager</title>
+<link rel="stylesheet" href="tokens.css" />
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-font-smoothing: antialiased; }
+body {
+  font-family: var(--font-body);
+  color: var(--fg-2);
+  background: var(--bg);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+}
+h1, h2, h3 { font-family: var(--font-display); color: var(--fg); line-height: var(--leading-tight); }
+.wrap { max-width: var(--container-max); margin: 0 auto; padding: 0 var(--container-gutter-desktop); }
+.mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+.kicker { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg); margin-bottom: var(--space-2); }
+
+nav { border-bottom: 1px solid var(--border); }
+.nav-inner { display: flex; justify-content: space-between; align-items: center; padding: var(--space-3) 0; }
+.brand { font-family: var(--font-display); font-size: var(--text-lg); font-weight: 700; letter-spacing: -0.5px; color: var(--fg); }
+.nav-links { display: flex; gap: var(--space-3); font-size: var(--text-sm); }
+.nav-links a { color: var(--fg-2); text-decoration: none; }
+.nav-links a:hover { color: var(--fg); text-decoration: underline; }
+
+header { padding: var(--space-8) 0 var(--space-6); }
+header h1 { font-size: var(--text-2xl); letter-spacing: var(--tracking-display); max-width: var(--container-max); }
+.deck { font-size: var(--text-base); line-height: var(--leading-body); color: var(--fg-2); opacity: 0.78; max-width: var(--container-max); margin-top: var(--space-3); }
+.actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
+.btn-primary { background: var(--accent); color: var(--accent-on); border: none; border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); font-family: inherit; font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
+.btn-primary:hover { background: var(--accent-hover); transition: background var(--motion-fast) ease; }
+.btn-secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); font-family: inherit; font-size: var(--text-sm); font-weight: 500; cursor: pointer; }
+.btn-secondary:hover { background: var(--surface-warm); transition: background var(--motion-fast) ease; }
+
+.features { padding: var(--space-6) 0; }
+.features h2 { font-size: var(--text-xl); max-width: 18em; margin-bottom: var(--space-4); }
+.article-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
+article.issue { background: var(--surface); border: 1px solid var(--border); padding: var(--space-4) var(--space-3); }
+article.issue .num { font-size: var(--text-xs); font-weight: 600; color: var(--fg); }
+article.issue h3 { font-size: var(--text-lg); margin: var(--space-2) 0; }
+article.issue p { font-size: var(--text-sm); line-height: var(--leading-body); color: var(--fg-2); }
+.more { text-align: right; margin-top: var(--space-3); }
+.more a { color: var(--fg); text-decoration: none; font-weight: 600; }
+.more a:hover { text-decoration: underline; }
+
+.testimonial { background: var(--surface-warm); padding: var(--space-8) 0; }
+blockquote { font-size: var(--text-lg); line-height: var(--leading-body); font-style: italic; color: var(--fg); }
+blockquote .big { font-size: var(--text-xl); font-weight: 600; }
+.attr { margin-top: var(--space-3); font-size: var(--text-sm); color: var(--fg-2); }
+.attr .name { font-weight: 700; }
+.pill-success { display: inline-block; background: var(--surface-warm); color: var(--success); border: 1px solid var(--success); border-radius: var(--radius-pill); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); font-weight: 600; margin-bottom: var(--space-3); }
+
+footer { padding: var(--space-5) 0; border-top: 1px solid var(--border); }
+.footer-inner { display: flex; justify-content: space-between; align-items: center; }
+.footer-links a { color: var(--fg-2); text-decoration: none; margin-left: var(--space-3); font-size: var(--text-xs); }
+.footer-links a:hover { text-decoration: underline; }
+
+@media (max-width: 720px) {
+  .article-grid { grid-template-columns: 1fr; }
+  article.issue { margin-bottom: var(--space-3); }
+  .footer-inner { flex-direction: column; gap: var(--space-2); }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-inner">
+    <div class="brand">The Quarterly</div>
+    <div class="nav-links">
+      <a href="#issues">New This Week</a>
+      <a href="#story">Field Notes</a>
+      <a href="#archive">Archive</a>
+    </div>
+  </div>
+</nav>
+
+<header class="wrap">
+  <div class="kicker">The Journal of Useful Objects</div>
+  <h1>Stories worth reading slowly.</h1>
+  <p class="deck">Long-form reporting on the tools, people, and ideas shaping how we build — published weekly, read at leisure.</p>
+  <div class="actions">
+    <button class="btn-primary">Subscribe</button>
+    <button class="btn-secondary">Read the latest</button>
+  </div>
+</header>
+
+<section class="features wrap" id="issues">
+  <h2>This week's issue</h2>
+  <div class="article-grid">
+    <article class="issue">
+      <div class="num">Issue 128</div>
+      <h3>The hand-built machine</h3>
+      <p>A profile of the workshop that machines its own parts, one batch at a time.</p>
+    </article>
+    <article class="issue">
+      <div class="num">Field Notes</div>
+      <h3>Notes from the coast</h3>
+      <p>What a year of tidal data taught a small town about preparing for the next storm.</p>
+    </article>
+    <article class="issue">
+      <div class="num">Archive</div>
+      <h3>The long game</h3>
+      <p>Why the most durable software is written by people who expect to maintain it.</p>
+    </article>
+  </div>
+  <p class="more"><a href="#archive">Browse the archive →</a></p>
+</section>
+
+<section class="testimonial">
+  <div class="wrap">
+    <span class="pill-success">Reader supported</span>
+    <blockquote>
+      <span class="big">"The only publication I read cover to cover."</span><br />
+      — subscriber since 2019
+    </blockquote>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap footer-inner">
+    <div class="mono">© 2026 The Quarterly</div>
+    <div class="footer-links">
+      <a href="#issues">About</a>
+      <a href="#story">Contact</a>
+      <a href="#archive">Privacy</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Technical Dense — reference one-pager</title>
+<link rel="stylesheet" href="tokens.css" />
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-font-smoothing: antialiased; }
+body {
+  font-family: var(--font-body);
+  color: var(--fg);
+  line-height: var(--leading-body);
+  background: var(--surface);
+}
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-feature-settings: "kern";
+  line-height: var(--leading-tight);
+}
+.container { max-width: var(--container-max); margin: 0 auto; padding: 0 var(--container-gutter-desktop); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.nav { display: flex; align-items: center; justify-content: space-between; padding: var(--space-6) var(--container-gutter-desktop); }
+.nav-logo { font-family: var(--font-display); font-weight: 700; font-size: var(--text-xl); }
+.nav-links { display: flex; gap: var(--space-8); font-size: var(--text-base); font-weight: 500; }
+.nav-links a { color: var(--fg-2); }
+
+.hero { background: var(--bg); color: var(--fg); }
+.hero-text { padding: var(--section-y-desktop) var(--container-gutter-desktop) var(--space-12); max-width: var(--container-max); margin: 0 auto; }
+.kicker { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 1.3px; color: var(--meta); }
+.hero h1 { font-size: var(--text-4xl); font-weight: 600; margin: var(--space-4) 0 var(--space-6); color: var(--fg); }
+.hero p { font-size: var(--text-lg); line-height: var(--leading-body); color: var(--fg-2); }
+.hero-cta { display: flex; gap: var(--space-4); margin-top: var(--space-8); }
+.btn-dark { background: var(--bg); color: var(--fg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-2); font: 500 var(--text-base) var(--font-body); cursor: pointer; box-shadow: var(--elev-raised); }
+.btn-white { background: var(--accent-on); color: var(--fg-2); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); font: 500 var(--text-base) var(--font-body); cursor: pointer; border: none; }
+
+.features { background: var(--surface); padding: var(--section-y-desktop) 0; }
+.features .kicker { margin-bottom: var(--space-3); }
+.features h2 { font-size: var(--text-3xl); font-weight: 600; margin-bottom: var(--space-12); }
+.feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-6); }
+.card { background: var(--surface-warm); border-radius: var(--radius-md); padding: var(--space-8); border: 1px solid var(--border-soft); box-shadow: var(--elev-raised); }
+.card h3 { font-size: var(--text-xl); font-weight: 700; margin-bottom: var(--space-3); }
+.card p { font-size: var(--text-base); color: var(--meta); }
+
+.testimonial { background: var(--bg); color: var(--fg); }
+.testimonial-inner { padding: var(--section-y-desktop) var(--container-gutter-desktop); max-width: var(--container-max); margin: 0 auto; }
+.testimonial blockquote { font-size: var(--text-2xl); font-weight: 600; line-height: var(--leading-tight); max-width: var(--container-max); }
+.testimonial .attr { margin-top: var(--space-6); font-size: var(--text-base); color: var(--fg-2); }
+.chip { display: inline-block; background: var(--surface); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-base); }
+
+footer { background: var(--surface); padding: var(--space-12) 0; }
+.footer-inner { display: flex; justify-content: space-between; align-items: center; max-width: var(--container-max); margin: 0 auto; padding: 0 var(--container-gutter-desktop); font-size: var(--text-sm); color: var(--meta); }
+.footer-links a { color: var(--meta); margin-left: var(--space-6); }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-logo">Northstar Systems</div>
+  <div class="nav-links">
+    <a href="#features">Platform</a>
+    <a href="#testimonial">Customers</a>
+    <a href="#footer">Contact</a>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="hero-text">
+    <div class="kicker">Infrastructure Platform</div>
+    <h1>Provision. Secure. Operate.</h1>
+    <p>One control plane for infrastructure, security, and application delivery. Declarative workflows with auditable change history across every environment.</p>
+    <div class="hero-cta">
+      <button class="btn-dark">Get started</button>
+      <button class="btn-white">Talk to sales</button>
+    </div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="container">
+    <div class="kicker">Why Northstar</div>
+    <h2>Built for platform teams</h2>
+    <div class="feature-grid">
+      <div class="card">
+        <h3>Declarative config</h3>
+        <p>Infrastructure as code with plan-preview on every change and full rollback support.</p>
+      </div>
+      <div class="card">
+        <h3>Policy built in</h3>
+        <p>Guardrails and compliance checks run before anything reaches production.</p>
+      </div>
+      <div class="card">
+        <h3>Audit trail</h3>
+        <p>Every action recorded with identity, timestamp, and change provenance.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="testimonial" id="testimonial">
+  <div class="testimonial-inner">
+    <div class="chip">Case study</div>
+    <blockquote>We cut provisioning time from weeks to minutes and stopped drift entirely.</blockquote>
+    <p class="attr">Director of Platform Engineering, Fortune 500 retailer</p>
+  </div>
+</section>
+
+<footer id="footer">
+  <div class="footer-inner">
+    <div>© 2026 Northstar Systems</div>
+    <div class="footer-links">
+      <a href="#features">Docs</a>
+      <a href="#testimonial">Support</a>
+      <a href="#footer">Privacy</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

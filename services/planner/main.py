@@ -1150,6 +1150,75 @@ def assemble_system(system_id: str, body: AssembleRequest = AssembleRequest()):
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
+class AddProjectRequest(BaseModel):
+    project_name: str
+    kind: str = "service"
+    goal: str | None = None
+    spec: str | None = None
+    quality_intent: str | None = None
+    depends_on: list[str] = []
+
+
+@app.post("/system/{system_id}/projects")
+def add_project_to_system(system_id: str, body: AddProjectRequest):
+    """Propose a new project + goal inside an existing system.
+
+    Writes a ``proposed_project`` intent (status='proposed') that must be
+    ratified via ``POST /intake/intents/{id}/ratify`` (auto_submit=true) to
+    materialise the project row and submit its first goal through /goal.
+    """
+    import psycopg
+
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return JSONResponse(status_code=500, content={"error": "DATABASE_URL not set"})
+
+    with psycopg.connect(db_url) as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT 1 FROM systems WHERE system_id = %s", (system_id,))
+            if not cur.fetchone():
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"system {system_id} not found"},
+                )
+            for dep in body.depends_on:
+                cur.execute(
+                    "SELECT 1 FROM projects WHERE project_id = %s AND system_id = %s",
+                    (dep, system_id),
+                )
+                if not cur.fetchone():
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": f"depends_on project {dep} not found in system {system_id}",
+                        },
+                    )
+
+    from backend.assembly.proposal import propose_project
+
+    result = propose_project(
+        system_id=system_id,
+        project_name=body.project_name,
+        kind=body.kind,
+        intent_text=body.goal,
+        spec=body.spec,
+        quality_intent=body.quality_intent,
+        depends_on=body.depends_on or None,
+    )
+    if not result:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"failed to propose project {body.project_name} in system {system_id}"},
+        )
+    return {
+        "status": "proposed",
+        "intent_id": result["id"],
+        "system_id": system_id,
+        "project_name": body.project_name,
+        "duplicate": result.get("duplicate", False),
+    }
+
+
 # ── Intake MVP lifecycle endpoints ──────────────────────────────────────────
 
 

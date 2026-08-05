@@ -1,0 +1,128 @@
+/* design-layout-v2/variants/soft-clay/tokens.css
+ * Regenerated from DESIGN.md (authoritative per File 01 verdict) — the
+ * upstream open-design bundle carried a conflicting Inter tokens.css whose
+ * values matched neither this DESIGN.md nor its components.html.
+ * Canvas: §2 Warm Cream #faf9f7.  Text/headings: §2 Clay Black #000000.
+ * Swatches: §2 named palette (matcha/slushie/lemon/ube/pomegranate/
+ * blueberry).  Type: §3 Roobert (display+body), Space Mono.  Spacing: §3
+ * compact density on a 4px baseline.  Radius: §4 12/24/40 (cards/feature/
+ * section).
+ */
+
+:root {
+  /* ─── Surface (warm cream canvas) ───────────────────────────────
+   * §2 Warm Cream #faf9f7 is the page canvas; Pure White #ffffff fills
+   * cards and buttons. --surface-warm aliases the oat-light border tint
+   * #eee9df for tonal separators. */
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --surface-warm: #eee9df;
+
+  /* ─── Foreground ramp ───────────────────────────────────────────
+   * §2 Clay Black #000000 for text/headings; Warm Charcoal #55534e and
+   * Warm Silver #9f9b93 for muted tiers. */
+  --fg: #000000;
+  --fg-2: #333333;
+  --muted: #9f9b93;
+  --meta: #55534e;
+
+  /* ─── Border (warm oat) ───────────────────────────────────────── */
+  --border: #dad4c8;
+  --border-soft: #eee9df;
+
+  /* ─── Accent — Matcha 600 ──────────────────────────────────────
+   * §2 Matcha 600 #078a52 (mid green) is the primary interactive
+   * accent; Matcha 800 #02492a (deep green) is the hover/pressed and
+   * dark-section tone. */
+  --accent: #078a52;
+  --accent-on: #ffffff;
+  --accent-hover: #02492a;
+  --accent-active: color-mix(in oklab, var(--accent), black 12%);
+
+  /* ─── Semantic (swatch-derived) ───────────────────────────────── */
+  --success: #078a52;
+  --warn: #d08a11;
+  --danger: #dc2626;
+
+  /* ─── Swatch palette — §2 named colors ──────────────────────────
+   * DESIGN.md §2 lists the full fruit-swatch set; these are the
+   * members used by this variant's components. */
+  --swatch-matcha-300: #84e7a5;
+  --swatch-matcha-800: #02492a;
+  --swatch-slushie-500: #3bd3fd;
+  --swatch-slushie-800: #0089ad;
+  --swatch-lemon-400: #f8cc65;
+  --swatch-lemon-500: #fbbd41;
+  --swatch-ube-800: #43089f;
+  --swatch-pomegranate-400: #fc7981;
+  --on-accent-muted: rgba(255, 255, 255, 0.9);
+
+  /* ─── Typography ─────────────────────────────────────────────────
+   * §3: primary=Roobert, mono=Space Mono.  Roobert is licensed; Arial
+   * fallback per DESIGN.md §3, with the clay stylistic sets declared on
+   * the body so they apply to any Roobert glyphs that load. */
+  --font-display: "Roobert", Arial, sans-serif;
+  --font-body: "Roobert", Arial, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, Menlo, monospace;
+  --font-features: "ss03", "ss10", "ss11", "ss12";
+
+  /* Type scale — §3 hierarchy:
+   * Display Hero 80 / Section Heading 44 / Card 32 / Feature 20 /
+   * Body 18 / Body Standard 16 / Caption 14 / Small 12. */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 20px;
+  --text-2xl: 32px;
+  --text-3xl: 44px;
+  --text-4xl: 80px;
+
+  --leading-body: 1.5;
+  --leading-tight: 1.1;
+  --tracking-display: -0.032em;
+
+  /* ─── Spacing — §3 compact density on 4px baseline ────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --section-y-desktop: 96px;
+  --section-y-tablet: 64px;
+  --section-y-phone: 48px;
+
+  /* ─── Radius — §4 molded, touchable ───────────────────────────── */
+  --radius-sm: 12px;
+  --radius-md: 24px;
+  --radius-lg: 40px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — §4 soft clay shadow (multi-layer) ───────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(0, 0, 0, 0.1) 0px 1px 1px,
+    rgba(0, 0, 0, 0.04) 0px -1px 1px inset,
+    rgba(0, 0, 0, 0.05) 0px -0.5px 1px;
+
+  --focus-ring: 0 0 0 4px rgba(20, 110, 245, 0.3);
+
+  --motion-fast: 150ms;
+  --motion-base: 250ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout — comfortable reading column ─────────────────────── */
+  --container-max: 1080px;
+  --container-gutter-desktop: 24px;
+  --container-gutter-tablet: 16px;
+  --container-gutter-phone: 12px;
+  /* §5 measure tokens: hero line, prose deck, interlude copy. */
+  --measure-hero: 700px;
+  --measure-prose: 520px;
+  --measure-copy: 540px;
+}

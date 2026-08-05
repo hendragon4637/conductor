@@ -44,8 +44,25 @@ def _orchestrator_permission_profile() -> dict[str, Any]:
     }
 
 
+_MEMBER_BASH_DENY: dict[str, str] = {
+    "*": "allow",
+    "git *": "deny",
+    "sudo *": "deny",
+    "rm -rf *": "deny",
+}
+
+
 def _member_permission_profile(cfg: dict[str, Any]) -> dict[str, Any]:
-    return dict(cfg.get("permission_policy") or {"edit": "allow", "bash": {"*": "allow"}, "webfetch": "allow"})
+    policy = dict(cfg.get("permission_policy") or {})
+    if not policy:
+        return {"edit": "allow", "bash": dict(_MEMBER_BASH_DENY), "webfetch": "allow"}
+    if isinstance(policy.get("bash"), dict):
+        merged_bash = dict(_MEMBER_BASH_DENY)
+        merged_bash.update(policy["bash"])
+        policy["bash"] = merged_bash
+    else:
+        policy["bash"] = dict(_MEMBER_BASH_DENY)
+    return policy
 
 
 def _node_id(node: dict[str, Any]) -> str:
@@ -507,6 +524,7 @@ def spawn_node_team(
             pass
 
     # Materialize dependencies (deps/ directory)
+    _materialized: list[dict[str, str]] = []
     try:
         import psycopg
         from psycopg.rows import dict_row
@@ -521,11 +539,22 @@ def spawn_node_team(
                     _sys_row = _cur.fetchone()
                     if _sys_row and _sys_row["system_id"]:
                         _dep_mode = "artifacts" if _sys_row["kind"] == "assembly" else "source"
-                        wm.materialize_deps(project_id, _sys_row["system_id"], mode=_dep_mode, worktree_path=str(wt))
+                        _materialized = wm.materialize_deps(
+                            project_id, _sys_row["system_id"], mode=_dep_mode, worktree_path=str(wt)
+                        )
         from services.planner.system_goal import record_dep_shas
         record_dep_shas(project_id, session_id)
     except Exception as exc:
         logger.warning("Failed to materialize deps for %s: %s", project_id, exc)
+
+    # ── Design-token handoff (guide 03.3): copy design tokens into a frontend
+    # component when one depends on a design project.  Runs after deps are
+    # materialized so deps/design/work/tokens.css is resolvable.  Never blocks.
+    try:
+        from backend.planning.harness_worktree import handoff_design_tokens
+        handoff_design_tokens(_proj_dir, wt, _materialized)
+    except Exception as exc:
+        logger.warning("Design-token handoff skipped for %s: %s", project_id, exc)
 
     # Inject domain standard scaffolding into worktree (pre-spawn)
     try:

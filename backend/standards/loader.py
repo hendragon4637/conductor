@@ -19,7 +19,7 @@ def get_standard(slug: str) -> dict[str, Any] | None:
     """Load a domain standard by slug."""
     with psycopg.connect(get_db_url()) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT slug, name, kind, conventions_md, tool_manifest, artifact_spec, scaffold_tree, source_repo, version, families"
+            "SELECT slug, name, kind, conventions_md, tool_manifest, artifact_spec, scaffold_tree, source_repo, version, families, variants"
             " FROM domain_standards WHERE slug = %s",
             (slug,),
         )
@@ -37,6 +37,7 @@ def get_standard(slug: str) -> dict[str, Any] | None:
         "source_repo": row[7],
         "version": row[8],
         "families": row[9] if isinstance(row[9], list) else [],
+        "variants": row[10] if isinstance(row[10], dict) else {},
     }
 
 
@@ -97,14 +98,15 @@ def list_standard_menu(exclude_planning: bool = True) -> list[dict[str, Any]]:
 
     Returns:
         List of dicts with keys: slug, name, blurb, families, default_subdir,
-        delivery_form
+        delivery_form, variants
     """
     results = []
     with psycopg.connect(get_db_url()) as conn, conn.cursor() as cur:
         if exclude_planning:
             cur.execute(
                 """SELECT slug, name, selector_blurb, families, default_subdir,
-                          artifact_spec->'delivery_spec'->>'form' AS delivery_form
+                          artifact_spec->'delivery_spec'->>'form' AS delivery_form,
+                          variants
                      FROM domain_standards
                     WHERE kind = 'domain' AND active
                     ORDER BY name"""
@@ -112,7 +114,8 @@ def list_standard_menu(exclude_planning: bool = True) -> list[dict[str, Any]]:
         else:
             cur.execute(
                 """SELECT slug, name, selector_blurb, families, default_subdir,
-                          artifact_spec->'delivery_spec'->>'form' AS delivery_form
+                          artifact_spec->'delivery_spec'->>'form' AS delivery_form,
+                          variants
                      FROM domain_standards
                     WHERE active
                     ORDER BY name"""
@@ -125,5 +128,6 @@ def list_standard_menu(exclude_planning: bool = True) -> list[dict[str, Any]]:
                 "families": row[3] if isinstance(row[3], list) else [],
                 "default_subdir": row[4] or "",
                 "delivery_form": row[5] or "",
+                "variants": row[6] if isinstance(row[6], dict) else {},
             })
     return results
