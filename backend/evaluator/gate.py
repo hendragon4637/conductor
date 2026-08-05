@@ -13,6 +13,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from contracts.paths import READ_ONLY_CONTEXT_PATHS
+
 logger = logging.getLogger(__name__)
 
 
@@ -189,14 +191,14 @@ def evaluate_gate(
         print(f"[GATE] L2 result: score={l2.score:.4f} threshold={threshold} passed={l2_passed} items_met={l2.items_met}/{l2.rubric_count} oversize={l2.oversize}", flush=True)
         l2_fb = [_j_to_dict(j) for j in l2.judgments]
 
-        # Filter out deps/-related feedback (deps/ is read-only)
+        # Filter out read-only context path feedback (deps/, references)
         filtered: list[dict[str, Any]] = []
         for fb in l2_fb:
             where = fb.get("where", "")
             what = fb.get("what", "")
-            if "deps/" in where or "deps/" in what:
+            if any(p in where or p in what for p in READ_ONLY_CONTEXT_PATHS):
                 logger.warning(
-                    "Rejecting L2 feedback referencing deps/ paths: check_id=%s where=%s",
+                    "Rejecting L2 feedback referencing read-only context paths: check_id=%s where=%s",
                     fb.get("check_id", "?"), where,
                 )
                 continue

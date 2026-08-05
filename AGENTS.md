@@ -111,6 +111,7 @@
 | **References store** | Per-project immutable reference material under `references/<project_id>/` (root `REFERENCES_ROOT`, default `/opt/aipc/conductor/references`) with a `README.md` validity gate. Copied into planning + execution worktrees at `.conductor/references/`, gitignored (never committed), and made read-only via a `.conductor/references/**` deny-edit rule. `has_references(project_id)` guards all wiring; a missing/invalid store is a silent no-op. |
 | **References README gate** | A project's references store is valid only when the directory exists AND contains a `README.md` (parallels the SKILL.md / WORKSPACE.md "structured file = valid entity" convention). Without it, `has_references()` returns False and no copy/deny-write/brief-pointer happens. |
 | **REFERENCES brief block** | The conditional section `planning_brief()` appends to the planning brief when references were copied: `REFERENCES (read-only context — do not edit):` followed by each `README.md` relative path under `.conductor/references/`. |
+| **READ_ONLY_CONTEXT_PATHS** | Shared tuple in `contracts/paths.py` listing injected read-only context paths (`deps/`, `.conductor/references/`) that nodes must never modify or depend on. Single source of truth for the plan evaluator's Check 7 (rejects node task/success/deliverables referencing them) and the L2 gate's feedback filter (drops judge feedback mentioning them). |
 
 ## Conventions
 # Conductor Coding Conventions
@@ -371,6 +372,7 @@
 - Read-only enforcement: planning `opencode.json` always carries `"edit": {"**": "allow", ".conductor/references/**": "deny"}`; execution applies `_deny_references_edit()` ONLY when `has_references()` so reference-less projects keep identical permissions.
 - `planning_brief()` appends the conditional `REFERENCES (read-only context — do not edit):` block listing each README.md relative path only when `.conductor/references/` exists in the worktree.
 - New stores are seeded by humans at `references/<project_id>/README.md`; there is no pipeline that creates them.
+- Evaluator guards share one source of truth: `READ_ONLY_CONTEXT_PATHS` in `contracts/paths.py` (contains `deps/` + `.conductor/references/`). `run_plan_l1()` Check 7 rejects nodes whose task/success/deliverables reference these paths, and the L2 gate drops judge feedback mentioning them — both must iterate the shared tuple, never hardcode a path.
 
 ## Key commands
 # Key Commands (Conductor development)

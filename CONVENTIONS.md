@@ -256,3 +256,4 @@
 - Read-only enforcement: planning `opencode.json` always carries `"edit": {"**": "allow", ".conductor/references/**": "deny"}`; execution applies `_deny_references_edit()` ONLY when `has_references()` so reference-less projects keep identical permissions.
 - `planning_brief()` appends the conditional `REFERENCES (read-only context — do not edit):` block listing each README.md relative path only when `.conductor/references/` exists in the worktree.
 - New stores are seeded by humans at `references/<project_id>/README.md`; there is no pipeline that creates them.
+- Evaluator guards share one source of truth: `READ_ONLY_CONTEXT_PATHS` in `contracts/paths.py` (contains `deps/` + `.conductor/references/`). `run_plan_l1()` Check 7 rejects nodes whose task/success/deliverables reference these paths, and the L2 gate drops judge feedback mentioning them — both must iterate the shared tuple, never hardcode a path.

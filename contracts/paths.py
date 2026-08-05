@@ -47,6 +47,14 @@ INFRA_SKIP_PARTS: set[str] = {
     "deps",
 }
 
+# Read-only context paths (deps/ + .conductor/references/) that nodes must
+# never modify or depend on. Shared by plan evaluator Check 7 and the L2 gate
+# feedback filter so both guard the same set.
+READ_ONLY_CONTEXT_PATHS: tuple[str, ...] = (
+    "deps/",
+    ".conductor/references/",
+)
+
 
 def is_infra(path: str) -> bool:
     """Return True if *path* matches an infra exclusion pattern.

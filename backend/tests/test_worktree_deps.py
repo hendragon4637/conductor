@@ -7,7 +7,7 @@ from unittest import mock
 
 import pytest
 
-from contracts.paths import INFRA_EXCLUDES
+from contracts.paths import INFRA_EXCLUDES, READ_ONLY_CONTEXT_PATHS
 
 
 # ── INFRA_EXCLUDES ───────────────────────────────────────────────────────────
@@ -21,10 +21,70 @@ class TestInfraExcludes:
             assert item in INFRA_EXCLUDES, f"{item} should be in INFRA_EXCLUDES"
 
 
-# ── Plan evaluator Check 7 — deps/ rejection ─────────────────────────────────
+# ── READ_ONLY_CONTEXT_PATHS ──────────────────────────────────────────────────
+
+class TestReadOnlyContextPaths:
+    def test_deps_is_readonly(self):
+        assert "deps/" in READ_ONLY_CONTEXT_PATHS
+
+    def test_references_is_readonly(self):
+        assert ".conductor/references/" in READ_ONLY_CONTEXT_PATHS
+
+
+# ── run_plan_l1 Check 7 — real function coverage ─────────────────────────────
+
+class TestRunPlanL1ReadOnly:
+    """Direct calls to run_plan_l1() Check 7 (deps/ + references rejection)."""
+
+    def _node(self, task_text: str, node_id: str = "node-001") -> dict:
+        return {
+            "id": node_id,
+            "members": [{"role": "executor"}],
+            "task": {"text": task_text, "deliverables": []},
+            "success": {"text": "done"},
+            "checks": [{"type": "deterministic", "id": "l1-run-md-present"}],
+            "depends_on": [],
+        }
+
+    def test_plan_l1_passes_clean_node(self):
+        from backend.evaluator.plan_evaluator import run_plan_l1
+
+        result = run_plan_l1([self._node("implement the API in src/")])
+        assert result.passed
+
+    def test_plan_l1_rejects_deps_in_task(self):
+        from backend.evaluator.plan_evaluator import run_plan_l1
+
+        result = run_plan_l1([self._node("modify deps/backend/RUN.md")])
+        assert not result.passed
+        assert any(c["check"] == "node_node-001_no_readonly" for c in result.checks)
+
+    def test_plan_l1_rejects_references_in_task(self):
+        from backend.evaluator.plan_evaluator import run_plan_l1
+
+        result = run_plan_l1([self._node("edit .conductor/references/api-spec.md")])
+        assert not result.passed
+        assert any(c["check"] == "node_node-001_no_readonly" for c in result.checks)
+
+    def test_plan_l1_rejects_references_in_deliverables(self):
+        from backend.evaluator.plan_evaluator import run_plan_l1
+
+        node = self._node("write the deliverable")
+        node["task"]["deliverables"] = [".conductor/references/contract.md"]
+        result = run_plan_l1([node])
+        assert not result.passed
+
+    def test_plan_l1_allows_deps_prefix_lookalike(self):
+        from backend.evaluator.plan_evaluator import run_plan_l1
+
+        result = run_plan_l1([self._node("build the depsgraph module in src/")])
+        assert result.passed
+
+
+# ── Plan evaluator Check 7 — read-only context path rejection ────────────────
 
 class TestPlanEvaluatorCheck7:
-    """Check 7: acceptance criteria may not point into deps/."""
+    """Check 7: acceptance criteria may not point into read-only context paths."""
 
     def _make_node(self, task: str, file_path: str | None = None) -> dict:
         return {
@@ -38,18 +98,23 @@ class TestPlanEvaluatorCheck7:
         """Inline reimplementation of Check 7 logic from plan_evaluator."""
         errors = []
         where = node.get("file_path", "")
-        if where and where.startswith("deps/"):
-            errors.append(f"Criteria path points into deps/: {where}")
+        if where and any(where.startswith(p) for p in READ_ONLY_CONTEXT_PATHS):
+            errors.append(f"Criteria path points into read-only context: {where}")
         for c in node.get("criteria", []):
             c_where = c.get("where", "") if isinstance(c, dict) else ""
-            if c_where.startswith("deps/"):
-                errors.append(f"Criterion points into deps/: {c_where}")
+            if c_where and any(c_where.startswith(p) for p in READ_ONLY_CONTEXT_PATHS):
+                errors.append(f"Criterion points into read-only context: {c_where}")
         return errors
 
     def test_rejects_file_path_in_deps(self):
         node = self._make_node("do work", "deps/backend/RUN.md")
         errors = self._run_check_7(node)
         assert errors, "Expected Check 7 to reject file path under deps/"
+
+    def test_rejects_file_path_in_references(self):
+        node = self._make_node("do work", ".conductor/references/api-spec.md")
+        errors = self._run_check_7(node)
+        assert errors, "Expected Check 7 to reject file path under .conductor/references/"
 
     def test_allows_normal_path(self):
         node = self._make_node("do work", "src/main.py")
@@ -62,6 +127,18 @@ class TestPlanEvaluatorCheck7:
             "file_path": "src/main.py",
             "criteria": [
                 {"where": "deps/shared/contract.md", "what": "should exist"},
+            ],
+            "quality_intent": "",
+        }
+        errors = self._run_check_7(node)
+        assert errors
+
+    def test_rejects_criterion_where_in_references(self):
+        node = {
+            "task": "build",
+            "file_path": "src/main.py",
+            "criteria": [
+                {"where": ".conductor/references/contract.md", "what": "should exist"},
             ],
             "quality_intent": "",
         }
@@ -86,21 +163,30 @@ class TestPlanEvaluatorCheck7:
         assert not errors  # should not crash
 
 
-# ── L2 gate — deps/ diff rejection ─────────────────────────────────────────
+# ── L2 gate — read-only context diff rejection ────────────────────────────
 
 class TestL2GateDepsFilter:
-    """Gate fails any node whose diff touches deps/."""
+    """Gate fails any node whose diff touches read-only context paths."""
 
     def _gate_deps_filter(self, diff_text: str) -> bool:
-        """Reimplementation of the deps/ filter logic from gate.py."""
+        """Reimplementation of the read-only context filter logic from gate.py."""
         for line in diff_text.splitlines():
-            if line.startswith("diff --git") and "a/deps/" in line:
-                return False  # fails gate
+            if line.startswith("diff --git"):
+                for p in READ_ONLY_CONTEXT_PATHS:
+                    if f"a/{p}" in line:
+                        return False  # fails gate
         return True  # passes gate
 
     def test_fails_when_diff_touches_deps(self):
         diff = """
 diff --git a/deps/backend/openapi.json b/deps/backend/openapi.json
+new file mode 100644
+"""
+        assert self._gate_deps_filter(diff) is False
+
+    def test_fails_when_diff_touches_references(self):
+        diff = """
+diff --git a/.conductor/references/api-spec.md b/.conductor/references/api-spec.md
 new file mode 100644
 """
         assert self._gate_deps_filter(diff) is False
