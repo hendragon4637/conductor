@@ -64,11 +64,12 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
             origin_val = getattr(plan, "origin", "human")
             source_ref_val = getattr(plan, "source_ref", None)
             intake_id_val = getattr(plan, "intake_id", None)
+            prompt_version_val = getattr(plan, "prompt_version", "v1")
             cur.execute(
                 """INSERT INTO plans
                    (plan_id, project_id, user_intent, goal, success, dag, ratified, version,
-                    needs_usage_sim, origin, source_ref, intake_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    needs_usage_sim, origin, source_ref, intake_id, prompt_version)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (plan_id) DO UPDATE SET
                      project_id = EXCLUDED.project_id,
                      user_intent = EXCLUDED.user_intent,
@@ -79,7 +80,8 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
                      needs_usage_sim = EXCLUDED.needs_usage_sim,
                      origin = EXCLUDED.origin,
                      source_ref = EXCLUDED.source_ref,
-                     intake_id = EXCLUDED.intake_id
+                     intake_id = EXCLUDED.intake_id,
+                     prompt_version = EXCLUDED.prompt_version
                 """,
                 (
                     plan.plan_id,
@@ -94,6 +96,7 @@ def save_plan(plan: Plan, ratified: bool = False) -> None:
                     origin_val,
                     source_ref_val,
                     intake_id_val,
+                    prompt_version_val,
                 ),
             )
         c.commit()

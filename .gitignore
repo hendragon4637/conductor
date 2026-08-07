@@ -6,6 +6,7 @@ dist/
 build/
 .env
 *.db
+*.db-*
 *.sqlite
 .DS_Store
 .idea/

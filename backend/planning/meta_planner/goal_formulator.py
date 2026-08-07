@@ -180,7 +180,23 @@ Recalled memory context:
 Origin: {origin}
 
 {system_context}
-Now produce the MetaGoal JSON."""
+Now produce the MetaGoal JSON.
+NODE COUNT
+Prefer FEWER, larger nodes. Most goals need 2-3.
+- Scaffolding, project setup, and dependency installation are NOT nodes —
+  the workspace generator handles them before you run.
+- Tests belong to the node whose work they verify, never a separate node.
+- Documentation is a node ONLY if the goal explicitly asks for docs.
+- A node is one coherent unit of work with its own acceptance criteria,
+  not one file or one function.
+"""
+
+# Version of the FORMULATE_PROMPT currently live. Bumped on every ratchet
+# keep; stamped onto every new plan via `plan.prompt_version` so baseline
+# slicing can compare plans created under the same prompt text.
+#   v1            = original prompt (no NODE COUNT block)
+#   v2_fewer_nodes = v1 + NODE COUNT block (ratchet cycle 1, kept 2026-08)
+PROMPT_VERSION = "v2_fewer_nodes"
 
 
 # ── New formulation output schema for multi-component ──────────────
@@ -476,6 +492,39 @@ def _fetch_system_context(project_id: str) -> str:
 # ── Core formulation ──────────────────────────────────────────────
 
 
+def build_standards_menu(valid_standards: list[dict[str, Any]] | None = None) -> str:
+    """Render the standards menu text injected into the formulation prompt.
+
+    Used by ``formulate()`` and by the ratchet service to stamp
+    ``standards_menu_sha`` — the rendered menu is DB-driven, so two
+    experiments at different ``domain_standards`` states are not comparable.
+
+    Args:
+        valid_standards: Standard dicts from ``list_standard_menu()``.
+            If None, loads from DB.
+
+    Returns:
+        The menu lines joined by newlines (slug | delivery_form | blurb [families]).
+    """
+    if valid_standards is None:
+        valid_standards = list_standard_menu()
+
+    standards_lines: list[str] = []
+    for s in valid_standards:
+        blurb = s.get("blurb", "")
+        families = s.get("families", [])
+        delivery_form = s.get("delivery_form", "")
+        families_str = ", ".join(families) if families else ""
+        line = f"  {s['slug']} | {delivery_form or 'n/a'}"
+        if blurb:
+            line += f" | {blurb[:100]}"
+        if families_str:
+            line += f"  [{families_str}]"
+        standards_lines.append(line)
+
+    return "\n".join(standards_lines)
+
+
 def formulate(
     raw_input: str,
     origin: str = "human",
@@ -483,6 +532,8 @@ def formulate(
     prior: str = "",
     valid_standards: list[dict[str, Any]] | None = None,
     project_id: str | None = None,
+    prompt_override: str | None = None,
+    raw_capture: Callable[[str], None] | None = None,
 ) -> MetaGoal:
     """LLM call: raw input → MetaGoal with standard_ids + component validation.
 
@@ -498,6 +549,10 @@ def formulate(
         prior: Optional condensed multi-turn Q&A history.
         valid_standards: List of standard dicts from ``list_standard_menu()``.
             If None, loads from DB.
+        prompt_override: Alternate prompt template. Defaults to
+            ``FORMULATE_PROMPT``; the live path is byte-identical when omitted.
+        raw_capture: Optional callback receiving the last raw LLM response
+            text (for the ratchet service's replay observability).
 
     Returns:
         A ``MetaGoal`` parsed from the LLM response.
@@ -506,22 +561,7 @@ def formulate(
         valid_standards = list_standard_menu()
 
     valid_slugs = [s["slug"] for s in valid_standards]
-
-    # Build standards table for prompt (guide 02.3: standard_id | delivery_form | blurb)
-    standards_lines: list[str] = []
-    for s in valid_standards:
-        blurb = s.get("blurb", "")
-        families = s.get("families", [])
-        delivery_form = s.get("delivery_form", "")
-        families_str = ", ".join(families) if families else ""
-        line = f"  {s['slug']} | {delivery_form or 'n/a'}"
-        if blurb:
-            line += f" | {blurb[:100]}"
-        if families_str:
-            line += f"  [{families_str}]"
-        standards_lines.append(line)
-
-    standards_str = "\n".join(standards_lines)
+    standards_str = build_standards_menu(valid_standards)
 
     # Fetch system context if project belongs to a multi-project system
     sys_context = ""
@@ -530,7 +570,8 @@ def formulate(
         if sys_context:
             sys_context = "--- System context ---\n" + sys_context
 
-    prompt = FORMULATE_PROMPT.format(
+    template = prompt_override or FORMULATE_PROMPT
+    prompt = template.format(
         input=raw_input,
         prior=prior or "(none)",
         memory=recalled or "(none)",
@@ -540,7 +581,12 @@ def formulate(
     )
 
     # Call LLM with the FormulateOutput schema
-    fo = call_llm_structured(prompt, schema=FormulateOutput)
+    fo = call_llm_structured(prompt, schema=FormulateOutput, include_raw=raw_capture is not None)
+    if raw_capture is not None:
+        if isinstance(fo, tuple):
+            fo, raw_text = fo
+            if raw_text:
+                raw_capture(raw_text)
 
     retries = 0
     while retries < MAX_COMPONENT_RETRIES:
@@ -564,7 +610,12 @@ def formulate(
             + "\nstandard_ids MUST be from the menu list (1-3 items, prefer fewer). "
             "estimated_node_count MUST be a positive integer between 1 and 5."
         )
-        fo = call_llm_structured(retry_prompt, schema=FormulateOutput)
+        fo = call_llm_structured(retry_prompt, schema=FormulateOutput, include_raw=raw_capture is not None)
+        if raw_capture is not None:
+            if isinstance(fo, tuple):
+                fo, raw_text = fo
+                if raw_text:
+                    raw_capture(raw_text)
 
     # Build MetaGoal from FormulateOutput
     if not fo.standard_ids:

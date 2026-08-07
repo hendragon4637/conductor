@@ -30,6 +30,9 @@ from shared.models import NodeSession
 
 from services.planner.graph import build_planner_graph
 
+# Stamped on every new plan so future baselines slice by prompt text.
+from backend.planning.meta_planner.goal_formulator import PROMPT_VERSION
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -494,6 +497,7 @@ def _handle_byo_dag(body: GoalRequest, nodes: list[dict]) -> dict:
         dag=dag_nodes,
         version=1,
         needs_usage_sim=False,
+        prompt_version=PROMPT_VERSION,
     ))
 
     return {
@@ -708,6 +712,7 @@ def submit_goal(body: GoalRequest):
         origin=body.origin,
         source_ref=body.source_ref,
         intake_id=body.intake_id,
+        prompt_version=PROMPT_VERSION,
     ))
 
     return {
@@ -836,6 +841,7 @@ def answer_clarification(plan_id: str, body: ClarifyRequest):
         dag=dag_nodes,
         version=1,
         needs_usage_sim=needs_usage_sim,
+        prompt_version=PROMPT_VERSION,
     ))
 
     return {

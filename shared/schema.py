@@ -86,3 +86,4 @@ class Plan(BaseModel):
     origin: str = "human"
     source_ref: str | None = None
     intake_id: int | None = None
+    prompt_version: str = "v1"

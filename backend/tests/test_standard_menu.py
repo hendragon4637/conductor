@@ -107,7 +107,7 @@ class TestFormulatePromptRendering:
     def _capture(self, monkeypatch):
         captured = {}
 
-        def _fake_llm(prompt, schema):
+        def _fake_llm(prompt, schema, **kwargs):
             captured["prompt"] = prompt
             return schema(
                 goal="Build a web app",
