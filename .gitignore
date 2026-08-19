@@ -1,20 +1,51 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
+
+# Node / frontend
 node_modules/
 dist/
 build/
+
+# Environment & secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Databases
 *.db
 *.db-*
 *.sqlite
+*.sqlite3
+
+# OS / editor
 .DS_Store
 .idea/
 .vscode/
-uv.lock.bak
+
+# Conductor runtime state (derived, never committed)
 workspace/
 worksystem/
 references/
 imports/
-LITELLM_BUILD_LOG.md
 skills_store/
+planner_artifacts/
+uv.lock.bak
+
+# Internal agent memory, repomix snapshots, and run analysis
+.memory/
+memory/
+analysis/
+test-results/
+
+# Internal build/run logs and results (not for publication)
+*BUILD_LOG.md
+WHOLESTACK_RESULTS.md
+RATCHET_SVC_LOG.md
+PREFLIGHT.md
+CAPSTONE_RESULTS.md
+tests/e2e_user/checkpoints/

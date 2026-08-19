@@ -59,7 +59,7 @@ LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
 CONDUCTOR_DB_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://aipc:CHANGEME=@127.0.0.1:5432/aipc_conductor?sslmode=disable",
+    "postgresql://aipc:CHANGEME@127.0.0.1:5432/aipc_conductor?sslmode=disable",
 )
 ANALYSIS_DIR = Path("/opt/aipc/conductor/analysis")
 
