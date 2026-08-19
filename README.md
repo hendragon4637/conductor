@@ -34,6 +34,24 @@ Project = git repo   Session = git branch   Task = work unit   Trace = one CLI i
   intake communicate over RabbitMQ via a transactional outbox — reliability,
   no lost events.
 
+
+## Measured results
+
+The evaluator isn't just designed — one component has been calibrated against a
+human-labelled golden set and improved through a controlled experiment.
+
+| | |
+|---|---|
+| Golden set | 29 human-labelled goals (21 calibration / 7 held-out, `md5` split, sha256-pinned) |
+| Baseline | node-estimation 46% · standard-selection 86% · clarification 82% |
+| Bias found | 15 over-estimates, 0 under-estimates — systematic, not random |
+| One bounded mutation | node-estimation 52% → 95% calibration, 71% → 100% held-out, guards held |
+| Honest caveat | 27/29 labels sit in one range, so a constant predictor scores 97% — κ is near zero and the durable result is the bias correction, not the headline |
+| Downstream check | estimate vs actual plan size: Pearson 0.798 |
+
+**Full write-up:** [Calibrating an LLM Planner](https://app.notion.com/p/Calibrating-an-LLM-Planner-A-Ratchet-Experiment-That-Fixed-a-Systematic-Over-Estimation-3c1974f33a9380099b8cef3e0291fac6)
+
+
 ## Repository layout
 
 | Path | Purpose |
