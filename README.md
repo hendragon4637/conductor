@@ -52,6 +52,28 @@ human-labelled golden set and improved through a controlled experiment.
 **Full write-up:** [Calibrating an LLM Planner](https://app.notion.com/p/Calibrating-an-LLM-Planner-A-Ratchet-Experiment-That-Fixed-a-Systematic-Over-Estimation-3c1974f33a9380099b8cef3e0291fac6)
 
 
+## Direction
+
+The next phase decouples the evaluation layer from orchestration.
+
+Planning and execution become abstract — any CLI harness (opencode, Codex,
+Claude Code, OpenHands, domain workbenches) produces artifacts into a git
+worktree. The evaluation layer becomes the product: it takes a worktree plus
+a set of checks, grades them, records human labels, measures agreement
+(Cohen's κ), and optimises the grader against that agreement.
+
+The interface is a single check schema — `what`, `how_verified`, and the kind
+of oracle that applies (deterministic / artifact inspection / usage). A planner
+emits it; a grader consumes it. Neither needs to know about the other.
+
+**Why:** orchestration is converging fast across the open-source ecosystem.
+A grader calibrated to a specific human standard is not, and does not transfer
+between people. That is the part worth building.
+
+**What this repo remains:** the full control-plane implementation, the domain
+standards, and the calibration experiment that produced the result above.
+
+
 ## Repository layout
 
 | Path | Purpose |
