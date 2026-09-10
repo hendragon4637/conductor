@@ -13,6 +13,16 @@ calibration → L4 persona simulation) plus a regression ratchet.
 Project = git repo   Session = git branch   Task = work unit   Trace = one CLI invocation = one "room"
 ```
 
+## In action
+
+Agent session running in AionUi, spawned by Conductor's executor:
+
+![AionUi session](assets/aionui-session.png)
+
+Session steering — guiding a running agent team:
+
+![Steering](assets/steering.png)
+
 ## Highlights
 
 - **Git-native identity.** Projects are repos, sessions are branches, work is
@@ -149,6 +159,16 @@ watcher "done" ──► L1 deterministic checks (shell in worktree)
                      ▼
                   Ratchet experiment (mine → propose → held-out validate)
 ```
+
+## Dependencies
+
+Conductor is a control plane — execution is delegated to external harnesses:
+
+- **AionUi (backend)** — agent orchestration server. Receives tasks from
+  Conductor, spawns agents, and reports back.
+  <https://github.com/iOfficeAI/AionUi/tree/main>
+- **OpenCode harness** — CLI harness used alongside AionUi/Hermes for
+  spawning node teams into isolated worktrees.
 
 ## Getting started
 
